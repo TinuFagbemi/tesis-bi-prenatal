@@ -18,3 +18,32 @@ Validar el entorno técnico, la estructura del repositorio y la conectividad ent
 
 ## Evidencia técnica
 La evidencia del Sprint 0 incluirá capturas de la inserción de datos simulados en la base de datos y su correcta visualización en Power BI.
+
+## Verificación de entorno local — Windows 
+
+Fecha inicial: 2 de agosto de 2026  
+Validación final: 4 de agosto de 2026
+
+Se clonó el repositorio y se verificó el entorno de desarrollo local en Windows 11,
+siguiendo la configuración incorporada originalmente en
+`feature/sprint-4-api-foundation`.
+
+- Se verificaron los requisitos del sistema, incluyendo arquitectura AMD64,
+  memoria disponible y virtualización por hardware.
+- Docker Desktop fue instalado y configurado mediante WSL2.
+- La instalación de Docker se validó correctamente con `docker run hello-world`.
+- Se creó el archivo `.env` local a partir de `.env.example`.
+- Se confirmó que el puerto `5433` estaba disponible para PostgreSQL.
+- Se reconstruyó la imagen y se levantaron los servicios mediante
+  `docker compose up -d --build`.
+- `docker compose ps` confirmó que PostgreSQL se encontraba en estado
+  `healthy` y que la API estaba activa.
+- La documentación interactiva de FastAPI fue verificada en
+  `http://localhost:8000/docs`.
+- El endpoint `GET /health` respondió correctamente con el estado `ok`.
+- Se confirmó mediante `git check-ignore -v .env` que el archivo `.env`
+  está excluido del control de versiones.
+- Se verificó que el repositorio permaneciera limpio después del commit.
+
+No fue necesario modificar la configuración compartida del proyecto ni se
+incluyeron credenciales o archivos locales en Git.
