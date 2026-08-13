@@ -100,6 +100,40 @@ FOREIGN_KEYS_ESPERADAS = {
     ("auditoria_log", "id_usuario"): ("usuario", "id_usuario"),
 }
 
+# Deletion policy of every foreign key. CASCADE belongs to rows that cannot exist
+# without their parent -- contact details, account bridges and the association
+# rows of a pregnancy. Everything clinical, historical or auditable is RESTRICT,
+# so PostgreSQL refuses the delete instead of erasing traceable history.
+# A silent CASCADE<->RESTRICT swap would change what the database allows to
+# disappear, which is why each policy is pinned here rather than merely reviewed.
+ONDELETE_ESPERADOS = {
+    ("asignacion_dispositivo", "id_dispositivo"): "RESTRICT",
+    ("asignacion_dispositivo", "id_embarazo"): "RESTRICT",
+    ("auditoria_log", "id_usuario"): "RESTRICT",
+    ("dispositivo", "id_clinica"): "RESTRICT",
+    ("embarazo", "id_clinica"): "RESTRICT",
+    ("embarazo", "id_paciente"): "RESTRICT",
+    ("embarazo_factor_riesgo", "id_embarazo"): "CASCADE",
+    ("embarazo_factor_riesgo", "id_factor_riesgo"): "RESTRICT",
+    ("lectura_biometrica", "id_semaforo"): "RESTRICT",
+    ("lectura_biometrica", "id_sesion"): "CASCADE",
+    ("lectura_biometrica", "id_tiempo_gest"): "RESTRICT",
+    ("medico", "id_especialidad"): "RESTRICT",
+    ("medico_clinica", "id_clinica"): "CASCADE",
+    ("medico_clinica", "id_medico"): "CASCADE",
+    ("seguimiento_clinico", "id_embarazo"): "RESTRICT",
+    ("seguimiento_clinico", "id_medico"): "RESTRICT",
+    ("sesion_monitoreo", "id_dispositivo"): "RESTRICT",
+    ("sesion_monitoreo", "id_embarazo"): "RESTRICT",
+    ("telefono_medico", "id_medico"): "CASCADE",
+    ("telefono_paciente", "id_paciente"): "CASCADE",
+    ("usuario", "id_rol"): "RESTRICT",
+    ("usuario_medico", "id_medico"): "CASCADE",
+    ("usuario_medico", "id_usuario"): "CASCADE",
+    ("usuario_paciente", "id_paciente"): "CASCADE",
+    ("usuario_paciente", "id_usuario"): "CASCADE",
+}
+
 # Only these columns may be NULL. Anything absent here must be NOT NULL.
 COLUMNAS_NULLABLE_ESPERADAS = {
     "especialidad": set(),
@@ -233,6 +267,36 @@ def test_llaves_foraneas_referencian_el_esquema_operacional():
     for t in Base.metadata.tables.values():
         for fk in t.foreign_keys:
             assert fk.column.table.schema == SCHEMA_OPERACIONAL
+
+
+@pytest.mark.parametrize(
+    ("nombre_tabla", "nombre_columna", "ondelete_esperado"),
+    [
+        (nombre_tabla, nombre_columna, politica)
+        for (nombre_tabla, nombre_columna), politica in sorted(ONDELETE_ESPERADOS.items())
+    ],
+)
+def test_politica_de_borrado_de_cada_llave_foranea(
+    nombre_tabla, nombre_columna, ondelete_esperado
+):
+    """Pin ON DELETE per foreign key so a CASCADE<->RESTRICT swap is a failure."""
+    encontradas = [
+        fk for fk in tabla(nombre_tabla).foreign_keys if fk.parent.name == nombre_columna
+    ]
+
+    assert len(encontradas) == 1
+    assert encontradas[0].ondelete == ondelete_esperado
+
+
+def test_ninguna_llave_foranea_queda_sin_politica_declarada():
+    """Adding or removing a foreign key must force an update of ONDELETE_ESPERADOS."""
+    encontradas = {
+        (t.name, fk.parent.name)
+        for t in Base.metadata.tables.values()
+        for fk in t.foreign_keys
+    }
+
+    assert encontradas == set(ONDELETE_ESPERADOS)
 
 
 def test_auditoria_log_usa_politica_de_borrado_conservadora():
@@ -483,6 +547,28 @@ def test_check_de_tipo_contacto_refleja_los_valores_vigentes(nombre_tabla):
     assert f"tipo_contacto IN ({valores})" in ddl
     assert "'FIJO'" not in ddl
     assert "'EMERGENCIA'" not in ddl
+
+
+@pytest.mark.parametrize("nombre_tabla", ["telefono_paciente", "telefono_medico"])
+def test_tipo_contacto_rechaza_un_valor_invalido_antes_de_llegar_a_postgresql(nombre_tabla):
+    """validate_strings=True guards the bind step, not attribute assignment.
+
+    Setting an unknown string on the mapped attribute stays silent; the type only
+    rejects it while preparing the value for a statement, and it raises
+    LookupError -- not ValueError. Asserting it here keeps the CHECK constraint
+    from being the sole line of defence, and stays offline: the bind processor is
+    built from the PostgreSQL dialect without opening a connection.
+    """
+    procesador = tabla(nombre_tabla).c.tipo_contacto.type.bind_processor(
+        postgresql.dialect()
+    )
+
+    assert procesador is not None
+    # Positive control: a current value must survive the same processor.
+    assert procesador("CELULAR") == "CELULAR"
+
+    with pytest.raises(LookupError):
+        procesador("VALOR_NO_PERMITIDO")
 
 
 @pytest.mark.parametrize("nombre_tabla", ["telefono_paciente", "telefono_medico"])
