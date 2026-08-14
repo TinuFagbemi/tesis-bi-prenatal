@@ -47,3 +47,42 @@ siguiendo la configuración incorporada originalmente en
 
 No fue necesario modificar la configuración compartida del proyecto ni se
 incluyeron credenciales o archivos locales en Git.
+## SCRUM-54 — Definición del dataset simulado
+
+Se estandarizó la muestra técnica utilizada para la validación funcional de FetalAlert.
+
+### Decisiones aprobadas
+
+- Se mantienen 30 gestantes y 30 embarazos simulados con seguimiento longitudinal.
+- Se utilizan 30 dispositivos FetalAlert, uno asignado a cada embarazo durante la simulación.
+- Se utilizan 3 clínicas, con 10 gestantes por clínica.
+- Se utilizan 5 médicos, con 6 embarazos asignados por médico.
+- Se mantienen 2 usuarios administradores para las pruebas de seguridad.
+- El dataset contiene 1,180 registros biométricos y no deberá superar 1,200 registros en esta versión.
+- Se generan 560 registros de frecuencia cardíaca materna y SpO₂.
+- Se generan 620 registros consolidados de movimientos fetales.
+- Una sesión de HR/SpO₂ contiene cinco lecturas biométricas procesadas representativas.
+- Las muestras internas de alta frecuencia capturadas por el MAX30102 no se persisten individualmente.
+- Los movimientos fetales se registran únicamente desde la semana gestacional 20.
+- Las sesiones de movimientos pueden durar aproximadamente entre 60 y 120 minutos y almacenan un conteo consolidado por sesión.
+- No se establece una frecuencia obligatoria de tres sesiones diarias.
+- Los campos biométricos que no aplican al evento se representan mediante NULL y no mediante cero.
+- La distribución técnica de factores de riesgo es de 14 embarazos sin factor, 9 con un factor y 7 con dos factores.
+- La distribución técnica del semáforo es 70 % OK, 25 % WARNING y 5 % ERROR, equivalente a 826, 295 y 59 registros respectivamente.
+- Los factores de riesgo no determinan directamente las alertas biométricas.
+- Algunos registros simulan sincronización diferida para validar el enfoque offline-first.
+- El generador utiliza una semilla fija para garantizar reproducibilidad.
+- El artefacto oficial para generar la muestra es `scripts/generate_mock_data.py`.
+- Los archivos JSON y CSV generados no se versionan en Git y pueden reconstruirse ejecutando el generador.
+- La carga definitiva en PostgreSQL queda pendiente hasta que estén disponibles las migraciones del modelo relacional.
+
+### Revisión técnica final (cierre de SCRUM-54)
+
+- Se confirmó que `backend/app/models/` no contiene modelos SQLAlchemy implementados (solo una `Base` declarativa vacía) y que `backend/alembic/versions/` está vacío en todas las ramas del repositorio. La comparación técnica del generador se realizó contra el diseño relacional conceptual aprobado de la tesis, no contra una implementación física existente.
+- Se completaron en el generador los registros maestros/relacionales que ya estaban previstos en el diseño pero aún no se generaban: `TelefonoPaciente` (40 registros: 30 celulares principales, 10 correos alternos secundarios), `TelefonoMedico` (10 registros: 5 celulares principales, 5 teléfonos fijos secundarios), `Usuario` (37 cuentas: 30 PACIENTE, 5 MEDICO, 2 ADMIN), `UsuarioPaciente` (30 relaciones) y `UsuarioMedico` (5 relaciones).
+- Las tres clínicas simuladas se reubicaron en zonas coherentes con el alcance rural de FetalAlert: CLI-001 (Chiriquí, Renacimiento, Plaza Caisán), CLI-002 (Veraguas, Santa Fe, Calovébora) y CLI-003 (Darién, Chepigana, Camogantí). Nombres y direcciones son completamente sintéticos.
+- La información geográfica pertenece exclusivamente a `Clinica`. No se modela residencia de la paciente (sin provincia, distrito, corregimiento ni dirección residencial en `Paciente`).
+- Los valores del enum `tipo_contacto` (`CELULAR`, `FIJO`, `CORREO_ALTERNO`) son provisionales, definidos a partir del prompt funcional, pendientes de validación contra el modelo físico cuando exista.
+- No se generaron filas de `AuditoriaLog`; se producirán mediante acciones reales durante pruebas funcionales.
+- Las cantidades biométricas aprobadas (732 sesiones, 1,180 lecturas, 560 HR/SpO₂, 620 movimientos, 826/295/59 semáforo) no se modificaron.
+- Los valores físicos de enums, tipos de datos, longitudes, claves primarias/foráneas, restricciones `UNIQUE` y `nullable` deberán volver a validarse cuando estén disponibles los modelos SQLAlchemy y las migraciones Alembic.
