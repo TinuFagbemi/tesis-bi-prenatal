@@ -114,6 +114,10 @@ class AsignacionDispositivo(Base):
 class SesionMonitoreo(Base):
     """A monitoring session captured on the edge node and later synchronised.
 
+    One session is one monitoring event, and the device may emit several
+    processed readings during it, so ``lecturas`` is a collection rather than a
+    single row.
+
     ``fecha_fin`` stays NULL while the session is PENDIENTE or INTERRUMPIDA.
     """
 
@@ -157,18 +161,22 @@ class SesionMonitoreo(Base):
 
     embarazo: Mapped["Embarazo"] = relationship(back_populates="sesiones")
     dispositivo: Mapped["Dispositivo"] = relationship(back_populates="sesiones")
-    lectura: Mapped["LecturaBiometrica | None"] = relationship(
+    lecturas: Mapped[list["LecturaBiometrica"]] = relationship(
         back_populates="sesion",
-        uselist=False,
         passive_deletes=True,
     )
 
 
 class LecturaBiometrica(Base):
-    """One consolidated reading per monitoring session -- never raw sensor samples.
+    """A consolidated reading of a monitoring session -- never raw sensor samples.
 
-    ``hr_valor`` is the *maternal* heart rate, not the fetal one. A session
-    yields exactly one of two shapes, enforced by ``ck_..._forma_valida``:
+    A session groups several of these: the device keeps producing processed
+    readings for as long as the monitoring event lasts, and every one of them
+    belongs to exactly one session. What is stored here is already consolidated,
+    so the raw samples behind each reading never reach this table.
+
+    ``hr_valor`` is the *maternal* heart rate, not the fetal one. A reading
+    carries exactly one of two shapes, enforced by ``ck_..._forma_valida``:
 
     * maternal vitals -- ``hr_valor`` and ``spo2_valor`` present, ``mov_valor`` NULL;
     * fetal movement -- ``mov_valor`` present, ``hr_valor`` and ``spo2_valor`` NULL.
@@ -212,7 +220,6 @@ class LecturaBiometrica(Base):
     id_sesion: Mapped[int] = mapped_column(
         ForeignKey("sesion_monitoreo.id_sesion", ondelete="CASCADE"),
         nullable=False,
-        unique=True,
     )
     id_tiempo_gest: Mapped[int] = mapped_column(
         ForeignKey("tiempo_gestacional.id_tiempo_gest", ondelete="RESTRICT"),
@@ -236,6 +243,6 @@ class LecturaBiometrica(Base):
     spo2_valor: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
     mov_valor: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
 
-    sesion: Mapped["SesionMonitoreo"] = relationship(back_populates="lectura")
+    sesion: Mapped["SesionMonitoreo"] = relationship(back_populates="lecturas")
     tiempo_gestacional: Mapped["TiempoGestacional"] = relationship(back_populates="lecturas")
     semaforo: Mapped["Semaforo"] = relationship(back_populates="lecturas")

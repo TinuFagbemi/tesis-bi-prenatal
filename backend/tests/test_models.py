@@ -377,7 +377,7 @@ def test_delete_orphan_solo_en_telefonos():
         ("Clinica", "medicos_clinica"),
         ("Medico", "clinicas_medico"),
         ("Embarazo", "factores_riesgo"),
-        ("SesionMonitoreo", "lectura"),
+        ("SesionMonitoreo", "lecturas"),
         ("Usuario", "usuario_paciente"),
         ("Usuario", "usuario_medico"),
         ("Usuario", "logs_auditoria"),
@@ -400,22 +400,49 @@ def test_ninguna_relacion_borra_datos_clinicos_al_desasociar():
     assert destructivas == RELACIONES_CON_DELETE_ORPHAN_PERMITIDAS
 
 
-def test_sesion_y_lectura_conservan_la_composicion_uno_a_uno():
-    """Dropping delete-orphan must not turn the 1:1 into a collection."""
-    sesion = app.models.SesionMonitoreo.__mapper__.relationships["lectura"]
+# --------------------------------------------------------------------------
+# 7. Una sesión agrupa varias lecturas consolidadas (1:N)
+# --------------------------------------------------------------------------
+
+
+def test_la_sesion_expone_las_lecturas_como_coleccion():
+    """One monitoring event yields several processed readings, not just one."""
+    sesion = app.models.SesionMonitoreo.__mapper__.relationships["lecturas"]
+
+    assert sesion.uselist is True
+    assert sesion.back_populates == "sesion"
+
+
+def test_cada_lectura_pertenece_a_una_sola_sesion():
+    """The child side stays scalar: a reading never spans two sessions."""
     lectura = app.models.LecturaBiometrica.__mapper__.relationships["sesion"]
 
-    assert sesion.uselist is False
-    assert sesion.back_populates == "sesion"
-    assert lectura.back_populates == "lectura"
+    assert lectura.uselist is False
+    assert lectura.back_populates == "lecturas"
 
 
-# --------------------------------------------------------------------------
-# 7. Lectura consolidada única por sesión
-# --------------------------------------------------------------------------
+def test_una_sesion_admite_varias_lecturas_en_memoria():
+    """Two readings attached to the same session must both stay in the collection.
+
+    Purely in memory: back_populates keeps both sides in sync without a session
+    or a database, which is what SCRUM-54 relies on to hand five representative
+    readings to a single monitoring event.
+    """
+    configure_mappers()
+    sesion = app.models.SesionMonitoreo()
+    primera = app.models.LecturaBiometrica()
+    segunda = app.models.LecturaBiometrica()
+
+    sesion.lecturas.append(primera)
+    sesion.lecturas.append(segunda)
+
+    assert sesion.lecturas == [primera, segunda]
+    assert primera.sesion is sesion
+    assert segunda.sesion is sesion
 
 
-def test_id_sesion_es_unico_en_lectura_biometrica():
+def test_id_sesion_ya_no_es_unico_en_lectura_biometrica():
+    """A UNIQUE(id_sesion) would cap the session at a single reading."""
     lectura = tabla("lectura_biometrica")
     unicos = {
         tuple(c.name for c in constraint.columns)
@@ -423,7 +450,29 @@ def test_id_sesion_es_unico_en_lectura_biometrica():
         if isinstance(constraint, UniqueConstraint)
     }
 
-    assert ("id_sesion",) in unicos
+    assert ("id_sesion",) not in unicos
+    assert unicos == set()
+
+
+def test_el_ddl_de_lectura_biometrica_no_declara_unicidad_de_id_sesion():
+    ddl = str(CreateTable(tabla("lectura_biometrica")).compile(dialect=postgresql.dialect()))
+
+    assert "UNIQUE (id_sesion)" not in ddl
+    assert "uq_lectura_biometrica_id_sesion" not in ddl
+
+
+def test_id_sesion_conserva_su_llave_foranea_y_politica_de_borrado():
+    """Loosening the cardinality must not touch the FK, its target or ON DELETE."""
+    columna = tabla("lectura_biometrica").c.id_sesion
+    fk = next(iter(columna.foreign_keys))
+
+    assert columna.nullable is False
+    assert columna.type.compile(dialect=postgresql.dialect()) == "INTEGER"
+    assert fk.column.table.schema == SCHEMA_OPERACIONAL
+    assert fk.column.table.name == "sesion_monitoreo"
+    assert fk.column.name == "id_sesion"
+    assert fk.ondelete == ONDELETE_ESPERADOS[("lectura_biometrica", "id_sesion")]
+    assert fk.ondelete == "CASCADE"
 
 
 @pytest.mark.parametrize(
