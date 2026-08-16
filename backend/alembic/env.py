@@ -15,6 +15,12 @@ config.set_main_option("sqlalchemy.url", settings.database_url)
 
 target_metadata = Base.metadata
 
+# Every operational table lives in the non-default ``operacional`` schema. Without
+# include_schemas=True Alembic only reflects the connection's default schema, so
+# autogenerate would keep proposing the 22 tables as missing and ``alembic check``
+# would report divergence against a database that is already up to date.
+INCLUDE_SCHEMAS = True
+
 
 def run_migrations_offline() -> None:
     url = config.get_main_option("sqlalchemy.url")
@@ -23,6 +29,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        include_schemas=INCLUDE_SCHEMAS,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -35,7 +42,11 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            include_schemas=INCLUDE_SCHEMAS,
+        )
         with context.begin_transaction():
             context.run_migrations()
 
