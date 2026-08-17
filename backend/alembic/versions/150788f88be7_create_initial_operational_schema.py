@@ -18,6 +18,12 @@ actually applied, even if the application constant is renamed later.
 Enums are stored as VARCHAR + CHECK (``native_enum=False``), so this revision
 issues no CREATE TYPE and needs no ALTER TYPE on downgrade.
 
+``lectura_biometrica.id_sesion`` carries a foreign key but no UNIQUE constraint:
+a monitoring session is one event and the device emits several processed
+readings during it, so the relation is 1:N. The column stays NOT NULL with
+ON DELETE CASCADE, which is what ties every reading to exactly one session and
+removes them all with it.
+
 Revision ID: 150788f88be7
 Revises:
 Create Date: 2026-08-15 23:21:32.032638
@@ -327,7 +333,6 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['id_sesion'], ['operacional.sesion_monitoreo.id_sesion'], name=op.f('fk_lectura_biometrica_id_sesion_sesion_monitoreo'), ondelete='CASCADE'),
     sa.ForeignKeyConstraint(['id_tiempo_gest'], ['operacional.tiempo_gestacional.id_tiempo_gest'], name=op.f('fk_lectura_biometrica_id_tiempo_gest_tiempo_gestacional'), ondelete='RESTRICT'),
     sa.PrimaryKeyConstraint('id_lectura', name=op.f('pk_lectura_biometrica')),
-    sa.UniqueConstraint('id_sesion', name=op.f('uq_lectura_biometrica_id_sesion')),
     schema='operacional'
     )
     op.create_index(op.f('ix_lectura_biometrica_id_semaforo'), 'lectura_biometrica', ['id_semaforo'], unique=False, schema='operacional')

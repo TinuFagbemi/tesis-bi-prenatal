@@ -18,7 +18,7 @@ import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from alembic.script import ScriptDirectory
-from sqlalchemy import Enum
+from sqlalchemy import CheckConstraint, Enum, UniqueConstraint
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateTable
 
@@ -30,6 +30,20 @@ from tests.test_models import ONDELETE_ESPERADOS, TABLAS_ESPERADAS
 # Deploying the operational schema is a single step: SCRUM-52 produces one
 # revision and every later sprint stacks on top of it.
 CANTIDAD_DE_REVISIONES_ESPERADA = 1
+
+# Shape of the deployed schema, pinned so a silent drift in either the models or
+# the revision fails here. UNIQUE went from 18 to 17 when the 1:1 between
+# sesion_monitoreo and lectura_biometrica became 1:N; everything else held.
+CANTIDADES_ESPERADAS = {
+    "tablas": 22,
+    "primary_key": 22,
+    "foreign_key": 25,
+    "on_delete_restrict": 15,
+    "on_delete_cascade": 10,
+    "unique": 17,
+    "check": 29,
+    "indices": 13,
+}
 
 CREATE_TABLE = re.compile(
     rf"CREATE TABLE {SCHEMA_OPERACIONAL}\.(?P<tabla>\w+) \((?P<cuerpo>.*?)\n\)",
@@ -320,11 +334,68 @@ def test_llaves_primarias_compuestas_se_declaran_completas(sql_upgrade):
     )
 
 
-def test_la_lectura_es_unica_por_sesion(sql_upgrade):
-    """The 1:1 between sesion_monitoreo and lectura_biometrica is a UNIQUE key."""
+def test_la_sesion_admite_varias_lecturas(sql_upgrade):
+    """1:N: a UNIQUE on id_sesion would cap the session at a single reading."""
+    assert "UNIQUE (id_sesion)" not in sql_upgrade
+    assert "uq_lectura_biometrica_id_sesion" not in sql_upgrade
+
+
+def test_id_sesion_conserva_su_llave_foranea_en_cascada(sql_upgrade):
+    """Loosening the cardinality must not touch the FK, its target or ON DELETE."""
+    assert "id_sesion INTEGER NOT NULL" in sql_upgrade
     assert (
-        "CONSTRAINT uq_lectura_biometrica_id_sesion UNIQUE (id_sesion)" in sql_upgrade
+        "CONSTRAINT fk_lectura_biometrica_id_sesion_sesion_monitoreo "
+        "FOREIGN KEY(id_sesion) REFERENCES operacional.sesion_monitoreo (id_sesion) "
+        "ON DELETE CASCADE" in sql_upgrade
     )
+
+
+@pytest.mark.parametrize(
+    ("clave", "patron"),
+    [
+        ("tablas", f"CREATE TABLE {SCHEMA_OPERACIONAL}."),
+        ("primary_key", "PRIMARY KEY"),
+        ("foreign_key", f"REFERENCES {SCHEMA_OPERACIONAL}."),
+        ("on_delete_restrict", "ON DELETE RESTRICT"),
+        ("on_delete_cascade", "ON DELETE CASCADE"),
+        ("unique", "UNIQUE ("),
+        ("check", "CHECK ("),
+        ("indices", "CREATE INDEX"),
+    ],
+)
+def test_cantidades_de_la_estructura_desplegada(clave, patron, sql_upgrade):
+    """Pin the shape of the schema so an accidental drop or addition fails loudly."""
+    assert sql_upgrade.count(patron) == CANTIDADES_ESPERADAS[clave]
+
+
+def test_las_cantidades_pinneadas_siguen_a_la_metadata():
+    """CANTIDADES_ESPERADAS must describe Base.metadata, not a stale snapshot."""
+    reales = {
+        "tablas": len(Base.metadata.tables),
+        "primary_key": len(Base.metadata.tables),
+        "foreign_key": sum(len(t.foreign_keys) for t in Base.metadata.tables.values()),
+        "on_delete_restrict": sum(
+            1 for politica in ONDELETE_ESPERADOS.values() if politica == "RESTRICT"
+        ),
+        "on_delete_cascade": sum(
+            1 for politica in ONDELETE_ESPERADOS.values() if politica == "CASCADE"
+        ),
+        "unique": sum(
+            1
+            for t in Base.metadata.tables.values()
+            for c in t.constraints
+            if isinstance(c, UniqueConstraint)
+        ),
+        "check": sum(
+            1
+            for t in Base.metadata.tables.values()
+            for c in t.constraints
+            if isinstance(c, CheckConstraint)
+        ),
+        "indices": sum(len(t.indexes) for t in Base.metadata.tables.values()),
+    }
+
+    assert reales == CANTIDADES_ESPERADAS
 
 
 # --------------------------------------------------------------------------
