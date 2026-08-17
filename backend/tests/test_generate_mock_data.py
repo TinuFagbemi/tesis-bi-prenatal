@@ -138,6 +138,8 @@ def test_distribucion_alertas(dataset):
 
 
 def test_sincronizacion_no_anterior_a_captura(dataset):
+    diferidas = 0
+
     for lectura in dataset["lecturas_biometricas"]:
         captura = datetime.fromisoformat(lectura["fecha_hora_captura"])
         sincronizacion = datetime.fromisoformat(
@@ -145,6 +147,11 @@ def test_sincronizacion_no_anterior_a_captura(dataset):
         )
 
         assert sincronizacion >= captura
+
+        if sincronizacion > captura:
+            diferidas += 1
+
+    assert diferidas > 0
 
 
 def test_telefonos_paciente(dataset):
@@ -494,6 +501,9 @@ def test_dispositivos_coherentes_con_estado_embarazo(dataset):
             assert asignacion["fecha_fin"] is not None
             assert asignacion["fecha_fin"] >= asignacion["fecha_inicio"]
             assert dispositivo["estado"] == "DISPONIBLE"
+
+    codigos = [d["codigo_dispositivo"] for d in dispositivos]
+    assert len(codigos) == len(set(codigos))
 
 
 def test_origen_dato_y_tipo_sesion(dataset):
