@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 from collections import Counter
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
@@ -76,6 +77,10 @@ def test_volumen_y_granularidad(dataset):
         for x in lecturas
     )
 
+    # Se conserva deliberadamente: SQLAlchemy hoy fuerza 1:1 entre
+    # SesionMonitoreo y LecturaBiometrica; esta es la regla funcional
+    # aprobada (5 lecturas por sesión HR/SpO2) hasta que Tinuola
+    # ajuste el modelo a 1:N.
     assert sum(
         1
         for cantidad in conteo_por_sesion.values()
@@ -117,14 +122,29 @@ def test_reglas_biometricas(dataset):
 def test_distribucion_alertas(dataset):
     lecturas = dataset["lecturas_biometricas"]
 
+    codigo_por_id_semaforo = {
+        s["id_semaforo"]: s["codigo_nivel"]
+        for s in dataset["semaforos"]
+    }
+
     alertas = Counter(
-        x["id_semaforo"]
+        codigo_por_id_semaforo[x["id_semaforo"]]
         for x in lecturas
     )
 
-    assert alertas["SEM-OK"] == 826
-    assert alertas["SEM-WARNING"] == 295
-    assert alertas["SEM-ERROR"] == 59
+    assert alertas["OK"] == 826
+    assert alertas["WARNING"] == 295
+    assert alertas["ERROR"] == 59
+
+
+def test_sincronizacion_no_anterior_a_captura(dataset):
+    for lectura in dataset["lecturas_biometricas"]:
+        captura = datetime.fromisoformat(lectura["fecha_hora_captura"])
+        sincronizacion = datetime.fromisoformat(
+            lectura["fecha_hora_sincronizacion"]
+        )
+
+        assert sincronizacion >= captura
 
 
 def test_telefonos_paciente(dataset):
@@ -135,13 +155,13 @@ def test_telefonos_paciente(dataset):
         x["id_paciente"] for x in pacientes
     }
 
-    assert len(telefonos) >= len(pacientes)
+    assert len(telefonos) == 40
 
     for telefono in telefonos:
         assert telefono["id_paciente"] in ids_paciente_validos
         assert telefono["tipo_contacto"] in (
             "CELULAR",
-            "FIJO",
+            "TELEFONO_DOMICILIO",
             "CORREO_ALTERNO",
         )
 
@@ -170,13 +190,13 @@ def test_telefonos_medico(dataset):
         x["id_medico"] for x in medicos
     }
 
-    assert len(telefonos) >= len(medicos)
+    assert len(telefonos) == 10
 
     for telefono in telefonos:
         assert telefono["id_medico"] in ids_medico_validos
         assert telefono["tipo_contacto"] in (
             "CELULAR",
-            "FIJO",
+            "TELEFONO_DOMICILIO",
             "CORREO_ALTERNO",
         )
 
@@ -197,26 +217,37 @@ def test_telefonos_medico(dataset):
     assert len(ids_telefono) == len(set(ids_telefono))
 
 
+def test_telefono_medico_usa_telefono_domicilio_no_fijo(dataset):
+    """AJUSTE 3: "FIJO" fue eliminado del enum TipoContacto real."""
+    tipos_usados = {
+        t["tipo_contacto"] for t in dataset["telefonos_medico"]
+    } | {
+        t["tipo_contacto"] for t in dataset["telefonos_paciente"]
+    }
+
+    assert "FIJO" not in tipos_usados
+    assert "TELEFONO_DOMICILIO" in tipos_usados
+
+
 def test_usuarios_y_roles(dataset):
     usuarios = dataset["usuarios"]
     roles = dataset["roles"]
 
     assert len(usuarios) == 37
 
-    ids_rol_validos = {x["id_rol"] for x in roles}
-    assert ids_rol_validos == {
-        "ROL-001",
-        "ROL-002",
-        "ROL-003",
+    id_rol_por_nombre = {
+        r["nombre_rol"]: r["id_rol"] for r in roles
     }
+
+    assert set(id_rol_por_nombre) == {"ADMIN", "MEDICO", "PACIENTE"}
 
     conteo_por_rol = Counter(
         x["id_rol"] for x in usuarios
     )
 
-    assert conteo_por_rol["ROL-001"] == 2
-    assert conteo_por_rol["ROL-002"] == 5
-    assert conteo_por_rol["ROL-003"] == 30
+    assert conteo_por_rol[id_rol_por_nombre["ADMIN"]] == 2
+    assert conteo_por_rol[id_rol_por_nombre["MEDICO"]] == 5
+    assert conteo_por_rol[id_rol_por_nombre["PACIENTE"]] == 30
 
     ids_usuario = [x["id_usuario"] for x in usuarios]
     assert len(ids_usuario) == len(set(ids_usuario))
@@ -288,7 +319,223 @@ def test_geografia_clinicas(dataset):
     assert combinaciones_generadas == combinaciones_esperadas
 
     for clinica in clinicas:
-        assert clinica["calle"]
+        assert clinica["direccion_fisica"]
+        assert "calle" not in clinica
+
+
+def test_pk_enteras_desde_100_y_unicas(dataset):
+    """AJUSTE 1: PK Integer determinísticas, alineadas con SQLAlchemy."""
+    entidades = [
+        ("clinicas", "id_clinica"),
+        ("especialidades", "id_especialidad"),
+        ("medicos", "id_medico"),
+        ("pacientes", "id_paciente"),
+        ("embarazos", "id_embarazo"),
+        ("seguimiento_clinico", "id_seguimiento"),
+        ("dispositivos", "id_dispositivo"),
+        ("asignacion_dispositivo", "id_asignacion"),
+        ("sesiones_monitoreo", "id_sesion"),
+        ("lecturas_biometricas", "id_lectura"),
+        ("roles", "id_rol"),
+        ("semaforos", "id_semaforo"),
+        ("tiempo_gestacional", "id_tiempo_gest"),
+        ("factores_riesgo", "id_factor_riesgo"),
+        ("telefonos_paciente", "id_telefono_paciente"),
+        ("telefonos_medico", "id_telefono_medico"),
+        ("usuarios", "id_usuario"),
+    ]
+
+    for clave, campo in entidades:
+        valores = [x[campo] for x in dataset[clave]]
+
+        assert all(isinstance(v, int) for v in valores), clave
+        assert len(valores) == len(set(valores)), clave
+        assert min(valores) == gm.ID_BASE, clave
+
+
+def test_fk_enteras_sin_huerfanas(dataset):
+    """AJUSTE 1: las FK apuntan a PK Integer existentes, sin huérfanas."""
+    ids_clinica = {x["id_clinica"] for x in dataset["clinicas"]}
+    ids_paciente = {x["id_paciente"] for x in dataset["pacientes"]}
+    ids_medico = {x["id_medico"] for x in dataset["medicos"]}
+    ids_embarazo = {x["id_embarazo"] for x in dataset["embarazos"]}
+    ids_dispositivo = {
+        x["id_dispositivo"] for x in dataset["dispositivos"]
+    }
+    ids_sesion = {x["id_sesion"] for x in dataset["sesiones_monitoreo"]}
+    ids_tiempo_gest = {
+        x["id_tiempo_gest"] for x in dataset["tiempo_gestacional"]
+    }
+    ids_semaforo = {x["id_semaforo"] for x in dataset["semaforos"]}
+    ids_usuario = {x["id_usuario"] for x in dataset["usuarios"]}
+
+    for embarazo in dataset["embarazos"]:
+        assert isinstance(embarazo["id_paciente"], int)
+        assert embarazo["id_paciente"] in ids_paciente
+        assert embarazo["id_clinica"] in ids_clinica
+
+    for sesion in dataset["sesiones_monitoreo"]:
+        assert sesion["id_embarazo"] in ids_embarazo
+        assert sesion["id_dispositivo"] in ids_dispositivo
+
+    for lectura in dataset["lecturas_biometricas"]:
+        assert lectura["id_sesion"] in ids_sesion
+        assert lectura["id_tiempo_gest"] in ids_tiempo_gest
+        assert lectura["id_semaforo"] in ids_semaforo
+
+    for relacion in dataset["usuario_medico"]:
+        assert relacion["id_usuario"] in ids_usuario
+        assert relacion["id_medico"] in ids_medico
+
+    for relacion in dataset["usuario_paciente"]:
+        assert relacion["id_usuario"] in ids_usuario
+        assert relacion["id_paciente"] in ids_paciente
+
+
+def test_embarazo_factor_riesgo_entidad_y_distribucion(dataset):
+    """AJUSTE 10: la entidad/clave real es embarazo_factor_riesgo."""
+    assert "embarazo_factor_riesgo" in dataset
+    assert "paciente_factor_riesgo" not in dataset
+
+    relaciones = dataset["embarazo_factor_riesgo"]
+    embarazos = dataset["embarazos"]
+
+    conteo = Counter(r["id_embarazo"] for r in relaciones)
+
+    sin_factor = sum(
+        1 for e in embarazos if conteo[e["id_embarazo"]] == 0
+    )
+    un_factor = sum(
+        1 for e in embarazos if conteo[e["id_embarazo"]] == 1
+    )
+    dos_factores = sum(
+        1 for e in embarazos if conteo[e["id_embarazo"]] == 2
+    )
+
+    assert sin_factor == 14
+    assert un_factor == 9
+    assert dos_factores == 7
+
+
+def test_estados_embarazo_y_fecha_cierre(dataset):
+    """AJUSTE 4: distribución 20/8/2 y coherencia de fecha_cierre."""
+    embarazos = dataset["embarazos"]
+
+    conteo = Counter(e["estado_embarazo"] for e in embarazos)
+
+    assert conteo["ACTIVO"] == 20
+    assert conteo["FINALIZADO"] == 8
+    assert conteo["SUSPENDIDO"] == 2
+    assert set(conteo) == {"ACTIVO", "FINALIZADO", "SUSPENDIDO"}
+
+    for embarazo in embarazos:
+        if embarazo["estado_embarazo"] == "ACTIVO":
+            assert embarazo["fecha_cierre"] is None
+        else:
+            assert embarazo["fecha_cierre"] is not None
+            assert date.fromisoformat(
+                embarazo["fecha_cierre"]
+            ) >= date.fromisoformat(embarazo["fecha_inicio"])
+
+
+def test_ninguna_captura_posterior_a_fecha_cierre(dataset):
+    embarazo_por_id = {
+        e["id_embarazo"]: e for e in dataset["embarazos"]
+    }
+    sesion_por_id = {
+        s["id_sesion"]: s for s in dataset["sesiones_monitoreo"]
+    }
+
+    for lectura in dataset["lecturas_biometricas"]:
+        sesion = sesion_por_id[lectura["id_sesion"]]
+        embarazo = embarazo_por_id[sesion["id_embarazo"]]
+
+        if embarazo["fecha_cierre"] is None:
+            continue
+
+        cierre = date.fromisoformat(embarazo["fecha_cierre"])
+        captura = datetime.fromisoformat(
+            lectura["fecha_hora_captura"]
+        ).date()
+
+        assert captura <= cierre
+
+
+def test_dispositivos_coherentes_con_estado_embarazo(dataset):
+    """AJUSTE 5: 20 ASIGNADO / 10 DISPONIBLE, sin MANTENIMIENTO/INACTIVO."""
+    dispositivos = dataset["dispositivos"]
+    embarazos = dataset["embarazos"]
+    asignaciones = dataset["asignacion_dispositivo"]
+
+    conteo_estado = Counter(d["estado"] for d in dispositivos)
+
+    assert conteo_estado["ASIGNADO"] == 20
+    assert conteo_estado["DISPONIBLE"] == 10
+    assert conteo_estado["MANTENIMIENTO"] == 0
+    assert conteo_estado["INACTIVO"] == 0
+
+    dispositivo_por_id = {
+        d["id_dispositivo"]: d for d in dispositivos
+    }
+    asignacion_por_embarazo = {
+        a["id_embarazo"]: a for a in asignaciones
+    }
+
+    for embarazo in embarazos:
+        asignacion = asignacion_por_embarazo[embarazo["id_embarazo"]]
+        dispositivo = dispositivo_por_id[asignacion["id_dispositivo"]]
+
+        if embarazo["estado_embarazo"] == "ACTIVO":
+            assert asignacion["activo"] is True
+            assert asignacion["fecha_fin"] is None
+            assert dispositivo["estado"] == "ASIGNADO"
+        else:
+            assert asignacion["activo"] is False
+            assert asignacion["fecha_fin"] is not None
+            assert asignacion["fecha_fin"] >= asignacion["fecha_inicio"]
+            assert dispositivo["estado"] == "DISPONIBLE"
+
+
+def test_origen_dato_y_tipo_sesion(dataset):
+    """AJUSTE 6 y 7: origen_dato=DISPOSITIVO y tipo_sesion presente."""
+    sesiones = dataset["sesiones_monitoreo"]
+
+    assert all(s["origen_dato"] == "DISPOSITIVO" for s in sesiones)
+    assert all(s["origen_dato"] != "API" for s in sesiones)
+    assert all("tipo_sesion" in s for s in sesiones)
+
+    conteo_tipo = Counter(s["tipo_sesion"] for s in sesiones)
+
+    assert conteo_tipo["SIGNOS_MATERNOS"] == 112
+    assert conteo_tipo["MOVIMIENTOS_FETALES"] == 620
+
+
+def test_datetime_offset_aware(dataset):
+    """AJUSTE 8 y 9: DateTime(timezone=True) en los campos reales."""
+    for sesion in dataset["sesiones_monitoreo"]:
+        assert datetime.fromisoformat(sesion["fecha_inicio"]).tzinfo is not None
+        assert datetime.fromisoformat(sesion["fecha_fin"]).tzinfo is not None
+
+    for lectura in dataset["lecturas_biometricas"]:
+        assert datetime.fromisoformat(
+            lectura["fecha_hora_captura"]
+        ).tzinfo is not None
+        assert datetime.fromisoformat(
+            lectura["fecha_hora_sincronizacion"]
+        ).tzinfo is not None
+
+    for dispositivo in dataset["dispositivos"]:
+        assert datetime.fromisoformat(
+            dispositivo["fecha_registro"]
+        ).tzinfo is not None
+
+    # Las fechas propias de Embarazo son Date en SQLAlchemy real:
+    # deben seguir siendo fechas simples, sin componente de hora.
+    for embarazo in dataset["embarazos"]:
+        assert "T" not in embarazo["fecha_inicio"]
+        assert "T" not in embarazo["fecha_probable_parto"]
+        if embarazo["fecha_cierre"] is not None:
+            assert "T" not in embarazo["fecha_cierre"]
 
 
 def test_generador_reproducible(

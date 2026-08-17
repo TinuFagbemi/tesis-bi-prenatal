@@ -4,7 +4,7 @@ import csv
 import json
 import random
 from collections import Counter, defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +15,13 @@ from typing import Any
 
 SEMILLA = 20260810
 
+# PK enteras determinísticas: cada tabla reinicia su numeración en 100
+# (alineado con Integer autoincrement en SQLAlchemy real; aquí se fija
+# de forma determinística por reproducibilidad e inspección humana).
+ID_BASE = 100
+
+ZONA_HORARIA = timezone.utc
+
 TOTAL_CLINICAS = 3
 TOTAL_MEDICOS = 5
 TOTAL_ADMINISTRADORES = 2
@@ -23,20 +30,12 @@ TOTAL_EMBARAZOS = 30
 TOTAL_DISPOSITIVOS = 30
 
 # HR / SpO2
-SESIONES_BASE_HR_SPO2_POR_GESTANTE = 3
 LECTURAS_POR_SESION_HR_SPO2 = 5
-
-SESIONES_BASE_HR_SPO2 = 90
-REGISTROS_BASE_HR_SPO2 = 450
-
 SESIONES_EXTRA_HR_SPO2 = 22
-REGISTROS_EXTRA_HR_SPO2 = 110
-
 TOTAL_SESIONES_HR_SPO2 = 112
 TOTAL_HR_SPO2 = 560
 
 # Movimientos fetales
-REGISTROS_BASE_MOVIMIENTOS = 600
 REGISTROS_EXTRA_MOVIMIENTOS = 20
 TOTAL_MOVIMIENTOS = 620
 
@@ -78,19 +77,31 @@ PORCENTAJE_SINCRONIZACION_DIFERIDA = 0.25
 UMBRAL_MOVIMIENTOS_SIMULACION = 10
 
 # Usuarios (registros maestros de acceso)
-TOTAL_USUARIOS_ADMIN = TOTAL_ADMINISTRADORES
 TOTAL_USUARIOS_MEDICO = TOTAL_MEDICOS
 TOTAL_USUARIOS_PACIENTE = TOTAL_GESTANTES
 TOTAL_USUARIOS = (
-    TOTAL_USUARIOS_ADMIN
+    TOTAL_ADMINISTRADORES
     + TOTAL_USUARIOS_MEDICO
     + TOTAL_USUARIOS_PACIENTE
 )
 
-# Tipos de contacto permitidos para TelefonoPaciente/TelefonoMedico.
-# Provisional: sin modelo SQLAlchemy disponible aún para validar
-# el enum físico real (ver informe de discrepancias pendientes).
-TIPOS_CONTACTO = ("CELULAR", "FIJO", "CORREO_ALTERNO")
+# Tipos de contacto: alineados con el enum TipoContacto real de SQLAlchemy
+# (backend/app/models/enums.py en origin/feature/sprint-4-sqlalchemy-models).
+# "FIJO" fue eliminado deliberadamente del enum real y no debe usarse.
+TIPOS_CONTACTO = ("CELULAR", "TELEFONO_DOMICILIO", "CORREO_ALTERNO")
+
+# Estados de embarazo: alineados con el enum EstadoEmbarazo real
+# (ACTIVO/FINALIZADO/SUSPENDIDO). La distribución 20/8/2 es una regla
+# técnica de simulación y no representa prevalencia clínica.
+EMBARAZOS_ACTIVOS = 20
+EMBARAZOS_FINALIZADOS = 8
+EMBARAZOS_SUSPENDIDOS = 2
+
+# Estados de dispositivo: alineados con el enum EstadoDispositivo real.
+# Un dispositivo queda ASIGNADO mientras el embarazo sigue ACTIVO, y
+# vuelve a DISPONIBLE cuando el embarazo se cierra (FINALIZADO/SUSPENDIDO).
+DISPOSITIVOS_ASIGNADOS = EMBARAZOS_ACTIVOS
+DISPOSITIVOS_DISPONIBLES = EMBARAZOS_FINALIZADOS + EMBARAZOS_SUSPENDIDOS
 
 
 # ============================================================
@@ -118,12 +129,14 @@ CARPETA_SALIDA = RAIZ_PROYECTO / "data" / "generated"
 # FUNCIONES AUXILIARES
 # ============================================================
 
-def crear_id(
-    prefijo: str,
-    numero: int,
-    ancho: int = 3,
-) -> str:
-    return f"{prefijo}-{numero:0{ancho}d}"
+def id_secuencial(indice_uno_basado: int) -> int:
+    """
+    PK entera determinística dentro de una entidad: 100, 101, 102...
+
+    Cada tabla reinicia su propia numeración porque las PK
+    pertenecen a tablas distintas.
+    """
+    return ID_BASE + indice_uno_basado - 1
 
 
 def fecha_en_semana_gestacional(
@@ -131,14 +144,19 @@ def fecha_en_semana_gestacional(
     semana: int,
 ) -> datetime:
     """
-    Genera una fecha y hora dentro de la semana gestacional indicada.
+    Genera una fecha y hora (UTC, offset-aware) dentro de la
+    semana gestacional indicada.
     """
     dias_adicionales = random.randint(0, 6)
     hora = random.randint(8, 19)
     minuto = random.randint(0, 59)
 
     return (
-        datetime.combine(fecha_inicio, datetime.min.time())
+        datetime.combine(
+            fecha_inicio,
+            datetime.min.time(),
+            tzinfo=ZONA_HORARIA,
+        )
         + timedelta(
             weeks=semana - 1,
             days=dias_adicionales,
@@ -297,6 +315,9 @@ def generar_clinicas() -> list[dict[str, Any]]:
     de FetalAlert (seguimiento prenatal en zonas rurales de
     Panamá). Provincia/distrito/corregimiento/dirección son
     completamente sintéticos.
+
+    ``direccion_fisica`` es el nombre físico real de la columna
+    en SQLAlchemy (antes se generaba como ``calle``).
     """
     ubicaciones = [
         (
@@ -325,19 +346,19 @@ def generar_clinicas() -> list[dict[str, Any]]:
         provincia,
         distrito,
         corregimiento,
-        calle,
+        direccion_fisica,
     ) in enumerate(ubicaciones, start=1):
 
         clinicas.append(
             {
-                "id_clinica": crear_id("CLI", i),
+                "id_clinica": id_secuencial(i),
                 "nombre_clinica":
                     f"Clínica Rural Simulada {i:02d}",
                 "ruc": f"SIM-RUC-{i:03d}",
                 "provincia": provincia,
                 "distrito": distrito,
                 "corregimiento": corregimiento,
-                "calle": calle,
+                "direccion_fisica": direccion_fisica,
             }
         )
 
@@ -347,18 +368,18 @@ def generar_clinicas() -> list[dict[str, Any]]:
 def generar_especialidades() -> list[dict[str, Any]]:
     return [
         {
-            "id_especialidad": "ESP-001",
+            "id_especialidad": id_secuencial(1),
             "nombre_especialidad":
                 "Ginecología y Obstetricia",
         }
     ]
 
 
-def generar_medicos() -> list[dict[str, Any]]:
+def generar_medicos(id_especialidad: int) -> list[dict[str, Any]]:
     return [
         {
-            "id_medico": crear_id("MED", i),
-            "id_especialidad": "ESP-001",
+            "id_medico": id_secuencial(i),
+            "id_especialidad": id_especialidad,
             "primer_nombre": f"Médico{i:02d}",
             "segundo_nombre": None,
             "apellido_paterno": "Simulado",
@@ -370,24 +391,21 @@ def generar_medicos() -> list[dict[str, Any]]:
     ]
 
 
-def generar_medico_clinica() -> list[dict[str, Any]]:
-    relaciones = []
-
-    for i_medico in range(1, TOTAL_MEDICOS + 1):
-        for i_clinica in range(1, TOTAL_CLINICAS + 1):
-            relaciones.append(
-                {
-                    "id_medico":
-                        crear_id("MED", i_medico),
-                    "id_clinica":
-                        crear_id("CLI", i_clinica),
-                    "fecha_inicio": "2025-01-01",
-                    "fecha_final": None,
-                    "activo": True,
-                }
-            )
-
-    return relaciones
+def generar_medico_clinica(
+    medicos: list[dict[str, Any]],
+    clinicas: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "id_medico": medico["id_medico"],
+            "id_clinica": clinica["id_clinica"],
+            "fecha_inicio": "2025-01-01",
+            "fecha_final": None,
+            "activo": True,
+        }
+        for medico in medicos
+        for clinica in clinicas
+    ]
 
 
 def generar_telefonos_medico(
@@ -397,8 +415,9 @@ def generar_telefonos_medico(
     Genera al menos un contacto principal por médico.
 
     Cada médico recibe un contacto CELULAR principal y un
-    contacto FIJO secundario, para ejercitar el escenario de
-    múltiples contactos sin ambigüedad sobre cuál es principal.
+    contacto TELEFONO_DOMICILIO secundario (el enum real ya
+    no admite "FIJO"), para ejercitar el escenario de múltiples
+    contactos sin ambigüedad sobre cuál es principal.
     """
     telefonos = []
     contador = 1
@@ -407,7 +426,7 @@ def generar_telefonos_medico(
         telefonos.append(
             {
                 "id_telefono_medico":
-                    crear_id("TFM", contador),
+                    id_secuencial(contador),
                 "id_medico":
                     medico["id_medico"],
                 "tipo_contacto":
@@ -423,11 +442,11 @@ def generar_telefonos_medico(
         telefonos.append(
             {
                 "id_telefono_medico":
-                    crear_id("TFM", contador),
+                    id_secuencial(contador),
                 "id_medico":
                     medico["id_medico"],
                 "tipo_contacto":
-                    "FIJO",
+                    "TELEFONO_DOMICILIO",
                 "valor_contacto":
                     f"300-{i:04d}",
                 "principal":
@@ -450,7 +469,7 @@ def generar_pacientes() -> list[dict[str, Any]]:
         pacientes.append(
             {
                 "id_paciente":
-                    crear_id("PAC", i),
+                    id_secuencial(i),
                 "cedula":
                     f"SIM-PAC-{i:03d}",
                 "primer_nombre":
@@ -493,7 +512,7 @@ def generar_telefonos_paciente(
         telefonos.append(
             {
                 "id_telefono_paciente":
-                    crear_id("TFP", contador),
+                    id_secuencial(contador),
                 "id_paciente":
                     paciente["id_paciente"],
                 "tipo_contacto":
@@ -510,7 +529,7 @@ def generar_telefonos_paciente(
             telefonos.append(
                 {
                     "id_telefono_paciente":
-                        crear_id("TFP", contador),
+                        id_secuencial(contador),
                     "id_paciente":
                         paciente["id_paciente"],
                     "tipo_contacto":
@@ -530,32 +549,33 @@ def generar_telefonos_paciente(
 def generar_roles() -> list[dict[str, Any]]:
     return [
         {
-            "id_rol": "ROL-001",
+            "id_rol": id_secuencial(1),
             "nombre_rol": "ADMIN",
         },
         {
-            "id_rol": "ROL-002",
+            "id_rol": id_secuencial(2),
             "nombre_rol": "MEDICO",
         },
         {
-            "id_rol": "ROL-003",
+            "id_rol": id_secuencial(3),
             "nombre_rol": "PACIENTE",
         },
     ]
 
 
 def generar_usuarios_administradores(
+    id_rol_admin: int,
 ) -> list[dict[str, Any]]:
     return [
         {
             "id_usuario":
-                crear_id("USR", i),
+                id_secuencial(i),
             "email":
                 f"admin{i:02d}@example.com",
             "password_hash":
                 "HASH_SIMULADO_NO_USAR_EN_PRODUCCION",
             "id_rol":
-                "ROL-001",
+                id_rol_admin,
             "activo":
                 True,
         }
@@ -568,6 +588,7 @@ def generar_usuarios_administradores(
 
 def generar_usuarios_medicos(
     medicos: list[dict[str, Any]],
+    id_rol_medico: int,
 ) -> list[dict[str, Any]]:
     """
     Crea una cuenta de acceso MEDICO por cada médico,
@@ -581,8 +602,7 @@ def generar_usuarios_medicos(
     return [
         {
             "id_usuario":
-                crear_id(
-                    "USR",
+                id_secuencial(
                     indice_inicial + offset,
                 ),
             "email":
@@ -590,7 +610,7 @@ def generar_usuarios_medicos(
             "password_hash":
                 "HASH_SIMULADO_NO_USAR_EN_PRODUCCION",
             "id_rol":
-                "ROL-002",
+                id_rol_medico,
             "activo":
                 True,
         }
@@ -600,6 +620,7 @@ def generar_usuarios_medicos(
 
 def generar_usuarios_pacientes(
     pacientes: list[dict[str, Any]],
+    id_rol_paciente: int,
 ) -> list[dict[str, Any]]:
     """
     Crea una cuenta de acceso PACIENTE por cada gestante,
@@ -617,8 +638,7 @@ def generar_usuarios_pacientes(
     return [
         {
             "id_usuario":
-                crear_id(
-                    "USR",
+                id_secuencial(
                     indice_inicial + offset,
                 ),
             "email":
@@ -626,7 +646,7 @@ def generar_usuarios_pacientes(
             "password_hash":
                 "HASH_SIMULADO_NO_USAR_EN_PRODUCCION",
             "id_rol":
-                "ROL-003",
+                id_rol_paciente,
             "activo":
                 True,
         }
@@ -677,37 +697,47 @@ def generar_usuario_paciente(
 
 
 def generar_semaforos() -> list[dict[str, Any]]:
+    definiciones = [
+        (
+            "OK",
+            "Normal",
+            "#008000",
+            1,
+            "Lectura dentro del rango esperado.",
+        ),
+        (
+            "WARNING",
+            "Precaución",
+            "#FFC107",
+            2,
+            "Lectura que requiere atención.",
+        ),
+        (
+            "ERROR",
+            "Alerta",
+            "#D32F2F",
+            3,
+            "Lectura fuera del rango esperado.",
+        ),
+    ]
+
     return [
         {
-            "id_semaforo": "SEM-OK",
-            "codigo_nivel": "OK",
-            "etiqueta_visual": "Normal",
-            "color_hex": "#008000",
-            "prioridad": 1,
-            "mensaje_app":
-                "Lectura dentro del rango esperado.",
+            "id_semaforo": id_secuencial(i),
+            "codigo_nivel": codigo,
+            "etiqueta_visual": etiqueta,
+            "color_hex": color,
+            "prioridad": prioridad,
+            "mensaje_app": mensaje,
             "version_referencia": "SIM-1.0",
-        },
-        {
-            "id_semaforo": "SEM-WARNING",
-            "codigo_nivel": "WARNING",
-            "etiqueta_visual": "Precaución",
-            "color_hex": "#FFC107",
-            "prioridad": 2,
-            "mensaje_app":
-                "Lectura que requiere atención.",
-            "version_referencia": "SIM-1.0",
-        },
-        {
-            "id_semaforo": "SEM-ERROR",
-            "codigo_nivel": "ERROR",
-            "etiqueta_visual": "Alerta",
-            "color_hex": "#D32F2F",
-            "prioridad": 3,
-            "mensaje_app":
-                "Lectura fuera del rango esperado.",
-            "version_referencia": "SIM-1.0",
-        },
+        }
+        for i, (
+            codigo,
+            etiqueta,
+            color,
+            prioridad,
+            mensaje,
+        ) in enumerate(definiciones, start=1)
     ]
 
 
@@ -721,7 +751,7 @@ def generar_tiempo_gestacional(
         filas.append(
             {
                 "id_tiempo_gest":
-                    f"TG-{semana:02d}",
+                    id_secuencial(semana),
                 "semana_gestacion":
                     semana,
                 "mes_gestacion":
@@ -742,36 +772,26 @@ def generar_tiempo_gestacional(
 
 def generar_factores_riesgo_catalogo(
 ) -> list[dict[str, Any]]:
+    definiciones = [
+        ("HTA", "Hipertensión arterial"),
+        ("DMG", "Diabetes gestacional"),
+        ("OBS", "Obesidad"),
+    ]
+
     return [
         {
-            "id_factor_riesgo": "FR-001",
-            "clave_factor": "HTA",
-            "nombre_factor":
-                "Hipertensión arterial",
+            "id_factor_riesgo": id_secuencial(i),
+            "clave_factor": clave,
+            "nombre_factor": nombre,
             "descripcion":
                 "Factor de riesgo simulado "
                 "para validación técnica.",
             "activo": True,
-        },
-        {
-            "id_factor_riesgo": "FR-002",
-            "clave_factor": "DMG",
-            "nombre_factor":
-                "Diabetes gestacional",
-            "descripcion":
-                "Factor de riesgo simulado "
-                "para validación técnica.",
-            "activo": True,
-        },
-        {
-            "id_factor_riesgo": "FR-003",
-            "clave_factor": "OBS",
-            "nombre_factor": "Obesidad",
-            "descripcion":
-                "Factor de riesgo simulado "
-                "para validación técnica.",
-            "activo": True,
-        },
+        }
+        for i, (clave, nombre) in enumerate(
+            definiciones,
+            start=1,
+        )
     ]
 
 
@@ -779,11 +799,40 @@ def generar_factores_riesgo_catalogo(
 # EMBARAZOS, SEGUIMIENTO Y DISPOSITIVOS
 # ============================================================
 
-def generar_embarazos() -> list[dict[str, Any]]:
+def estado_para_embarazo(indice_uno_basado: int) -> str:
+    """
+    Distribución determinística 20 ACTIVO / 8 FINALIZADO / 2 SUSPENDIDO.
+
+    Regla técnica de simulación aprobada para SCRUM-54; no
+    representa prevalencia clínica ni epidemiológica.
+    """
+    if indice_uno_basado <= EMBARAZOS_ACTIVOS:
+        return "ACTIVO"
+
+    if indice_uno_basado <= EMBARAZOS_ACTIVOS + EMBARAZOS_FINALIZADOS:
+        return "FINALIZADO"
+
+    return "SUSPENDIDO"
+
+
+def generar_embarazos(
+    pacientes: list[dict[str, Any]],
+    clinicas: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    ``fecha_cierre`` se deja en None aquí para todos los embarazos.
+
+    Para los que terminan FINALIZADO/SUSPENDIDO se calcula después,
+    en ``finalizar_fecha_cierre_embarazos``, una vez que existen las
+    sesiones/lecturas reales de cada embarazo (para que el cierre sea
+    coherente con el último evento registrado).
+    """
+    ids_clinica = [c["id_clinica"] for c in clinicas]
+
     embarazos = []
     fecha_base = date(2025, 1, 6)
 
-    for i in range(1, TOTAL_EMBARAZOS + 1):
+    for i, paciente in enumerate(pacientes, start=1):
         fecha_inicio = (
             fecha_base
             + timedelta(days=(i - 1) * 9)
@@ -801,17 +850,14 @@ def generar_embarazos() -> list[dict[str, Any]]:
             numero_gestas - 1,
         )
 
-        id_clinica = crear_id(
-            "CLI",
-            ((i - 1) // 10) + 1,
-        )
+        id_clinica = ids_clinica[(i - 1) // 10]
 
         embarazos.append(
             {
                 "id_embarazo":
-                    crear_id("EMB", i),
+                    id_secuencial(i),
                 "id_paciente":
-                    crear_id("PAC", i),
+                    paciente["id_paciente"],
                 "id_clinica":
                     id_clinica,
                 "numero_gestas":
@@ -823,7 +869,7 @@ def generar_embarazos() -> list[dict[str, Any]]:
                 "fecha_probable_parto":
                     fecha_probable_parto.isoformat(),
                 "estado_embarazo":
-                    "ACTIVO_SIMULADO",
+                    estado_para_embarazo(i),
                 "fecha_cierre":
                     None,
             }
@@ -832,21 +878,12 @@ def generar_embarazos() -> list[dict[str, Any]]:
     return embarazos
 
 
-def medico_para_embarazo(
-    indice_embarazo: int,
-) -> str:
-    return crear_id(
-        "MED",
-        (
-            (indice_embarazo - 1)
-            % TOTAL_MEDICOS
-        ) + 1,
-    )
-
-
 def generar_seguimiento_clinico(
     embarazos: list[dict[str, Any]],
+    medicos: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    ids_medico = [m["id_medico"] for m in medicos]
+
     seguimientos = []
 
     for i, embarazo in enumerate(
@@ -856,11 +893,11 @@ def generar_seguimiento_clinico(
         seguimientos.append(
             {
                 "id_seguimiento":
-                    crear_id("SEG", i),
+                    id_secuencial(i),
                 "id_embarazo":
                     embarazo["id_embarazo"],
                 "id_medico":
-                    medico_para_embarazo(i),
+                    ids_medico[(i - 1) % TOTAL_MEDICOS],
                 "fecha_asignacion":
                     embarazo["fecha_inicio"],
                 "fecha_fin":
@@ -878,23 +915,43 @@ def generar_seguimiento_clinico(
 def generar_dispositivos(
     embarazos: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    """
+    El estado del dispositivo depende del estado final del
+    embarazo (debe llamarse después de
+    ``finalizar_fecha_cierre_embarazos``):
+
+    - Embarazo ACTIVO   -> Dispositivo ASIGNADO
+    - Embarazo FINALIZADO/SUSPENDIDO -> Dispositivo DISPONIBLE
+    """
     dispositivos = []
 
     for i, embarazo in enumerate(
         embarazos,
         start=1,
     ):
-        fecha_registro = (
+        fecha_registro_dia = (
             date.fromisoformat(
                 embarazo["fecha_inicio"]
             )
             - timedelta(days=7)
         )
 
+        fecha_registro = datetime.combine(
+            fecha_registro_dia,
+            datetime.min.time(),
+            tzinfo=ZONA_HORARIA,
+        )
+
+        estado = (
+            "ASIGNADO"
+            if embarazo["estado_embarazo"] == "ACTIVO"
+            else "DISPONIBLE"
+        )
+
         dispositivos.append(
             {
                 "id_dispositivo":
-                    crear_id("DIS", i),
+                    id_secuencial(i),
                 "id_clinica":
                     embarazo["id_clinica"],
                 "codigo_dispositivo":
@@ -904,7 +961,7 @@ def generar_dispositivos(
                 "version_firmware":
                     "SIM-1.0",
                 "estado":
-                    "ACTIVO",
+                    estado,
                 "fecha_registro":
                     fecha_registro.isoformat(),
             }
@@ -916,40 +973,54 @@ def generar_dispositivos(
 def generar_asignaciones_dispositivo(
     embarazos: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    """
+    Debe llamarse después de ``finalizar_fecha_cierre_embarazos``:
+
+    - Embarazo ACTIVO -> asignación sigue vigente
+      (activo=True, fecha_fin=None).
+    - Embarazo FINALIZADO/SUSPENDIDO -> asignación finalizada
+      (activo=False, fecha_fin=Embarazo.fecha_cierre).
+    """
     asignaciones = []
 
     for i, embarazo in enumerate(
         embarazos,
         start=1,
     ):
+        activo = embarazo["estado_embarazo"] == "ACTIVO"
+
         asignaciones.append(
             {
                 "id_asignacion":
-                    crear_id("ASG", i),
+                    id_secuencial(i),
                 "id_dispositivo":
-                    crear_id("DIS", i),
+                    id_secuencial(i),
                 "id_embarazo":
                     embarazo["id_embarazo"],
                 "fecha_inicio":
                     embarazo["fecha_inicio"],
                 "fecha_fin":
-                    None,
+                    None if activo else embarazo["fecha_cierre"],
                 "activo":
-                    True,
+                    activo,
             }
         )
 
     return asignaciones
 
 
-def generar_paciente_factor_riesgo(
+def generar_embarazo_factor_riesgo(
     embarazos: list[dict[str, Any]],
+    factores_riesgo: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """
     Distribución:
     - 14 embarazos sin factores
     - 9 con un factor
     - 7 con dos factores
+
+    Entidad real: ``embarazo_factor_riesgo`` (PK compuesta
+    id_embarazo + id_factor_riesgo).
     """
     ids_embarazo = [
         embarazo["id_embarazo"]
@@ -967,12 +1038,8 @@ def generar_paciente_factor_riesgo(
         RIESGO_SIN_FACTOR + RIESGO_UN_FACTOR:
     ]
 
-    relaciones = []
-
     ids_factores = [
-        "FR-001",
-        "FR-002",
-        "FR-003",
+        f["id_factor_riesgo"] for f in factores_riesgo
     ]
 
     embarazo_por_id = {
@@ -980,14 +1047,23 @@ def generar_paciente_factor_riesgo(
         for e in embarazos
     }
 
-    for id_embarazo in con_un_factor:
-        factor = random.choice(
-            ids_factores
-        )
+    def fecha_diagnostico_para(
+        embarazo: dict[str, Any],
+    ) -> str:
+        return (
+            date.fromisoformat(
+                embarazo["fecha_inicio"]
+            )
+            + timedelta(
+                weeks=random.randint(8, 24)
+            )
+        ).isoformat()
 
-        embarazo = embarazo_por_id[
-            id_embarazo
-        ]
+    relaciones = []
+
+    for id_embarazo in con_un_factor:
+        embarazo = embarazo_por_id[id_embarazo]
+        factor = random.choice(ids_factores)
 
         relaciones.append(
             {
@@ -996,17 +1072,7 @@ def generar_paciente_factor_riesgo(
                 "id_factor_riesgo":
                     factor,
                 "fecha_diagnostico":
-                    (
-                        date.fromisoformat(
-                            embarazo["fecha_inicio"]
-                        )
-                        + timedelta(
-                            weeks=random.randint(
-                                8,
-                                24,
-                            )
-                        )
-                    ).isoformat(),
+                    fecha_diagnostico_para(embarazo),
                 "fecha_fin":
                     None,
                 "activo":
@@ -1018,16 +1084,9 @@ def generar_paciente_factor_riesgo(
         )
 
     for id_embarazo in con_dos_factores:
-        embarazo = embarazo_por_id[
-            id_embarazo
-        ]
+        embarazo = embarazo_por_id[id_embarazo]
 
-        factores = random.sample(
-            ids_factores,
-            2,
-        )
-
-        for factor in factores:
+        for factor in random.sample(ids_factores, 2):
             relaciones.append(
                 {
                     "id_embarazo":
@@ -1035,17 +1094,7 @@ def generar_paciente_factor_riesgo(
                     "id_factor_riesgo":
                         factor,
                     "fecha_diagnostico":
-                        (
-                            date.fromisoformat(
-                                embarazo["fecha_inicio"]
-                            )
-                            + timedelta(
-                                weeks=random.randint(
-                                    8,
-                                    24,
-                                )
-                            )
-                        ).isoformat(),
+                        fecha_diagnostico_para(embarazo),
                     "fecha_fin":
                         None,
                     "activo":
@@ -1063,10 +1112,19 @@ def generar_paciente_factor_riesgo(
 # SESIONES Y LECTURAS
 # ============================================================
 
+# SesionMonitoreo.tipo_sesion es un campo NOT NULL real en
+# SQLAlchemy (backend/app/models/enums.py: TipoSesion). Se deriva
+# de la modalidad interna ya usada por el generador.
+TIPO_SESION_POR_MODALIDAD = {
+    "HR_SPO2": "SIGNOS_MATERNOS",
+    "MOVIMIENTOS": "MOVIMIENTOS_FETALES",
+}
+
+
 def construir_lectura(
     *,
     contador_lectura: int,
-    id_sesion: str,
+    id_sesion: int,
     fecha_inicio_embarazo: date,
     captura: datetime,
     tipo: str,
@@ -1078,15 +1136,11 @@ def construir_lectura(
 
     return {
         "id_lectura":
-            crear_id(
-                "LEC",
-                contador_lectura,
-                4,
-            ),
+            id_secuencial(contador_lectura),
         "id_sesion":
             id_sesion,
         "id_tiempo_gest":
-            f"TG-{semana:02d}",
+            id_secuencial(semana),
         "id_semaforo":
             None,
         "fecha_hora_captura":
@@ -1120,12 +1174,50 @@ def generar_sesiones_y_lecturas(
 
     dispositivo_por_embarazo = {
         embarazo["id_embarazo"]:
-            crear_id("DIS", i)
+            id_secuencial(i)
         for i, embarazo in enumerate(
             embarazos,
             start=1,
         )
     }
+
+    def nueva_sesion(
+        embarazo: dict[str, Any],
+        inicio: datetime,
+        fin: datetime,
+        tipo: str,
+    ) -> int:
+        nonlocal contador_sesion
+
+        id_sesion = id_secuencial(contador_sesion)
+        contador_sesion += 1
+
+        sesiones.append(
+            {
+                "id_sesion":
+                    id_sesion,
+                "id_embarazo":
+                    embarazo["id_embarazo"],
+                "id_dispositivo":
+                    dispositivo_por_embarazo[
+                        embarazo["id_embarazo"]
+                    ],
+                "tipo_sesion":
+                    TIPO_SESION_POR_MODALIDAD[tipo],
+                "fecha_inicio":
+                    inicio.isoformat(),
+                "fecha_fin":
+                    fin.isoformat(),
+                "estado_sesion":
+                    "COMPLETADA",
+                "origen_dato":
+                    "DISPOSITIVO",
+                "_tipo":
+                    tipo,
+            }
+        )
+
+        return id_sesion
 
     # --------------------------------------------------------
     # 1. HR / SpO2 BASE
@@ -1140,14 +1232,6 @@ def generar_sesiones_y_lecturas(
         )
 
         for semana in SEMANAS_HR_BASE:
-            id_sesion = crear_id(
-                "SES",
-                contador_sesion,
-                4,
-            )
-
-            contador_sesion += 1
-
             inicio = fecha_en_semana_gestacional(
                 fecha_inicio,
                 semana,
@@ -1157,27 +1241,8 @@ def generar_sesiones_y_lecturas(
                 minutes=5
             )
 
-            sesiones.append(
-                {
-                    "id_sesion":
-                        id_sesion,
-                    "id_embarazo":
-                        embarazo["id_embarazo"],
-                    "id_dispositivo":
-                        dispositivo_por_embarazo[
-                            embarazo["id_embarazo"]
-                        ],
-                    "fecha_inicio":
-                        inicio.isoformat(),
-                    "fecha_fin":
-                        fin.isoformat(),
-                    "estado_sesion":
-                        "COMPLETADA",
-                    "origen_dato":
-                        "API",
-                    "_tipo":
-                        "HR_SPO2",
-                }
+            id_sesion = nueva_sesion(
+                embarazo, inicio, fin, "HR_SPO2"
             )
 
             for numero_lectura in range(
@@ -1241,14 +1306,6 @@ def generar_sesiones_y_lecturas(
                 39,
             )
 
-            id_sesion = crear_id(
-                "SES",
-                contador_sesion,
-                4,
-            )
-
-            contador_sesion += 1
-
             inicio = fecha_en_semana_gestacional(
                 fecha_inicio,
                 semana,
@@ -1258,27 +1315,8 @@ def generar_sesiones_y_lecturas(
                 minutes=5
             )
 
-            sesiones.append(
-                {
-                    "id_sesion":
-                        id_sesion,
-                    "id_embarazo":
-                        embarazo["id_embarazo"],
-                    "id_dispositivo":
-                        dispositivo_por_embarazo[
-                            embarazo["id_embarazo"]
-                        ],
-                    "fecha_inicio":
-                        inicio.isoformat(),
-                    "fecha_fin":
-                        fin.isoformat(),
-                    "estado_sesion":
-                        "COMPLETADA",
-                    "origen_dato":
-                        "API",
-                    "_tipo":
-                        "HR_SPO2",
-                }
+            id_sesion = nueva_sesion(
+                embarazo, inicio, fin, "HR_SPO2"
             )
 
             for numero_lectura in range(
@@ -1320,14 +1358,6 @@ def generar_sesiones_y_lecturas(
         )
 
         for semana in SEMANAS_MOVIMIENTOS:
-            id_sesion = crear_id(
-                "SES",
-                contador_sesion,
-                4,
-            )
-
-            contador_sesion += 1
-
             inicio = fecha_en_semana_gestacional(
                 fecha_inicio,
                 semana,
@@ -1342,27 +1372,8 @@ def generar_sesiones_y_lecturas(
                 minutes=duracion
             )
 
-            sesiones.append(
-                {
-                    "id_sesion":
-                        id_sesion,
-                    "id_embarazo":
-                        embarazo["id_embarazo"],
-                    "id_dispositivo":
-                        dispositivo_por_embarazo[
-                            embarazo["id_embarazo"]
-                        ],
-                    "fecha_inicio":
-                        inicio.isoformat(),
-                    "fecha_fin":
-                        fin.isoformat(),
-                    "estado_sesion":
-                        "COMPLETADA",
-                    "origen_dato":
-                        "API",
-                    "_tipo":
-                        "MOVIMIENTOS",
-                }
+            id_sesion = nueva_sesion(
+                embarazo, inicio, fin, "MOVIMIENTOS"
             )
 
             lecturas.append(
@@ -1405,14 +1416,6 @@ def generar_sesiones_y_lecturas(
             39,
         )
 
-        id_sesion = crear_id(
-            "SES",
-            contador_sesion,
-            4,
-        )
-
-        contador_sesion += 1
-
         inicio = fecha_en_semana_gestacional(
             fecha_inicio,
             semana,
@@ -1427,27 +1430,8 @@ def generar_sesiones_y_lecturas(
             minutes=duracion
         )
 
-        sesiones.append(
-            {
-                "id_sesion":
-                    id_sesion,
-                "id_embarazo":
-                    embarazo["id_embarazo"],
-                "id_dispositivo":
-                    dispositivo_por_embarazo[
-                        embarazo["id_embarazo"]
-                    ],
-                "fecha_inicio":
-                    inicio.isoformat(),
-                "fecha_fin":
-                    fin.isoformat(),
-                "estado_sesion":
-                    "COMPLETADA",
-                "origen_dato":
-                    "API",
-                "_tipo":
-                    "MOVIMIENTOS",
-            }
+        id_sesion = nueva_sesion(
+            embarazo, inicio, fin, "MOVIMIENTOS"
         )
 
         lecturas.append(
@@ -1477,6 +1461,7 @@ def generar_sesiones_y_lecturas(
 def aplicar_valores_y_alertas(
     sesiones: list[dict[str, Any]],
     lecturas: list[dict[str, Any]],
+    id_semaforo_por_estado: dict[str, int],
 ) -> None:
     """
     Mantiene coherencia dentro de cada sesión.
@@ -1531,12 +1516,6 @@ def aplicar_valores_y_alertas(
     random.shuffle(estados_hr)
     random.shuffle(estados_mov)
 
-    id_semaforo_por_estado = {
-        "OK": "SEM-OK",
-        "WARNING": "SEM-WARNING",
-        "ERROR": "SEM-ERROR",
-    }
-
     for id_sesion, estado in zip(
         sesiones_hr,
         estados_hr,
@@ -1583,6 +1562,71 @@ def aplicar_valores_y_alertas(
         del sesion["_tipo"]
 
 
+def finalizar_fecha_cierre_embarazos(
+    embarazos: list[dict[str, Any]],
+    sesiones: list[dict[str, Any]],
+    lecturas: list[dict[str, Any]],
+) -> None:
+    """
+    Calcula ``fecha_cierre`` para los embarazos FINALIZADO/SUSPENDIDO
+    a partir de la última captura biométrica real de cada embarazo,
+    sin eliminar ni truncar sesiones o lecturas.
+
+    - FINALIZADO: cierre coherente con el fin del seguimiento y con
+      ``fecha_probable_parto`` (se usa la fecha posterior entre ambas).
+    - SUSPENDIDO: cierre inmediatamente posterior al último evento
+      registrado.
+
+    Debe llamarse después de generar y poblar sesiones/lecturas, y
+    antes de generar Dispositivo/AsignacionDispositivo (su estado
+    depende de este resultado).
+    """
+    sesion_por_id = {
+        s["id_sesion"]: s for s in sesiones
+    }
+
+    ultima_captura_por_embarazo: dict[int, date] = {}
+
+    for lectura in lecturas:
+        sesion = sesion_por_id[lectura["id_sesion"]]
+        id_embarazo = sesion["id_embarazo"]
+
+        captura = datetime.fromisoformat(
+            lectura["fecha_hora_captura"]
+        ).date()
+
+        actual = ultima_captura_por_embarazo.get(
+            id_embarazo
+        )
+
+        if actual is None or captura > actual:
+            ultima_captura_por_embarazo[id_embarazo] = captura
+
+    for embarazo in embarazos:
+        estado = embarazo["estado_embarazo"]
+
+        if estado == "ACTIVO":
+            embarazo["fecha_cierre"] = None
+            continue
+
+        ultima_captura = ultima_captura_por_embarazo[
+            embarazo["id_embarazo"]
+        ]
+
+        if estado == "FINALIZADO":
+            fecha_probable_parto = date.fromisoformat(
+                embarazo["fecha_probable_parto"]
+            )
+            fecha_cierre = max(
+                ultima_captura,
+                fecha_probable_parto,
+            )
+        else:  # SUSPENDIDO
+            fecha_cierre = ultima_captura + timedelta(days=1)
+
+        embarazo["fecha_cierre"] = fecha_cierre.isoformat()
+
+
 # ============================================================
 # VALIDACIONES INTERNAS
 # ============================================================
@@ -1590,17 +1634,22 @@ def aplicar_valores_y_alertas(
 def validar_dataset(
     *,
     clinicas,
+    especialidades,
     medicos,
+    medico_clinica,
+    roles,
     usuarios_admin,
-    dispositivos,
+    semaforos,
+    tiempo_gestacional,
     pacientes,
     embarazos,
     seguimientos,
+    factores_riesgo,
+    embarazo_factor_riesgo,
+    dispositivos,
     asignaciones,
-    paciente_factor_riesgo,
     sesiones,
     lecturas,
-    tiempo_gestacional,
     telefonos_paciente,
     telefonos_medico,
     usuarios_medicos,
@@ -1609,27 +1658,375 @@ def validar_dataset(
     usuario_paciente,
 ) -> None:
 
+    # --------------------------------------------------------
+    # Cantidades básicas
+    # --------------------------------------------------------
+
     assert len(clinicas) == TOTAL_CLINICAS
     assert len(medicos) == TOTAL_MEDICOS
-
-    assert (
-        len(usuarios_admin)
-        == TOTAL_ADMINISTRADORES
-    )
-
-    assert (
-        len(dispositivos)
-        == TOTAL_DISPOSITIVOS
-    )
-
+    assert len(usuarios_admin) == TOTAL_ADMINISTRADORES
+    assert len(dispositivos) == TOTAL_DISPOSITIVOS
     assert len(pacientes) == TOTAL_GESTANTES
     assert len(embarazos) == TOTAL_EMBARAZOS
     assert len(seguimientos) == TOTAL_EMBARAZOS
     assert len(asignaciones) == TOTAL_EMBARAZOS
-
     assert len(sesiones) == TOTAL_SESIONES
     assert len(lecturas) == TOTAL_REGISTROS
     assert len(lecturas) <= MAXIMO_REGISTROS
+
+    # --------------------------------------------------------
+    # PK enteras, únicas, desde ID_BASE
+    # --------------------------------------------------------
+
+    entidades_pk_simple = [
+        (clinicas, "id_clinica"),
+        (especialidades, "id_especialidad"),
+        (medicos, "id_medico"),
+        (pacientes, "id_paciente"),
+        (embarazos, "id_embarazo"),
+        (seguimientos, "id_seguimiento"),
+        (dispositivos, "id_dispositivo"),
+        (asignaciones, "id_asignacion"),
+        (sesiones, "id_sesion"),
+        (lecturas, "id_lectura"),
+        (roles, "id_rol"),
+        (semaforos, "id_semaforo"),
+        (tiempo_gestacional, "id_tiempo_gest"),
+        (factores_riesgo, "id_factor_riesgo"),
+        (telefonos_paciente, "id_telefono_paciente"),
+        (telefonos_medico, "id_telefono_medico"),
+    ]
+
+    for coleccion, campo in entidades_pk_simple:
+        valores = [x[campo] for x in coleccion]
+
+        assert all(isinstance(v, int) for v in valores), campo
+        assert len(valores) == len(set(valores)), campo
+        assert min(valores) == ID_BASE, campo
+
+    todos_usuarios = (
+        usuarios_admin
+        + usuarios_medicos
+        + usuarios_pacientes
+    )
+
+    ids_usuario_todos = [
+        x["id_usuario"] for x in todos_usuarios
+    ]
+
+    assert all(isinstance(v, int) for v in ids_usuario_todos)
+    assert len(ids_usuario_todos) == len(set(ids_usuario_todos))
+    assert min(ids_usuario_todos) == ID_BASE
+    assert len(todos_usuarios) == TOTAL_USUARIOS
+
+    # --------------------------------------------------------
+    # FK enteras, sin huérfanas
+    # --------------------------------------------------------
+
+    ids_clinica_validos = {x["id_clinica"] for x in clinicas}
+    ids_medico_validos = {x["id_medico"] for x in medicos}
+    ids_paciente_validos = {x["id_paciente"] for x in pacientes}
+    ids_embarazo_validos = {x["id_embarazo"] for x in embarazos}
+    ids_dispositivo_validos = {x["id_dispositivo"] for x in dispositivos}
+    ids_sesion_validos = {x["id_sesion"] for x in sesiones}
+    ids_tiempo_gest_validos = {x["id_tiempo_gest"] for x in tiempo_gestacional}
+    ids_semaforo_validos = {x["id_semaforo"] for x in semaforos}
+    ids_factor_riesgo_validos = {x["id_factor_riesgo"] for x in factores_riesgo}
+    ids_especialidad_validos = {x["id_especialidad"] for x in especialidades}
+    ids_rol_validos = {x["id_rol"] for x in roles}
+    ids_usuario_validos = set(ids_usuario_todos)
+
+    for medico in medicos:
+        assert isinstance(medico["id_especialidad"], int)
+        assert medico["id_especialidad"] in ids_especialidad_validos
+
+    for relacion in medico_clinica:
+        assert relacion["id_medico"] in ids_medico_validos
+        assert relacion["id_clinica"] in ids_clinica_validos
+
+    for embarazo in embarazos:
+        assert embarazo["id_paciente"] in ids_paciente_validos
+        assert embarazo["id_clinica"] in ids_clinica_validos
+
+    for seguimiento in seguimientos:
+        assert seguimiento["id_embarazo"] in ids_embarazo_validos
+        assert seguimiento["id_medico"] in ids_medico_validos
+
+    for relacion in embarazo_factor_riesgo:
+        assert relacion["id_embarazo"] in ids_embarazo_validos
+        assert relacion["id_factor_riesgo"] in ids_factor_riesgo_validos
+
+    for dispositivo in dispositivos:
+        assert dispositivo["id_clinica"] in ids_clinica_validos
+
+    for asignacion in asignaciones:
+        assert asignacion["id_dispositivo"] in ids_dispositivo_validos
+        assert asignacion["id_embarazo"] in ids_embarazo_validos
+
+    for sesion in sesiones:
+        assert sesion["id_embarazo"] in ids_embarazo_validos
+        assert sesion["id_dispositivo"] in ids_dispositivo_validos
+
+    for lectura in lecturas:
+        assert lectura["id_sesion"] in ids_sesion_validos
+        assert lectura["id_tiempo_gest"] in ids_tiempo_gest_validos
+        assert lectura["id_semaforo"] in ids_semaforo_validos
+
+    for usuario in todos_usuarios:
+        assert usuario["id_rol"] in ids_rol_validos
+
+    for telefono in telefonos_paciente:
+        assert telefono["id_paciente"] in ids_paciente_validos
+        assert telefono["tipo_contacto"] in TIPOS_CONTACTO
+
+    for telefono in telefonos_medico:
+        assert telefono["id_medico"] in ids_medico_validos
+        assert telefono["tipo_contacto"] in TIPOS_CONTACTO
+
+    tipos_contacto_usados = {
+        t["tipo_contacto"] for t in telefonos_paciente
+    } | {
+        t["tipo_contacto"] for t in telefonos_medico
+    }
+
+    assert "FIJO" not in tipos_contacto_usados
+
+    for relacion in usuario_medico:
+        assert relacion["id_usuario"] in ids_usuario_validos
+        assert relacion["id_medico"] in ids_medico_validos
+
+    for relacion in usuario_paciente:
+        assert relacion["id_usuario"] in ids_usuario_validos
+        assert relacion["id_paciente"] in ids_paciente_validos
+
+    # --------------------------------------------------------
+    # Contactos: un único principal por persona
+    # --------------------------------------------------------
+
+    principales_por_paciente = defaultdict(int)
+
+    for telefono in telefonos_paciente:
+        if telefono["principal"]:
+            principales_por_paciente[
+                telefono["id_paciente"]
+            ] += 1
+
+    assert all(
+        principales_por_paciente[
+            paciente["id_paciente"]
+        ] == 1
+        for paciente in pacientes
+    )
+
+    principales_por_medico = defaultdict(int)
+
+    for telefono in telefonos_medico:
+        if telefono["principal"]:
+            principales_por_medico[
+                telefono["id_medico"]
+            ] += 1
+
+    assert all(
+        principales_por_medico[
+            medico["id_medico"]
+        ] == 1
+        for medico in medicos
+    )
+
+    # --------------------------------------------------------
+    # Usuarios: distribución de roles y relaciones 1:1
+    # --------------------------------------------------------
+
+    assert len(usuarios_medicos) == TOTAL_USUARIOS_MEDICO
+    assert len(usuarios_pacientes) == TOTAL_USUARIOS_PACIENTE
+
+    id_rol_por_nombre = {
+        r["nombre_rol"]: r["id_rol"] for r in roles
+    }
+
+    assert (
+        sum(
+            1 for u in todos_usuarios
+            if u["id_rol"] == id_rol_por_nombre["ADMIN"]
+        )
+        == TOTAL_ADMINISTRADORES
+    )
+
+    assert (
+        sum(
+            1 for u in todos_usuarios
+            if u["id_rol"] == id_rol_por_nombre["MEDICO"]
+        )
+        == TOTAL_MEDICOS
+    )
+
+    assert (
+        sum(
+            1 for u in todos_usuarios
+            if u["id_rol"] == id_rol_por_nombre["PACIENTE"]
+        )
+        == TOTAL_GESTANTES
+    )
+
+    assert len(usuario_medico) == TOTAL_MEDICOS
+    assert len(usuario_paciente) == TOTAL_GESTANTES
+
+    medicos_con_cuenta = [
+        x["id_medico"] for x in usuario_medico
+    ]
+
+    assert (
+        len(medicos_con_cuenta)
+        == len(set(medicos_con_cuenta))
+    )
+
+    pacientes_con_cuenta = [
+        x["id_paciente"] for x in usuario_paciente
+    ]
+
+    assert (
+        len(pacientes_con_cuenta)
+        == len(set(pacientes_con_cuenta))
+    )
+
+    # --------------------------------------------------------
+    # Geografía de Clinica
+    # --------------------------------------------------------
+
+    for clinica in clinicas:
+        assert "direccion_fisica" in clinica
+        assert "calle" not in clinica
+
+    # --------------------------------------------------------
+    # Estados de embarazo 20/8/2 y coherencia de fecha_cierre
+    # --------------------------------------------------------
+
+    conteo_estados = Counter(
+        e["estado_embarazo"] for e in embarazos
+    )
+
+    assert conteo_estados["ACTIVO"] == EMBARAZOS_ACTIVOS
+    assert conteo_estados["FINALIZADO"] == EMBARAZOS_FINALIZADOS
+    assert conteo_estados["SUSPENDIDO"] == EMBARAZOS_SUSPENDIDOS
+    assert set(conteo_estados) == {"ACTIVO", "FINALIZADO", "SUSPENDIDO"}
+
+    for embarazo in embarazos:
+        inicio = date.fromisoformat(embarazo["fecha_inicio"])
+
+        if embarazo["estado_embarazo"] == "ACTIVO":
+            assert embarazo["fecha_cierre"] is None
+        else:
+            assert embarazo["fecha_cierre"] is not None
+            cierre = date.fromisoformat(embarazo["fecha_cierre"])
+            assert cierre >= inicio
+
+    # --------------------------------------------------------
+    # Dispositivo / AsignacionDispositivo coherentes con el
+    # estado final del embarazo
+    # --------------------------------------------------------
+
+    embarazo_por_id = {
+        e["id_embarazo"]: e for e in embarazos
+    }
+
+    dispositivo_por_id = {
+        d["id_dispositivo"]: d for d in dispositivos
+    }
+
+    conteo_estado_dispositivo = Counter(
+        d["estado"] for d in dispositivos
+    )
+
+    assert conteo_estado_dispositivo["ASIGNADO"] == DISPOSITIVOS_ASIGNADOS
+    assert conteo_estado_dispositivo["DISPONIBLE"] == DISPOSITIVOS_DISPONIBLES
+    assert conteo_estado_dispositivo["MANTENIMIENTO"] == 0
+    assert conteo_estado_dispositivo["INACTIVO"] == 0
+
+    asignacion_por_embarazo = {
+        a["id_embarazo"]: a for a in asignaciones
+    }
+
+    for embarazo in embarazos:
+        asignacion = asignacion_por_embarazo[embarazo["id_embarazo"]]
+        dispositivo = dispositivo_por_id[asignacion["id_dispositivo"]]
+
+        if embarazo["estado_embarazo"] == "ACTIVO":
+            assert asignacion["activo"] is True
+            assert asignacion["fecha_fin"] is None
+            assert dispositivo["estado"] == "ASIGNADO"
+        else:
+            assert asignacion["activo"] is False
+            assert asignacion["fecha_fin"] is not None
+            assert asignacion["fecha_fin"] == embarazo["fecha_cierre"]
+            assert dispositivo["estado"] == "DISPONIBLE"
+
+            fecha_inicio_asig = date.fromisoformat(
+                asignacion["fecha_inicio"]
+            )
+            fecha_fin_asig = date.fromisoformat(
+                asignacion["fecha_fin"]
+            )
+            assert fecha_fin_asig >= fecha_inicio_asig
+
+    # --------------------------------------------------------
+    # Ninguna sesión/lectura posterior a fecha_cierre
+    # --------------------------------------------------------
+
+    sesion_por_id = {
+        x["id_sesion"]: x
+        for x in sesiones
+    }
+
+    for lectura in lecturas:
+        sesion = sesion_por_id[lectura["id_sesion"]]
+        embarazo = embarazo_por_id[sesion["id_embarazo"]]
+
+        if embarazo["fecha_cierre"] is not None:
+            cierre = date.fromisoformat(embarazo["fecha_cierre"])
+            captura = datetime.fromisoformat(
+                lectura["fecha_hora_captura"]
+            ).date()
+            assert captura <= cierre
+
+    # --------------------------------------------------------
+    # tipo_sesion y origen_dato
+    # --------------------------------------------------------
+
+    assert all(s["origen_dato"] == "DISPOSITIVO" for s in sesiones)
+    assert all("tipo_sesion" in s for s in sesiones)
+
+    conteo_tipo_sesion = Counter(
+        s["tipo_sesion"] for s in sesiones
+    )
+
+    assert conteo_tipo_sesion["SIGNOS_MATERNOS"] == TOTAL_SESIONES_HR_SPO2
+    assert conteo_tipo_sesion["MOVIMIENTOS_FETALES"] == TOTAL_MOVIMIENTOS
+
+    # --------------------------------------------------------
+    # DateTime offset-aware (SesionMonitoreo, LecturaBiometrica,
+    # Dispositivo.fecha_registro)
+    # --------------------------------------------------------
+
+    for sesion in sesiones:
+        assert datetime.fromisoformat(sesion["fecha_inicio"]).tzinfo is not None
+        assert datetime.fromisoformat(sesion["fecha_fin"]).tzinfo is not None
+
+    for lectura in lecturas:
+        assert datetime.fromisoformat(
+            lectura["fecha_hora_captura"]
+        ).tzinfo is not None
+        assert datetime.fromisoformat(
+            lectura["fecha_hora_sincronizacion"]
+        ).tzinfo is not None
+
+    for dispositivo in dispositivos:
+        assert datetime.fromisoformat(
+            dispositivo["fecha_registro"]
+        ).tzinfo is not None
+
+    # --------------------------------------------------------
+    # Semántica biométrica de NULL
+    # --------------------------------------------------------
 
     lecturas_hr = [
         x
@@ -1674,27 +2071,10 @@ def validar_dataset(
         for x in lecturas_mov
     )
 
-    # Identificadores únicos
-    for coleccion, campo in [
-        (pacientes, "id_paciente"),
-        (embarazos, "id_embarazo"),
-        (dispositivos, "id_dispositivo"),
-        (seguimientos, "id_seguimiento"),
-        (asignaciones, "id_asignacion"),
-        (sesiones, "id_sesion"),
-        (lecturas, "id_lectura"),
-    ]:
-        valores = [
-            x[campo]
-            for x in coleccion
-        ]
+    # --------------------------------------------------------
+    # Dispositivos únicos (código de negocio)
+    # --------------------------------------------------------
 
-        assert (
-            len(valores)
-            == len(set(valores))
-        )
-
-    # Dispositivos únicos
     codigos = [
         x["codigo_dispositivo"]
         for x in dispositivos
@@ -1705,36 +2085,31 @@ def validar_dataset(
         == len(set(codigos))
     )
 
+    # --------------------------------------------------------
     # Distribución global de alertas
-    codigo_por_id = {
-        "SEM-OK": "OK",
-        "SEM-WARNING": "WARNING",
-        "SEM-ERROR": "ERROR",
+    # --------------------------------------------------------
+
+    codigo_por_id_semaforo = {
+        s["id_semaforo"]: s["codigo_nivel"]
+        for s in semaforos
     }
 
     alertas = Counter(
-        codigo_por_id[
-            x["id_semaforo"]
-        ]
+        codigo_por_id_semaforo[x["id_semaforo"]]
         for x in lecturas
     )
 
     assert alertas["OK"] == ALERTAS_OK
+    assert alertas["WARNING"] == ALERTAS_WARNING
+    assert alertas["ERROR"] == ALERTAS_ERROR
 
-    assert (
-        alertas["WARNING"]
-        == ALERTAS_WARNING
-    )
-
-    assert (
-        alertas["ERROR"]
-        == ALERTAS_ERROR
-    )
-
+    # --------------------------------------------------------
     # Factores de riesgo 14 / 9 / 7
+    # --------------------------------------------------------
+
     factores_por_embarazo = defaultdict(int)
 
-    for relacion in paciente_factor_riesgo:
+    for relacion in embarazo_factor_riesgo:
         factores_por_embarazo[
             relacion["id_embarazo"]
         ] += 1
@@ -1767,7 +2142,10 @@ def validar_dataset(
     assert un_factor == RIESGO_UN_FACTOR
     assert dos_factores == RIESGO_DOS_FACTORES
 
-    # 10 gestantes por clínica
+    # --------------------------------------------------------
+    # 10 gestantes por clínica / 6 embarazos por médico
+    # --------------------------------------------------------
+
     por_clinica = Counter(
         x["id_clinica"]
         for x in embarazos
@@ -1777,7 +2155,6 @@ def validar_dataset(
         por_clinica.values()
     ) == {10}
 
-    # 6 embarazos por médico
     por_medico = Counter(
         x["id_medico"]
         for x in seguimientos
@@ -1787,7 +2164,10 @@ def validar_dataset(
         por_medico.values()
     ) == {6}
 
-    # Un dispositivo por embarazo
+    # --------------------------------------------------------
+    # Un dispositivo por embarazo (histórico)
+    # --------------------------------------------------------
+
     asignaciones_por_embarazo = Counter(
         x["id_embarazo"]
         for x in asignaciones
@@ -1806,7 +2186,10 @@ def validar_dataset(
         asignaciones_por_dispositivo.values()
     ) == {1}
 
+    # --------------------------------------------------------
     # Sincronización diferida
+    # --------------------------------------------------------
+
     diferidas = 0
 
     for lectura in lecturas:
@@ -1830,16 +2213,9 @@ def validar_dataset(
 
     assert diferidas > 0
 
+    # --------------------------------------------------------
     # Datos en los tres trimestres
-    sesion_por_id = {
-        x["id_sesion"]: x
-        for x in sesiones
-    }
-
-    embarazo_por_id = {
-        x["id_embarazo"]: x
-        for x in embarazos
-    }
+    # --------------------------------------------------------
 
     trimestres_por_paciente = defaultdict(set)
 
@@ -1866,16 +2242,15 @@ def validar_dataset(
 
     assert all(
         trimestres_por_paciente[
-            crear_id("PAC", i)
+            paciente["id_paciente"]
         ] == {1, 2, 3}
-        for i in range(
-            1,
-            TOTAL_GESTANTES + 1,
-        )
+        for paciente in pacientes
     )
 
-    # Toda lectura debe pertenecer
-    # al periodo del embarazo
+    # --------------------------------------------------------
+    # Toda lectura debe pertenecer al periodo del embarazo
+    # --------------------------------------------------------
+
     for lectura in lecturas:
         sesion = sesion_por_id[
             lectura["id_sesion"]
@@ -1899,7 +2274,10 @@ def validar_dataset(
 
         assert inicio <= captura <= fpp
 
+    # --------------------------------------------------------
     # Número de lecturas por sesión
+    # --------------------------------------------------------
+
     conteo_por_sesion = Counter(
         x["id_sesion"]
         for x in lecturas
@@ -1930,7 +2308,13 @@ def validar_dataset(
     )
 
     # Las cinco lecturas de una sesión HR/SpO2
-    # deben compartir el mismo nivel de alerta
+    # deben compartir el mismo nivel de alerta.
+    #
+    # NOTA: esta prueba funcional se mantiene deliberadamente.
+    # SQLAlchemy fuerza hoy 1:1 entre SesionMonitoreo y
+    # LecturaBiometrica; hasta que Tinuola ajuste el modelo a
+    # 1:N, esta es la única incompatibilidad estructural
+    # pendiente entre el dataset y el esquema físico real.
     for id_sesion in sesiones_hr:
         estados = {
             x["id_semaforo"]
@@ -1940,7 +2324,10 @@ def validar_dataset(
 
         assert len(estados) == 1
 
+    # --------------------------------------------------------
     # Duración de movimientos: 60-120 minutos
+    # --------------------------------------------------------
+
     ids_sesiones_mov = set(sesiones_mov)
 
     for sesion in sesiones:
@@ -1962,205 +2349,6 @@ def validar_dataset(
 
             assert 60 <= minutos <= 120
 
-    # --------------------------------------------------------
-    # Teléfonos: FK válida, enum permitido, un único
-    # contacto principal por persona.
-    # --------------------------------------------------------
-
-    ids_paciente_validos = {
-        x["id_paciente"] for x in pacientes
-    }
-
-    ids_medico_validos = {
-        x["id_medico"] for x in medicos
-    }
-
-    for telefono in telefonos_paciente:
-        assert (
-            telefono["id_paciente"]
-            in ids_paciente_validos
-        )
-
-        assert (
-            telefono["tipo_contacto"]
-            in TIPOS_CONTACTO
-        )
-
-    for telefono in telefonos_medico:
-        assert (
-            telefono["id_medico"]
-            in ids_medico_validos
-        )
-
-        assert (
-            telefono["tipo_contacto"]
-            in TIPOS_CONTACTO
-        )
-
-    principales_por_paciente = defaultdict(int)
-
-    for telefono in telefonos_paciente:
-        if telefono["principal"]:
-            principales_por_paciente[
-                telefono["id_paciente"]
-            ] += 1
-
-    assert all(
-        principales_por_paciente[
-            paciente["id_paciente"]
-        ] == 1
-        for paciente in pacientes
-    )
-
-    principales_por_medico = defaultdict(int)
-
-    for telefono in telefonos_medico:
-        if telefono["principal"]:
-            principales_por_medico[
-                telefono["id_medico"]
-            ] += 1
-
-    assert all(
-        principales_por_medico[
-            medico["id_medico"]
-        ] == 1
-        for medico in medicos
-    )
-
-    ids_telefono_paciente = [
-        x["id_telefono_paciente"]
-        for x in telefonos_paciente
-    ]
-
-    assert (
-        len(ids_telefono_paciente)
-        == len(set(ids_telefono_paciente))
-    )
-
-    ids_telefono_medico = [
-        x["id_telefono_medico"]
-        for x in telefonos_medico
-    ]
-
-    assert (
-        len(ids_telefono_medico)
-        == len(set(ids_telefono_medico))
-    )
-
-    # --------------------------------------------------------
-    # Usuarios: cantidades, FK, roles y ausencia de huérfanos.
-    # --------------------------------------------------------
-
-    assert (
-        len(usuarios_medicos)
-        == TOTAL_USUARIOS_MEDICO
-    )
-
-    assert (
-        len(usuarios_pacientes)
-        == TOTAL_USUARIOS_PACIENTE
-    )
-
-    todos_usuarios = (
-        usuarios_admin
-        + usuarios_medicos
-        + usuarios_pacientes
-    )
-
-    assert len(todos_usuarios) == TOTAL_USUARIOS
-
-    ids_usuario = [
-        x["id_usuario"] for x in todos_usuarios
-    ]
-
-    assert (
-        len(ids_usuario)
-        == len(set(ids_usuario))
-    )
-
-    ids_rol_validos = {"ROL-001", "ROL-002", "ROL-003"}
-
-    assert all(
-        x["id_rol"] in ids_rol_validos
-        for x in todos_usuarios
-    )
-
-    assert (
-        sum(
-            1
-            for x in todos_usuarios
-            if x["id_rol"] == "ROL-001"
-        )
-        == TOTAL_ADMINISTRADORES
-    )
-
-    assert (
-        sum(
-            1
-            for x in todos_usuarios
-            if x["id_rol"] == "ROL-002"
-        )
-        == TOTAL_MEDICOS
-    )
-
-    assert (
-        sum(
-            1
-            for x in todos_usuarios
-            if x["id_rol"] == "ROL-003"
-        )
-        == TOTAL_GESTANTES
-    )
-
-    ids_usuario_validos = set(ids_usuario)
-
-    for relacion in usuario_medico:
-        assert (
-            relacion["id_usuario"]
-            in ids_usuario_validos
-        )
-
-        assert (
-            relacion["id_medico"]
-            in ids_medico_validos
-        )
-
-    for relacion in usuario_paciente:
-        assert (
-            relacion["id_usuario"]
-            in ids_usuario_validos
-        )
-
-        assert (
-            relacion["id_paciente"]
-            in ids_paciente_validos
-        )
-
-    assert len(usuario_medico) == TOTAL_MEDICOS
-
-    assert (
-        len(usuario_paciente)
-        == TOTAL_GESTANTES
-    )
-
-    medicos_con_cuenta = [
-        x["id_medico"] for x in usuario_medico
-    ]
-
-    assert (
-        len(medicos_con_cuenta)
-        == len(set(medicos_con_cuenta))
-    )
-
-    pacientes_con_cuenta = [
-        x["id_paciente"] for x in usuario_paciente
-    ]
-
-    assert (
-        len(pacientes_con_cuenta)
-        == len(set(pacientes_con_cuenta))
-    )
-
 
 # ============================================================
 # EXPORTACIÓN
@@ -2180,7 +2368,7 @@ def exportar_dataset(
     embarazos,
     seguimientos,
     factores_riesgo,
-    paciente_factor_riesgo,
+    embarazo_factor_riesgo,
     dispositivos,
     asignaciones,
     sesiones,
@@ -2196,6 +2384,12 @@ def exportar_dataset(
     CARPETA_SALIDA.mkdir(
         parents=True,
         exist_ok=True,
+    )
+
+    usuarios = (
+        usuarios_admin
+        + usuarios_medicos
+        + usuarios_pacientes
     )
 
     dataset = {
@@ -2235,8 +2429,8 @@ def exportar_dataset(
             seguimientos,
         "factores_riesgo":
             factores_riesgo,
-        "paciente_factor_riesgo":
-            paciente_factor_riesgo,
+        "embarazo_factor_riesgo":
+            embarazo_factor_riesgo,
         "dispositivos":
             dispositivos,
         "asignacion_dispositivo":
@@ -2250,9 +2444,7 @@ def exportar_dataset(
         "telefonos_medico":
             telefonos_medico,
         "usuarios":
-            usuarios_admin
-            + usuarios_medicos
-            + usuarios_pacientes,
+            usuarios,
         "usuario_medico":
             usuario_medico,
         "usuario_paciente":
@@ -2306,8 +2498,8 @@ def exportar_dataset(
         factores_riesgo,
     )
     exportar_csv(
-        "paciente_factor_riesgo",
-        paciente_factor_riesgo,
+        "embarazo_factor_riesgo",
+        embarazo_factor_riesgo,
     )
     exportar_csv(
         "dispositivos",
@@ -2335,9 +2527,7 @@ def exportar_dataset(
     )
     exportar_csv(
         "usuarios",
-        usuarios_admin
-        + usuarios_medicos
-        + usuarios_pacientes,
+        usuarios,
     )
     exportar_csv(
         "usuario_medico",
@@ -2358,16 +2548,26 @@ def main() -> None:
     random.seed(SEMILLA)
 
     clinicas = generar_clinicas()
-    especialidades = generar_especialidades()
-    medicos = generar_medicos()
-    medico_clinica = generar_medico_clinica()
-    roles = generar_roles()
 
-    usuarios_admin = (
-        generar_usuarios_administradores()
+    especialidades = generar_especialidades()
+    id_especialidad_unica = especialidades[0]["id_especialidad"]
+    medicos = generar_medicos(id_especialidad_unica)
+
+    medico_clinica = generar_medico_clinica(medicos, clinicas)
+
+    roles = generar_roles()
+    id_rol_por_nombre = {
+        r["nombre_rol"]: r["id_rol"] for r in roles
+    }
+
+    usuarios_admin = generar_usuarios_administradores(
+        id_rol_por_nombre["ADMIN"]
     )
 
     semaforos = generar_semaforos()
+    id_semaforo_por_estado = {
+        s["codigo_nivel"]: s["id_semaforo"] for s in semaforos
+    }
 
     tiempo_gestacional = (
         generar_tiempo_gestacional()
@@ -2383,12 +2583,14 @@ def main() -> None:
         generar_telefonos_medico(medicos)
     )
 
-    usuarios_medicos = (
-        generar_usuarios_medicos(medicos)
+    usuarios_medicos = generar_usuarios_medicos(
+        medicos,
+        id_rol_por_nombre["MEDICO"],
     )
 
-    usuarios_pacientes = (
-        generar_usuarios_pacientes(pacientes)
+    usuarios_pacientes = generar_usuarios_pacientes(
+        pacientes,
+        id_rol_por_nombre["PACIENTE"],
     )
 
     usuario_medico = generar_usuario_medico(
@@ -2401,11 +2603,12 @@ def main() -> None:
         pacientes,
     )
 
-    embarazos = generar_embarazos()
+    embarazos = generar_embarazos(pacientes, clinicas)
 
     seguimientos = (
         generar_seguimiento_clinico(
-            embarazos
+            embarazos,
+            medicos,
         )
     )
 
@@ -2413,19 +2616,10 @@ def main() -> None:
         generar_factores_riesgo_catalogo()
     )
 
-    paciente_factor_riesgo = (
-        generar_paciente_factor_riesgo(
-            embarazos
-        )
-    )
-
-    dispositivos = generar_dispositivos(
-        embarazos
-    )
-
-    asignaciones = (
-        generar_asignaciones_dispositivo(
-            embarazos
+    embarazo_factor_riesgo = (
+        generar_embarazo_factor_riesgo(
+            embarazos,
+            factores_riesgo,
         )
     )
 
@@ -2438,23 +2632,50 @@ def main() -> None:
     aplicar_valores_y_alertas(
         sesiones,
         lecturas,
+        id_semaforo_por_estado,
+    )
+
+    # Requiere sesiones/lecturas ya generadas: el cierre de los
+    # embarazos FINALIZADO/SUSPENDIDO se calcula a partir de su
+    # última captura biométrica real.
+    finalizar_fecha_cierre_embarazos(
+        embarazos,
+        sesiones,
+        lecturas,
+    )
+
+    # Dispositivo/AsignacionDispositivo dependen del estado final
+    # del embarazo (y de fecha_cierre), por eso se generan después.
+    dispositivos = generar_dispositivos(
+        embarazos
+    )
+
+    asignaciones = (
+        generar_asignaciones_dispositivo(
+            embarazos
+        )
     )
 
     validar_dataset(
         clinicas=clinicas,
+        especialidades=especialidades,
         medicos=medicos,
+        medico_clinica=medico_clinica,
+        roles=roles,
         usuarios_admin=usuarios_admin,
-        dispositivos=dispositivos,
+        semaforos=semaforos,
+        tiempo_gestacional=
+            tiempo_gestacional,
         pacientes=pacientes,
         embarazos=embarazos,
         seguimientos=seguimientos,
+        factores_riesgo=factores_riesgo,
+        embarazo_factor_riesgo=
+            embarazo_factor_riesgo,
+        dispositivos=dispositivos,
         asignaciones=asignaciones,
-        paciente_factor_riesgo=
-            paciente_factor_riesgo,
         sesiones=sesiones,
         lecturas=lecturas,
-        tiempo_gestacional=
-            tiempo_gestacional,
         telefonos_paciente=telefonos_paciente,
         telefonos_medico=telefonos_medico,
         usuarios_medicos=usuarios_medicos,
@@ -2477,8 +2698,8 @@ def main() -> None:
         embarazos=embarazos,
         seguimientos=seguimientos,
         factores_riesgo=factores_riesgo,
-        paciente_factor_riesgo=
-            paciente_factor_riesgo,
+        embarazo_factor_riesgo=
+            embarazo_factor_riesgo,
         dispositivos=dispositivos,
         asignaciones=asignaciones,
         sesiones=sesiones,
@@ -2491,14 +2712,13 @@ def main() -> None:
         usuario_paciente=usuario_paciente,
     )
 
-    codigo_por_id = {
-        "SEM-OK": "OK",
-        "SEM-WARNING": "WARNING",
-        "SEM-ERROR": "ERROR",
+    codigo_por_id_semaforo = {
+        s["id_semaforo"]: s["codigo_nivel"]
+        for s in semaforos
     }
 
     alertas = Counter(
-        codigo_por_id[
+        codigo_por_id_semaforo[
             x["id_semaforo"]
         ]
         for x in lecturas
@@ -2514,6 +2734,24 @@ def main() -> None:
         1
         for x in lecturas
         if x["mov_valor"] is not None
+    )
+
+    total_usuarios = (
+        len(usuarios_admin)
+        + len(usuarios_medicos)
+        + len(usuarios_pacientes)
+    )
+
+    estados_embarazo = Counter(
+        e["estado_embarazo"] for e in embarazos
+    )
+
+    tipos_sesion = Counter(
+        s["tipo_sesion"] for s in sesiones
+    )
+
+    estados_dispositivo = Counter(
+        d["estado"] for d in dispositivos
     )
 
     print()
@@ -2552,11 +2790,6 @@ def main() -> None:
         f"{alertas['ERROR']} ERROR"
     )
     print()
-    total_usuarios = (
-        len(usuarios_admin)
-        + len(usuarios_medicos)
-        + len(usuarios_pacientes)
-    )
     print(
         f"Usuarios: {total_usuarios} "
         f"(ADMIN {len(usuarios_admin)} / "
@@ -2570,6 +2803,23 @@ def main() -> None:
     print(
         f"Teléfonos médico: "
         f"{len(telefonos_medico)}"
+    )
+    print()
+    print(
+        "Estados embarazo: "
+        f"{estados_embarazo['ACTIVO']} ACTIVO / "
+        f"{estados_embarazo['FINALIZADO']} FINALIZADO / "
+        f"{estados_embarazo['SUSPENDIDO']} SUSPENDIDO"
+    )
+    print(
+        "Tipo de sesión: "
+        f"{tipos_sesion['SIGNOS_MATERNOS']} SIGNOS_MATERNOS / "
+        f"{tipos_sesion['MOVIMIENTOS_FETALES']} MOVIMIENTOS_FETALES"
+    )
+    print(
+        "Estado dispositivos: "
+        f"{estados_dispositivo['ASIGNADO']} ASIGNADO / "
+        f"{estados_dispositivo['DISPONIBLE']} DISPONIBLE"
     )
     print()
     print(

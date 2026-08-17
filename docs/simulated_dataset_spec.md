@@ -102,6 +102,24 @@ El hecho de que las sesiones base de HR/SpO₂ se distribuyan en momentos determ
 - 6 embarazos por médico
 - Un dispositivo FetalAlert asignado a cada embarazo simulado durante el periodo de seguimiento
 
+## Estados del embarazo y del dispositivo
+
+Los 30 embarazos simulados se distribuyen determinísticamente en:
+
+- 20 ACTIVO
+- 8 FINALIZADO
+- 2 SUSPENDIDO
+
+Esta distribución existe únicamente para aportar diversidad técnica a la muestra (permite validar `fecha_cierre`, historial de asignación de dispositivos y consultas por estado). No representa prevalencia clínica ni epidemiológica.
+
+Reglas de coherencia:
+
+- ACTIVO: `fecha_cierre = NULL`, la asignación del dispositivo sigue vigente (`activo = true`, `fecha_fin = NULL`) y el dispositivo queda en estado `ASIGNADO`.
+- FINALIZADO/SUSPENDIDO: `fecha_cierre` no es NULL, coherente con el último evento biométrico registrado del embarazo (para FINALIZADO, además coherente con `fecha_probable_parto`); la asignación del dispositivo queda cerrada (`activo = false`, `fecha_fin = fecha_cierre`) y el dispositivo vuelve a estado `DISPONIBLE`.
+- Ningún embarazo cerrado tiene sesiones o lecturas con fecha de captura posterior a su `fecha_cierre`.
+
+Distribución resultante de dispositivos: 20 `ASIGNADO` / 10 `DISPONIBLE` (ninguno en `MANTENIMIENTO` ni `INACTIVO` en esta muestra).
+
 ## Factores de riesgo
 
 - 14 embarazos sin factores de riesgo registrados
@@ -117,6 +135,8 @@ Catálogo mínimo para las pruebas:
 Los factores de riesgo se utilizarán para validar relaciones, filtros y dashboards.
 
 No deberán determinar directamente las alertas biométricas ni interpretarse como causa de los valores simulados.
+
+La entidad de relación se llama `embarazo_factor_riesgo` (clave compuesta `id_embarazo` + `id_factor_riesgo`), nombre alineado con la tabla física real de SQLAlchemy.
 
 ## Registros maestros y relacionales adicionales
 
@@ -140,7 +160,7 @@ Los correos y los hashes de contraseña utilizados son completamente sintéticos
   - 10 correos alternos secundarios
 - 10 contactos de médicos:
   - 5 celulares principales
-  - 5 teléfonos fijos secundarios
+  - 5 contactos de teléfono de domicilio secundarios (`TELEFONO_DOMICILIO`)
 
 `tipo_contacto` identifica la modalidad del contacto. `valor_contacto` contiene el número o correo correspondiente. `principal` identifica cuál es el medio principal de contacto de la persona; cada paciente y cada médico tiene exactamente un contacto marcado como principal.
 
@@ -158,9 +178,20 @@ Los nombres de clínica y las direcciones específicas son completamente sintét
 
 No se generan filas ficticias en esta muestra. Los registros de auditoría se producirán posteriormente mediante acciones reales durante las pruebas funcionales del sistema.
 
-### Limitación pendiente
+### Alineación técnica con SQLAlchemy (SCRUM-51)
 
-Los valores permitidos de `tipo_contacto` (`CELULAR`, `FIJO`, `CORREO_ALTERNO`) y los nombres físicos de estas entidades son provisionales: se definieron a partir del diseño conceptual de la tesis porque, a la fecha de esta revisión (SCRUM-54), aún no existen modelos SQLAlchemy ni migraciones de Alembic implementados en el repositorio. Deberán revalidarse contra el modelo relacional físico en cuanto esté disponible.
+Los modelos SQLAlchemy reales existen en la rama `feature/sprint-4-sqlalchemy-models` (aún no fusionada a esta rama). El dataset se validó y ajustó contra ese modelo:
+
+- `tipo_contacto` usa exactamente `CELULAR`, `TELEFONO_DOMICILIO` y `CORREO_ALTERNO` (el valor `FIJO` fue eliminado deliberadamente del enum real y ya no se genera).
+- `Clinica.direccion_fisica` es el nombre físico real de la columna de dirección (antes se generaba como `calle`).
+- `SesionMonitoreo.tipo_sesion` es un campo obligatorio real (`SIGNOS_MATERNOS` / `MOVIMIENTOS_FETALES`); el dataset ahora lo genera en todas las sesiones.
+- `origen_dato` usa `DISPOSITIVO` (el enum real solo admite `DISPOSITIVO` o `CSV`; no admite `API`).
+- `SesionMonitoreo.fecha_inicio/fecha_fin`, `LecturaBiometrica.fecha_hora_captura/fecha_hora_sincronizacion` y `Dispositivo.fecha_registro` son `DateTime` con zona horaria; el dataset genera estos campos en UTC offset-aware (ej. `2026-03-01T14:30:00+00:00`).
+- El modelo real permite `fecha_hora_sincronizacion = NULL` para representar una lectura aún no sincronizada. El dataset actual no genera ese caso: representa registros que finalmente sí se sincronizan (algunos de forma inmediata, otros de forma diferida).
+- Las tablas operacionales viven en el schema PostgreSQL `operacional` (relevante para cuando exista un script de carga física).
+- Los IDs físicos de la muestra son enteros determinísticos, alineados con las PK `Integer` reales, y comienzan en 100 dentro de cada entidad (ej. `id_paciente = 100..129`). Los códigos legibles se conservan únicamente donde existe una columna de negocio real en el modelo (`cedula`, `ruc`, `codigo_dispositivo`).
+
+**Incompatibilidad estructural pendiente:** el modelo SQLAlchemy real impone hoy una relación **1:1** entre `SesionMonitoreo` y `LecturaBiometrica` (`UNIQUE(id_sesion)` + relación `uselist=False`), mientras que la regla aprobada de SCRUM-54 mantiene 5 lecturas procesadas por sesión HR/SpO₂. El dataset conserva la regla funcional aprobada (112 sesiones × 5 lecturas = 560); la corrección del modelo a 1:N está siendo gestionada por separado (Tinuola). El dataset no debe considerarse completamente cargable contra PostgreSQL hasta que esa incompatibilidad se resuelva.
 
 ## Distribución de alertas
 
@@ -197,4 +228,4 @@ La carga en PostgreSQL permanecerá pendiente hasta que el modelo relacional y l
 
 Una vez desplegado el modelo relacional, el dataset deberá validarse contra los nombres de columnas, tipos de datos, claves primarias, claves foráneas, restricciones `NULL`, restricciones de unicidad y demás reglas implementadas físicamente en PostgreSQL.
 
-**Estado a la fecha de SCRUM-54:** `backend/app/models/` no contiene todavía ninguna clase SQLAlchemy (solo existe una `Base` declarativa vacía) y `backend/alembic/versions/` está vacío en todas las ramas del repositorio. Por lo tanto, la revisión técnica de SCRUM-54 comparó el generador únicamente contra el diseño relacional conceptual aprobado de la tesis, no contra una implementación física. Esta validación cruzada deberá repetirse cuando el equipo de fundamentos de API implemente los modelos y las migraciones.
+**Estado a la fecha de SCRUM-54:** los modelos SQLAlchemy reales (22 tablas, ver `backend/app/models/`) existen en la rama `feature/sprint-4-sqlalchemy-models`, todavía no fusionada a `main` ni a esta rama; `backend/alembic/versions/` sigue vacío en todas las ramas. El dataset se comparó campo por campo contra esos modelos reales (ver sección "Alineación técnica con SQLAlchemy" arriba) y se ajustó donde era una corrección legítima del lado del generador. La única incompatibilidad estructural que queda pendiente es la cardinalidad `SesionMonitoreo` ↔ `LecturaBiometrica` (1:1 real vs. 1:N aprobado), a resolver del lado del modelo. La carga física en PostgreSQL sigue pendiente de que existan migraciones de Alembic.
