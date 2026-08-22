@@ -99,7 +99,9 @@ El hecho de que las sesiones base de HR/SpO₂ se distribuyan en momentos determ
 ## Distribución por clínica y médico
 
 - 10 gestantes por clínica
-- 6 embarazos por médico
+- Los 5 médicos se distribuyen entre las 3 clínicas; cada médico pertenece exclusivamente a una única clínica (nunca a dos o tres), y cada clínica cuenta con al menos un médico
+- El médico asignado a cada embarazo pertenece siempre a la misma clínica del embarazo; esto permite validar posteriormente accesos permitidos y denegados por clínica
+- La cantidad de embarazos por médico puede variar según cuántos médicos tenga asignados cada clínica; no se exige un reparto uniforme por médico (la distribución resultante actual es 2 clínicas con 2 médicos y 1 clínica con 1 médico, lo que produce 5/5/5/5/10 embarazos por médico)
 - Un dispositivo FetalAlert asignado a cada embarazo simulado durante el periodo de seguimiento
 
 ## Estados del embarazo y del dispositivo
@@ -112,11 +114,14 @@ Los 30 embarazos simulados se distribuyen determinísticamente en:
 
 Esta distribución existe únicamente para aportar diversidad técnica a la muestra (permite validar `fecha_cierre`, historial de asignación de dispositivos y consultas por estado). No representa prevalencia clínica ni epidemiológica.
 
+Estos estados se distribuyen entre las tres clínicas, de modo que cada una conserve una combinación de embarazos activos y cerrados, evitando una correlación artificial entre clínica/provincia y estado del embarazo.
+
 Reglas de coherencia:
 
 - ACTIVO: `fecha_cierre = NULL`, la asignación del dispositivo sigue vigente (`activo = true`, `fecha_fin = NULL`) y el dispositivo queda en estado `ASIGNADO`.
 - FINALIZADO/SUSPENDIDO: `fecha_cierre` no es NULL, coherente con el último evento biométrico registrado del embarazo (para FINALIZADO, además coherente con `fecha_probable_parto`); la asignación del dispositivo queda cerrada (`activo = false`, `fecha_fin = fecha_cierre`) y el dispositivo vuelve a estado `DISPONIBLE`.
 - Ningún embarazo cerrado tiene sesiones o lecturas con fecha de captura posterior a su `fecha_cierre`.
+- El seguimiento clínico (`SeguimientoClinico`) sigue la misma coherencia: mientras el embarazo está ACTIVO, el seguimiento permanece activo con `fecha_fin = NULL`; cuando el embarazo pasa a FINALIZADO o SUSPENDIDO, el seguimiento se marca inactivo con `fecha_fin = Embarazo.fecha_cierre`. El médico de cada seguimiento pertenece siempre a la misma clínica del embarazo.
 
 Distribución resultante de dispositivos: 20 `ASIGNADO` / 10 `DISPONIBLE` (ninguno en `MANTENIMIENTO` ni `INACTIVO` en esta muestra).
 
@@ -168,9 +173,9 @@ Los correos y los hashes de contraseña utilizados son completamente sintéticos
 
 Las tres clínicas simuladas se ubican en zonas rurales de Panamá, coherentes con el alcance de FetalAlert:
 
-- CLI-001: Chiriquí → Renacimiento → Plaza Caisán
-- CLI-002: Veraguas → Santa Fe → Calovébora
-- CLI-003: Darién → Chepigana → Camogantí
+- Chiriquí → Renacimiento → Plaza Caisán
+- Veraguas → Santa Fe → Calovébora
+- Darién → Chepigana → Camogantí
 
 Los nombres de clínica y las direcciones específicas son completamente sintéticos y se utilizan únicamente para validación técnica.
 
@@ -191,7 +196,7 @@ Los modelos SQLAlchemy reales existen en la rama `feature/sprint-4-sqlalchemy-mo
 - Las tablas operacionales viven en el schema PostgreSQL `operacional` (relevante para cuando exista un script de carga física).
 - Los IDs físicos de la muestra son enteros determinísticos, alineados con las PK `Integer` reales, y comienzan en 100 dentro de cada entidad (ej. `id_paciente = 100..129`). Los códigos legibles se conservan únicamente donde existe una columna de negocio real en el modelo (`cedula`, `ruc`, `codigo_dispositivo`).
 
-**Incompatibilidad estructural pendiente:** el modelo SQLAlchemy real impone hoy una relación **1:1** entre `SesionMonitoreo` y `LecturaBiometrica` (`UNIQUE(id_sesion)` + relación `uselist=False`), mientras que la regla aprobada de SCRUM-54 mantiene 5 lecturas procesadas por sesión HR/SpO₂. El dataset conserva la regla funcional aprobada (112 sesiones × 5 lecturas = 560); la corrección del modelo a 1:N está siendo gestionada por separado (Tinuola). El dataset no debe considerarse completamente cargable contra PostgreSQL hasta que esa incompatibilidad se resuelva.
+La cardinalidad `SesionMonitoreo` → `LecturaBiometrica` es **1:N**: `LecturaBiometrica.id_sesion` no está restringido como único y `SesionMonitoreo.lecturas` se maneja como una colección. La muestra de SCRUM-54 conserva 5 lecturas procesadas representativas por sesión HR/SpO₂ (112 sesiones × 5 lecturas = 560); ese valor es la granularidad elegida para esta muestra técnica y no representa un límite máximo de cardinalidad del modelo.
 
 ## Distribución de alertas
 
@@ -216,16 +221,14 @@ Esta distribución se utiliza únicamente para fines de validación técnica y n
 - La fecha y hora de sincronización no podrá ser anterior a la fecha y hora de captura
 - El historial clínico deberá ordenarse según la fecha y hora de captura
 - Los códigos de los dispositivos deberán ser únicos
-- Cada embarazo deberá mantener el dispositivo asignado durante la simulación
+- Cada embarazo conserva su relación histórica con un dispositivo: mientras el embarazo está ACTIVO, la asignación permanece vigente; al pasar a FINALIZADO o SUSPENDIDO, la asignación se cierra con `fecha_fin = fecha_cierre` y el dispositivo vuelve a estado DISPONIBLE
 - El generador deberá utilizar una semilla aleatoria fija
 - La ejecución del generador utilizando la misma semilla deberá producir el mismo dataset
 
 ## Restricción actual de implementación
 
-El dataset generado se exportará inicialmente en formato JSON y/o CSV.
+El dataset generado se exporta en formato JSON y/o CSV.
 
-La carga en PostgreSQL permanecerá pendiente hasta que el modelo relacional y las migraciones de Alembic estén disponibles.
+La carga física del dataset en PostgreSQL continúa pendiente de integración y validación en el flujo correspondiente. Antes de la carga definitiva deben validarse físicamente los nombres de columnas, tipos de datos, claves primarias, claves foráneas, restricciones `NULL`, restricciones de unicidad y demás reglas implementadas en el esquema desplegado.
 
-Una vez desplegado el modelo relacional, el dataset deberá validarse contra los nombres de columnas, tipos de datos, claves primarias, claves foráneas, restricciones `NULL`, restricciones de unicidad y demás reglas implementadas físicamente en PostgreSQL.
-
-**Estado a la fecha de SCRUM-54:** los modelos SQLAlchemy reales (22 tablas, ver `backend/app/models/`) existen en la rama `feature/sprint-4-sqlalchemy-models`, todavía no fusionada a `main` ni a esta rama; `backend/alembic/versions/` sigue vacío en todas las ramas. El dataset se comparó campo por campo contra esos modelos reales (ver sección "Alineación técnica con SQLAlchemy" arriba) y se ajustó donde era una corrección legítima del lado del generador. La única incompatibilidad estructural que queda pendiente es la cardinalidad `SesionMonitoreo` ↔ `LecturaBiometrica` (1:1 real vs. 1:N aprobado), a resolver del lado del modelo. La carga física en PostgreSQL sigue pendiente de que existan migraciones de Alembic.
+El dataset se comparó campo por campo contra los modelos SQLAlchemy reales del esquema operacional (ver sección "Alineación técnica con SQLAlchemy" arriba) y se ajustó donde correspondía una corrección legítima del lado del generador.

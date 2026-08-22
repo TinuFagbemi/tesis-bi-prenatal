@@ -391,21 +391,58 @@ def generar_medicos(id_especialidad: int) -> list[dict[str, Any]]:
     ]
 
 
-def generar_medico_clinica(
+def distribuir_medicos_por_clinica(
     medicos: list[dict[str, Any]],
     clinicas: list[dict[str, Any]],
+) -> dict[int, list[int]]:
+    """
+    Reparte los médicos entre las clínicas en bloques contiguos
+    lo más balanceados posible (con 5 médicos y 3 clínicas: 2/2/1),
+    de forma determinística. Cada médico queda vinculado a una
+    única clínica y cada clínica recibe al menos un médico.
+    """
+    ids_medico = [m["id_medico"] for m in medicos]
+    ids_clinica = [c["id_clinica"] for c in clinicas]
+
+    base = len(ids_medico) // len(ids_clinica)
+    resto = len(ids_medico) % len(ids_clinica)
+
+    medicos_por_clinica: dict[int, list[int]] = {}
+    inicio = 0
+
+    for indice, id_clinica in enumerate(ids_clinica):
+        cantidad = base + (1 if indice < resto else 0)
+        medicos_por_clinica[id_clinica] = ids_medico[
+            inicio: inicio + cantidad
+        ]
+        inicio += cantidad
+
+    return medicos_por_clinica
+
+
+def generar_medico_clinica(
+    medicos_por_clinica: dict[int, list[int]],
 ) -> list[dict[str, Any]]:
-    return [
-        {
-            "id_medico": medico["id_medico"],
-            "id_clinica": clinica["id_clinica"],
-            "fecha_inicio": "2025-01-01",
-            "fecha_final": None,
-            "activo": True,
-        }
-        for medico in medicos
-        for clinica in clinicas
-    ]
+    """
+    Cada médico mantiene una única asociación activa con una
+    clínica (nunca con dos o tres); una misma clínica, en cambio,
+    puede tener varios médicos asociados.
+    """
+    relaciones = []
+
+    for id_clinica, ids_medico in medicos_por_clinica.items():
+        for id_medico in ids_medico:
+            relaciones.append(
+                {
+                    "id_medico": id_medico,
+                    "id_clinica": id_clinica,
+                    "fecha_inicio": "2025-01-01",
+                    "fecha_final": None,
+                    "activo": True,
+                }
+            )
+
+    return relaciones
 
 
 def generar_telefonos_medico(
@@ -799,20 +836,64 @@ def generar_factores_riesgo_catalogo(
 # EMBARAZOS, SEGUIMIENTO Y DISPOSITIVOS
 # ============================================================
 
-def estado_para_embarazo(indice_uno_basado: int) -> str:
+def _repartir_conteo(total: int, partes: int) -> list[int]:
     """
-    Distribución determinística 20 ACTIVO / 8 FINALIZADO / 2 SUSPENDIDO.
+    Reparte ``total`` en ``partes`` grupos lo más balanceados
+    posible, de forma determinística (los primeros grupos reciben
+    el resto de la división).
+    """
+    base = total // partes
+    resto = total % partes
 
-    Regla técnica de simulación aprobada para SCRUM-54; no
+    return [
+        base + (1 if indice < resto else 0)
+        for indice in range(partes)
+    ]
+
+
+def estados_por_clinica(
+    total_clinicas: int,
+    embarazos_por_clinica: int,
+) -> list[list[str]]:
+    """
+    Determina, para cada clínica, la lista de estados de sus
+    embarazos (uno por posición dentro de la clínica).
+
+    FINALIZADO y SUSPENDIDO se distribuyen de forma balanceada
+    entre las clínicas, evitando concentrar todos los cierres en
+    una sola clínica. El resto de posiciones de cada clínica
+    queda ACTIVO.
+
+    Distribución determinística 20 ACTIVO / 8 FINALIZADO / 2
+    SUSPENDIDO en total; es una regla técnica de simulación y no
     representa prevalencia clínica ni epidemiológica.
     """
-    if indice_uno_basado <= EMBARAZOS_ACTIVOS:
-        return "ACTIVO"
+    finalizados_por_clinica = _repartir_conteo(
+        EMBARAZOS_FINALIZADOS, total_clinicas
+    )
+    suspendidos_por_clinica = _repartir_conteo(
+        EMBARAZOS_SUSPENDIDOS, total_clinicas
+    )
 
-    if indice_uno_basado <= EMBARAZOS_ACTIVOS + EMBARAZOS_FINALIZADOS:
-        return "FINALIZADO"
+    estados = []
 
-    return "SUSPENDIDO"
+    for cantidad_finalizados, cantidad_suspendidos in zip(
+        finalizados_por_clinica,
+        suspendidos_por_clinica,
+    ):
+        cantidad_activos = (
+            embarazos_por_clinica
+            - cantidad_finalizados
+            - cantidad_suspendidos
+        )
+
+        estados.append(
+            ["FINALIZADO"] * cantidad_finalizados
+            + ["SUSPENDIDO"] * cantidad_suspendidos
+            + ["ACTIVO"] * cantidad_activos
+        )
+
+    return estados
 
 
 def generar_embarazos(
@@ -828,6 +909,10 @@ def generar_embarazos(
     coherente con el último evento registrado).
     """
     ids_clinica = [c["id_clinica"] for c in clinicas]
+    embarazos_por_clinica = TOTAL_EMBARAZOS // TOTAL_CLINICAS
+    estados = estados_por_clinica(
+        len(ids_clinica), embarazos_por_clinica
+    )
 
     embarazos = []
     fecha_base = date(2025, 1, 6)
@@ -850,7 +935,13 @@ def generar_embarazos(
             numero_gestas - 1,
         )
 
-        id_clinica = ids_clinica[(i - 1) // 10]
+        indice_clinica = (i - 1) // embarazos_por_clinica
+        posicion_en_clinica = (i - 1) % embarazos_por_clinica
+
+        id_clinica = ids_clinica[indice_clinica]
+        estado_embarazo = estados[indice_clinica][
+            posicion_en_clinica
+        ]
 
         embarazos.append(
             {
@@ -869,7 +960,7 @@ def generar_embarazos(
                 "fecha_probable_parto":
                     fecha_probable_parto.isoformat(),
                 "estado_embarazo":
-                    estado_para_embarazo(i),
+                    estado_embarazo,
                 "fecha_cierre":
                     None,
             }
@@ -880,9 +971,22 @@ def generar_embarazos(
 
 def generar_seguimiento_clinico(
     embarazos: list[dict[str, Any]],
-    medicos: list[dict[str, Any]],
+    medicos_por_clinica: dict[int, list[int]],
 ) -> list[dict[str, Any]]:
-    ids_medico = [m["id_medico"] for m in medicos]
+    """
+    El médico asignado a cada embarazo se elige siempre entre los
+    médicos de SU MISMA clínica (round robin dentro de la clínica),
+    nunca de otra. La cantidad de embarazos por médico puede variar
+    según cuántos médicos tenga cada clínica.
+
+    El seguimiento permanece activo (``activo=True``,
+    ``fecha_fin=None``) mientras el embarazo sigue ACTIVO. Si el
+    embarazo se cierra (FINALIZADO/SUSPENDIDO), el seguimiento
+    también se cierra (``activo=False``,
+    ``fecha_fin=embarazo["fecha_cierre"]``). Por eso debe llamarse
+    después de ``finalizar_fecha_cierre_embarazos``.
+    """
+    contador_por_clinica: dict[int, int] = defaultdict(int)
 
     seguimientos = []
 
@@ -890,6 +994,17 @@ def generar_seguimiento_clinico(
         embarazos,
         start=1,
     ):
+        id_clinica = embarazo["id_clinica"]
+        ids_medico_clinica = medicos_por_clinica[id_clinica]
+
+        indice_medico = (
+            contador_por_clinica[id_clinica]
+            % len(ids_medico_clinica)
+        )
+        contador_por_clinica[id_clinica] += 1
+
+        activo = embarazo["estado_embarazo"] == "ACTIVO"
+
         seguimientos.append(
             {
                 "id_seguimiento":
@@ -897,15 +1012,15 @@ def generar_seguimiento_clinico(
                 "id_embarazo":
                     embarazo["id_embarazo"],
                 "id_medico":
-                    ids_medico[(i - 1) % TOTAL_MEDICOS],
+                    ids_medico_clinica[indice_medico],
                 "fecha_asignacion":
                     embarazo["fecha_inicio"],
                 "fecha_fin":
-                    None,
+                    None if activo else embarazo["fecha_cierre"],
                 "rol_seguimiento":
                     "PRINCIPAL",
                 "activo":
-                    True,
+                    activo,
             }
         )
 
@@ -2143,7 +2258,7 @@ def validar_dataset(
     assert dos_factores == RIESGO_DOS_FACTORES
 
     # --------------------------------------------------------
-    # 10 gestantes por clínica / 6 embarazos por médico
+    # 10 gestantes por clínica
     # --------------------------------------------------------
 
     por_clinica = Counter(
@@ -2155,14 +2270,60 @@ def validar_dataset(
         por_clinica.values()
     ) == {10}
 
+    # --------------------------------------------------------
+    # medico_clinica: cada médico pertenece a exactamente una
+    # clínica (nunca a dos o tres), y las 3 clínicas tienen al
+    # menos un médico.
+    # --------------------------------------------------------
+
+    assert len(medico_clinica) == TOTAL_MEDICOS
+
+    medicos_en_medico_clinica = [
+        r["id_medico"] for r in medico_clinica
+    ]
+
+    assert (
+        len(medicos_en_medico_clinica)
+        == len(set(medicos_en_medico_clinica))
+    )
+
+    assert set(medicos_en_medico_clinica) == ids_medico_validos
+
+    clinica_por_medico = {
+        r["id_medico"]: r["id_clinica"]
+        for r in medico_clinica
+    }
+
+    assert set(clinica_por_medico.values()) == ids_clinica_validos
+
+    # --------------------------------------------------------
+    # Embarazos por médico: la cantidad puede variar (ya no se
+    # exige un reparto uniforme de 6 por médico). Lo obligatorio
+    # es que cada médico tenga al menos un embarazo y que el
+    # médico de cada seguimiento pertenezca a la clínica del
+    # embarazo correspondiente.
+    # --------------------------------------------------------
+
     por_medico = Counter(
         x["id_medico"]
         for x in seguimientos
     )
 
-    assert set(
-        por_medico.values()
-    ) == {6}
+    assert set(por_medico) == ids_medico_validos
+    assert all(
+        cantidad >= 1
+        for cantidad in por_medico.values()
+    )
+
+    for seguimiento in seguimientos:
+        embarazo_del_seguimiento = embarazo_por_id[
+            seguimiento["id_embarazo"]
+        ]
+
+        assert (
+            clinica_por_medico[seguimiento["id_medico"]]
+            == embarazo_del_seguimiento["id_clinica"]
+        )
 
     # --------------------------------------------------------
     # Un dispositivo por embarazo (histórico)
@@ -2205,10 +2366,7 @@ def validar_dataset(
 
         assert sincronizacion >= captura
 
-        if (
-            sincronizacion - captura
-            >= timedelta(hours=6)
-        ):
+        if sincronizacion > captura:
             diferidas += 1
 
     assert diferidas > 0
@@ -2307,14 +2465,8 @@ def validar_dataset(
         == TOTAL_MOVIMIENTOS
     )
 
-    # Las cinco lecturas de una sesión HR/SpO2
-    # deben compartir el mismo nivel de alerta.
-    #
-    # NOTA: esta prueba funcional se mantiene deliberadamente.
-    # SQLAlchemy fuerza hoy 1:1 entre SesionMonitoreo y
-    # LecturaBiometrica; hasta que Tinuola ajuste el modelo a
-    # 1:N, esta es la única incompatibilidad estructural
-    # pendiente entre el dataset y el esquema físico real.
+    # Las cinco lecturas procesadas de una sesión HR/SpO2 deben
+    # compartir el mismo nivel general de alerta.
     for id_sesion in sesiones_hr:
         estados = {
             x["id_semaforo"]
@@ -2553,7 +2705,10 @@ def main() -> None:
     id_especialidad_unica = especialidades[0]["id_especialidad"]
     medicos = generar_medicos(id_especialidad_unica)
 
-    medico_clinica = generar_medico_clinica(medicos, clinicas)
+    medicos_por_clinica = distribuir_medicos_por_clinica(
+        medicos, clinicas
+    )
+    medico_clinica = generar_medico_clinica(medicos_por_clinica)
 
     roles = generar_roles()
     id_rol_por_nombre = {
@@ -2605,13 +2760,6 @@ def main() -> None:
 
     embarazos = generar_embarazos(pacientes, clinicas)
 
-    seguimientos = (
-        generar_seguimiento_clinico(
-            embarazos,
-            medicos,
-        )
-    )
-
     factores_riesgo = (
         generar_factores_riesgo_catalogo()
     )
@@ -2644,8 +2792,16 @@ def main() -> None:
         lecturas,
     )
 
-    # Dispositivo/AsignacionDispositivo dependen del estado final
-    # del embarazo (y de fecha_cierre), por eso se generan después.
+    # SeguimientoClinico / Dispositivo / AsignacionDispositivo
+    # dependen del estado final del embarazo (y de fecha_cierre),
+    # por eso se generan después.
+    seguimientos = (
+        generar_seguimiento_clinico(
+            embarazos,
+            medicos_por_clinica,
+        )
+    )
+
     dispositivos = generar_dispositivos(
         embarazos
     )

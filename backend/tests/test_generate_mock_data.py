@@ -77,10 +77,9 @@ def test_volumen_y_granularidad(dataset):
         for x in lecturas
     )
 
-    # Se conserva deliberadamente: SQLAlchemy hoy fuerza 1:1 entre
-    # SesionMonitoreo y LecturaBiometrica; esta es la regla funcional
-    # aprobada (5 lecturas por sesión HR/SpO2) hasta que Tinuola
-    # ajuste el modelo a 1:N.
+    # Para esta muestra técnica, cada sesión HR/SpO2 conserva
+    # cinco lecturas procesadas representativas. La relación
+    # SesionMonitoreo -> LecturaBiometrica es 1:N.
     assert sum(
         1
         for cantidad in conteo_por_sesion.values()
@@ -264,6 +263,7 @@ def test_usuario_paciente_y_usuario_medico(dataset):
     pacientes = dataset["pacientes"]
     medicos = dataset["medicos"]
     usuarios = dataset["usuarios"]
+    roles = dataset["roles"]
     usuario_paciente = dataset["usuario_paciente"]
     usuario_medico = dataset["usuario_medico"]
 
@@ -302,6 +302,45 @@ def test_usuario_paciente_y_usuario_medico(dataset):
         set(medicos_con_cuenta)
     )
 
+    # Unicidad también del lado de id_usuario: una misma cuenta no
+    # puede aparecer vinculada a más de un paciente ni a más de un
+    # médico.
+    usuarios_en_usuario_paciente = [
+        x["id_usuario"] for x in usuario_paciente
+    ]
+    assert len(usuarios_en_usuario_paciente) == len(
+        set(usuarios_en_usuario_paciente)
+    )
+
+    usuarios_en_usuario_medico = [
+        x["id_usuario"] for x in usuario_medico
+    ]
+    assert len(usuarios_en_usuario_medico) == len(
+        set(usuarios_en_usuario_medico)
+    )
+
+    # RBAC: la cuenta vinculada mediante usuario_medico debe tener
+    # rol MEDICO, y la vinculada mediante usuario_paciente debe
+    # tener rol PACIENTE.
+    id_rol_por_nombre = {
+        r["nombre_rol"]: r["id_rol"] for r in roles
+    }
+    id_rol_por_usuario = {
+        u["id_usuario"]: u["id_rol"] for u in usuarios
+    }
+
+    for relacion in usuario_medico:
+        assert (
+            id_rol_por_usuario[relacion["id_usuario"]]
+            == id_rol_por_nombre["MEDICO"]
+        )
+
+    for relacion in usuario_paciente:
+        assert (
+            id_rol_por_usuario[relacion["id_usuario"]]
+            == id_rol_por_nombre["PACIENTE"]
+        )
+
 
 def test_geografia_clinicas(dataset):
     clinicas = dataset["clinicas"]
@@ -328,6 +367,117 @@ def test_geografia_clinicas(dataset):
     for clinica in clinicas:
         assert clinica["direccion_fisica"]
         assert "calle" not in clinica
+
+
+def test_medico_pertenece_a_una_unica_clinica(dataset):
+    """
+Valida que cada médico esté asociado a una única clínica.
+
+`medico_clinica` debe contener exactamente una relación por médico,
+las tres clínicas deben tener al menos un médico asociado y deben
+existir combinaciones médico-clínica no vinculadas para permitir
+casos negativos en futuras validaciones de RLS.
+"""
+    medicos = dataset["medicos"]
+    clinicas = dataset["clinicas"]
+    medico_clinica = dataset["medico_clinica"]
+
+    ids_medico = {m["id_medico"] for m in medicos}
+    ids_clinica = {c["id_clinica"] for c in clinicas}
+
+    # 1 y 2: exactamente 5 relaciones, una por médico.
+    assert len(medico_clinica) == 5
+
+    medicos_en_relacion = [r["id_medico"] for r in medico_clinica]
+    assert len(medicos_en_relacion) == len(set(medicos_en_relacion))
+    assert set(medicos_en_relacion) == ids_medico
+
+    # 3 y 6: cada médico pertenece exactamente a una clínica
+    # (ningún médico pertenece a más de una).
+    clinicas_por_medico = {
+        r["id_medico"]: r["id_clinica"] for r in medico_clinica
+    }
+    assert len(clinicas_por_medico) == len(medicos)
+
+    # 4: las 3 clínicas tienen al menos un médico.
+    assert set(clinicas_por_medico.values()) == ids_clinica
+
+    # 5: existen combinaciones médico-clínica NO asociadas
+    # (casos negativos para futuras validaciones de RLS).
+    combinaciones_posibles = {
+        (id_medico, id_clinica)
+        for id_medico in ids_medico
+        for id_clinica in ids_clinica
+    }
+    combinaciones_existentes = {
+        (r["id_medico"], r["id_clinica"]) for r in medico_clinica
+    }
+    combinaciones_no_asociadas = (
+        combinaciones_posibles - combinaciones_existentes
+    )
+
+    assert len(combinaciones_no_asociadas) > 0
+
+    # Ejemplo concreto de combinación no permitida: un médico
+    # nunca debe aparecer asociado a una clínica distinta a la
+    # que le fue asignada en medico_clinica.
+    for id_medico, id_clinica in combinaciones_no_asociadas:
+        assert clinicas_por_medico[id_medico] != id_clinica
+
+
+def test_embarazos_por_clinica_y_medico(dataset):
+    """
+    7 y 8: cada clínica mantiene exactamente 10 embarazos y el
+    total sigue siendo 30. 9: cada médico tiene al menos un
+    embarazo asignado. 10: la cantidad por médico puede variar.
+    """
+    embarazos = dataset["embarazos"]
+    medicos = dataset["medicos"]
+    seguimientos = dataset["seguimiento_clinico"]
+
+    assert len(embarazos) == 30
+
+    por_clinica = Counter(e["id_clinica"] for e in embarazos)
+    assert set(por_clinica.values()) == {10}
+
+    por_medico = Counter(s["id_medico"] for s in seguimientos)
+
+    ids_medico = {m["id_medico"] for m in medicos}
+    assert set(por_medico) == ids_medico
+    assert all(cantidad >= 1 for cantidad in por_medico.values())
+
+
+def test_seguimiento_clinico_medico_pertenece_a_clinica_embarazo(dataset):
+    """
+    Punto 11 (prioritario): para CADA seguimiento_clinico, el
+    médico asignado debe pertenecer a la clínica correspondiente
+    al embarazo. Recorre cada seguimiento individualmente
+    (seguimiento -> embarazo -> clínica -> médico -> medico_clinica)
+    en lugar de validar solo cantidades globales.
+    """
+    embarazo_por_id = {
+        e["id_embarazo"]: e for e in dataset["embarazos"]
+    }
+
+    clinica_por_medico = {
+        r["id_medico"]: r["id_clinica"]
+        for r in dataset["medico_clinica"]
+    }
+
+    seguimientos = dataset["seguimiento_clinico"]
+    assert len(seguimientos) == 30
+
+    for seguimiento in seguimientos:
+        embarazo = embarazo_por_id[seguimiento["id_embarazo"]]
+        id_medico = seguimiento["id_medico"]
+
+        # El médico del seguimiento debe tener una asociación
+        # válida en medico_clinica...
+        assert id_medico in clinica_por_medico
+
+        # ...y esa asociación debe ser exactamente la clínica del
+        # embarazo correspondiente (nunca la de otra clínica).
+        assert clinica_por_medico[id_medico] == embarazo["id_clinica"]
 
 
 def test_pk_enteras_desde_100_y_unicas(dataset):
@@ -445,6 +595,74 @@ def test_estados_embarazo_y_fecha_cierre(dataset):
             ) >= date.fromisoformat(embarazo["fecha_inicio"])
 
 
+def test_estados_embarazo_distribuidos_entre_clinicas(dataset):
+    """
+    Evita una correlación artificial entre clínica/provincia y
+    estado del embarazo: cada clínica debe contener una MEZCLA de
+    embarazos ACTIVO y cerrados (FINALIZADO+SUSPENDIDO). No fija la
+    distribución exacta actual por clínica (6/3/1, 6/3/1, 8/2/0):
+    eso es un detalle determinístico de implementación, no el
+    contrato funcional.
+    """
+    embarazos = dataset["embarazos"]
+
+    por_clinica: dict[int, Counter] = {}
+
+    for embarazo in embarazos:
+        contador = por_clinica.setdefault(
+            embarazo["id_clinica"], Counter()
+        )
+        contador[embarazo["estado_embarazo"]] += 1
+
+    assert len(por_clinica) == 3
+
+    # Totales globales, sin importar cómo se repartan por clínica.
+    conteo_global = Counter(e["estado_embarazo"] for e in embarazos)
+    assert conteo_global["ACTIVO"] == 20
+    assert conteo_global["FINALIZADO"] == 8
+    assert conteo_global["SUSPENDIDO"] == 2
+
+    for contador in por_clinica.values():
+        assert sum(contador.values()) == 10
+
+        activos_en_clinica = contador["ACTIVO"]
+        cerrados_en_clinica = (
+            contador["FINALIZADO"] + contador["SUSPENDIDO"]
+        )
+
+        # Cada clínica debe tener al menos un embarazo ACTIVO y al
+        # menos uno cerrado: ninguna clínica puede ser 100 % ACTIVO
+        # ni tener sus 10 embarazos cerrados.
+        assert activos_en_clinica >= 1
+        assert cerrados_en_clinica >= 1
+        assert cerrados_en_clinica < 10
+
+
+def test_seguimiento_clinico_coherente_con_estado_embarazo(dataset):
+    """
+    El seguimiento_clinico debe reflejar el estado del embarazo:
+    - ACTIVO -> activo=True, fecha_fin=None
+    - FINALIZADO/SUSPENDIDO -> activo=False,
+      fecha_fin=embarazo.fecha_cierre
+    """
+    embarazo_por_id = {
+        e["id_embarazo"]: e for e in dataset["embarazos"]
+    }
+
+    seguimientos = dataset["seguimiento_clinico"]
+    assert len(seguimientos) == 30
+
+    for seguimiento in seguimientos:
+        embarazo = embarazo_por_id[seguimiento["id_embarazo"]]
+
+        if embarazo["estado_embarazo"] == "ACTIVO":
+            assert seguimiento["activo"] is True
+            assert seguimiento["fecha_fin"] is None
+        else:
+            assert seguimiento["activo"] is False
+            assert seguimiento["fecha_fin"] == embarazo["fecha_cierre"]
+
+
 def test_ninguna_captura_posterior_a_fecha_cierre(dataset):
     embarazo_por_id = {
         e["id_embarazo"]: e for e in dataset["embarazos"]
@@ -492,6 +710,10 @@ def test_dispositivos_coherentes_con_estado_embarazo(dataset):
         asignacion = asignacion_por_embarazo[embarazo["id_embarazo"]]
         dispositivo = dispositivo_por_id[asignacion["id_dispositivo"]]
 
+        # El dispositivo asignado debe pertenecer a la misma
+        # clínica del embarazo, nunca a otra.
+        assert dispositivo["id_clinica"] == embarazo["id_clinica"]
+
         if embarazo["estado_embarazo"] == "ACTIVO":
             assert asignacion["activo"] is True
             assert asignacion["fecha_fin"] is None
@@ -500,6 +722,7 @@ def test_dispositivos_coherentes_con_estado_embarazo(dataset):
             assert asignacion["activo"] is False
             assert asignacion["fecha_fin"] is not None
             assert asignacion["fecha_fin"] >= asignacion["fecha_inicio"]
+            assert asignacion["fecha_fin"] == embarazo["fecha_cierre"]
             assert dispositivo["estado"] == "DISPONIBLE"
 
     codigos = [d["codigo_dispositivo"] for d in dispositivos]
