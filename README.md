@@ -138,6 +138,11 @@ El repositorio se encuentra en una etapa temprana. Actualmente contiene principa
 - Incorporación de auditoría (`AuditoriaLog`), anonimización y controles de cumplimiento con la Ley 81 de 2019.
 - Pruebas automatizadas y documentación final de la tesis.
 
+## Calidad del proyecto
+
+- **Integración continua:** el workflow [`CI`](.github/workflows/ci.yml) se ejecuta en cada Pull Request hacia `main`, instala el backend con Python 3.12 y corre las pruebas automatizadas, incluida la validación de las migraciones contra un servicio PostgreSQL 16 efímero.
+- **Criterios de cierre de un ticket:** [Definition of Done](docs/definition_of_done.md).
+
 ## Estrategia de ramas
 
 - `main` — versión estable del proyecto.
