@@ -19,28 +19,37 @@ jobs:
     name: Pruebas del backend (Python 3.12 + PostgreSQL 16)
     runs-on: ubuntu-latest
 
+    # Fuente única de las credenciales de PostgreSQL del job: el servicio y la
+    # URL de las pruebas las leen de aquí, para que no puedan desincronizarse
+    # entre sí.
+    env:
+      # Credenciales ficticias, efímeras y exclusivas de GitHub Actions:
+      # viven solo dentro de este job y desaparecen al terminar. No son
+      # secretos, no corresponden a ningún entorno real y no deben reutilizarse
+      # fuera de aquí. Por eso van en claro y no como secrets del repositorio.
+      POSTGRES_USER: fetalalert_ci
+      POSTGRES_PASSWORD: ci_efimero_no_es_secreto
+      # La base debe llamarse exactamente así: test_migration_postgresql.py
+      # aborta contra cualquier otro nombre, porque el ciclo de validación
+      # borra y recrea el esquema operacional completo.
+      POSTGRES_DB: scrum52_validacion_tmp
+
     services:
       postgres:
         image: postgres:16
         env:
-          # Credenciales ficticias, efímeras y exclusivas de GitHub Actions:
-          # viven solo dentro de este contenedor y desaparecen al terminar el
-          # job. No son secretos, no corresponden a ningún entorno real y no
-          # deben reutilizarse fuera de aquí. Por eso van en claro y no como
-          # secrets del repositorio.
-          POSTGRES_USER: fetalalert_ci
-          POSTGRES_PASSWORD: ci_efimero_no_es_secreto
-          # La base debe llamarse exactamente así: test_migration_postgresql.py
-          # aborta contra cualquier otro nombre, porque el ciclo de validación
-          # borra y recrea el esquema operacional completo.
-          POSTGRES_DB: scrum52_validacion_tmp
+          POSTGRES_USER: ${{ env.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
+          POSTGRES_DB: ${{ env.POSTGRES_DB }}
         ports:
           - 5432:5432
-        # pg_isready retiene el arranque de los steps hasta que el servidor
-        # acepte conexiones, para que las pruebas no corran contra una base
-        # todavía inicializándose.
+        # El health check solo espera a que PostgreSQL acepte conexiones, para
+        # que las pruebas no corran contra un servidor todavía inicializándose.
+        # Las credenciales y la base dedicada no se comprueban aquí: eso lo
+        # valida el step de pruebas contra PostgreSQL, que se conecta con
+        # SCRUM52_TEST_DATABASE_URL.
         options: >-
-          --health-cmd "pg_isready -U fetalalert_ci -d scrum52_validacion_tmp"
+          --health-cmd "pg_isready"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
@@ -76,7 +85,7 @@ jobs:
       - name: Pruebas contra PostgreSQL
         working-directory: backend
         env:
-          SCRUM52_TEST_DATABASE_URL: postgresql+psycopg://fetalalert_ci:ci_efimero_no_es_secreto@localhost:5432/scrum52_validacion_tmp
+          SCRUM52_TEST_DATABASE_URL: postgresql+psycopg://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
         run: |
           python -m pytest -q -rs tests/test_migration_postgresql.py --junitxml=pytest-postgresql.xml
           python - <<'PY'

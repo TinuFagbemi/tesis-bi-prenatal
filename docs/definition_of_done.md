@@ -19,7 +19,11 @@ migraciones, datos simulados o documentación.
       aparecer como *skipped*, con `SCRUM52_TEST_DATABASE_URL` apuntando a la
       base dedicada `scrum52_validacion_tmp`. El workflow `CI` lo verifica
       sobre el reporte JUnit de esa ejecución y falla el job si al menos una
-      prueba de PostgreSQL queda omitida.
+      prueba de PostgreSQL queda omitida. La validación debe cubrir el ciclo
+      completo `upgrade -> downgrade -> upgrade -> alembic check` sobre esa
+      base: confirma que la migración puede revertirse y volver a aplicarse, y
+      que al final no quedan divergencias pendientes entre los modelos y el
+      esquema.
 - [ ] **Pull Request vinculado al ticket de Jira y aprobado.** El PR referencia
       su ticket (por ejemplo, `SCRUM-60`) y cuenta con la aprobación de la otra
       autora.
