@@ -775,6 +775,96 @@ def test_ningun_mensaje_de_error_revela_la_url_ni_la_contrasena():
     assert "<credenciales>" in saneado
 
 
+# Contraseñas que rompen cualquier regex ingenua de "usuario:contraseña": los
+# propios delimitadores aparecen dentro del secreto, codificados y sin codificar.
+CONTRASENAS_HOSTILES = [
+    pytest.param("zorro_lince", ("zorro_lince",), id="sin-caracteres-especiales"),
+    pytest.param("zorro%40lince", ("zorro%40lince", "lince"), id="arroba-codificada"),
+    pytest.param("zorro%2Flince", ("zorro%2Flince", "lince"), id="barra-codificada"),
+    pytest.param("zorro@lince", ("zorro@lince", "lince"), id="arroba-sin-codificar"),
+    pytest.param("zorro/lince", ("zorro/lince", "lince"), id="barra-sin-codificar"),
+    pytest.param("zorro lince", ("zorro", "lince"), id="espacio-sin-codificar"),
+]
+
+
+@pytest.mark.parametrize(("contrasena", "fragmentos"), CONTRASENAS_HOSTILES)
+def test_sanear_mensaje_oculta_usuario_y_contrasena(contrasena, fragmentos):
+    """Ni la contraseña ni un pedazo suyo pueden sobrevivir al saneo."""
+    mensaje = (
+        f"connection to postgresql+psycopg://ardilla:{contrasena}@host:5432/base "
+        "failed: timeout"
+    )
+
+    saneado = sanear_mensaje(mensaje)
+
+    assert "ardilla" not in saneado
+    for fragmento in fragmentos:
+        assert fragmento not in saneado
+    assert "<credenciales>" in saneado
+    # El contexto útil sobrevive: qué driver era y qué falló.
+    assert saneado.startswith("connection to postgresql+psycopg://")
+    assert saneado.endswith("failed: timeout")
+
+
+def test_sanear_mensaje_oculta_una_url_truncada_sin_host():
+    """Sin host después del último `@`, lo que sigue es cola de contraseña."""
+    saneado = sanear_mensaje("no se pudo conectar a postgresql://ardilla:zorro@lince")
+
+    assert saneado == "no se pudo conectar a postgresql://<credenciales>"
+
+
+def test_sanear_mensaje_oculta_el_usuario_aunque_no_haya_contrasena():
+    saneado = sanear_mensaje("connection to postgresql://ardilla@host/base failed")
+
+    assert "ardilla" not in saneado
+    assert "<credenciales>" in saneado
+
+
+def test_sanear_mensaje_respeta_las_urls_sin_credenciales():
+    """Una URL sin userinfo no esconde nada y sigue siendo legible."""
+    mensaje = "detalle en https://sqlalche.me/e/20/e3q8"
+
+    assert sanear_mensaje(mensaje) == mensaje
+
+
+def test_sanear_mensaje_trata_cada_url_del_mensaje_por_separado():
+    mensaje = (
+        "fallo postgresql://ardilla:zorro@host/base y ver https://sqlalche.me/e/20/e3q8"
+    )
+
+    saneado = sanear_mensaje(mensaje)
+
+    assert "ardilla" not in saneado
+    assert "zorro" not in saneado
+    assert "https://sqlalche.me/e/20/e3q8" in saneado
+
+
+def test_sanear_mensaje_oculta_las_credenciales_de_dos_urls_del_mismo_mensaje():
+    """Dos URLs con credenciales distintas: ninguna sobrevive, el texto sí.
+
+    Cada URL trae un delimitador hostil dentro de la contraseña: la primera un
+    `@` sin codificar, la segunda una barra codificada.
+    """
+    mensaje = (
+        "fallo postgresql://ardilla:zorro@lince@host-alfa/base-alfa"
+        " y al reintentar "
+        "postgresql://tejon:nutria%2Fgamo@host-beta/base-beta tampoco conectó"
+    )
+
+    saneado = sanear_mensaje(mensaje)
+
+    for usuario in ("ardilla", "tejon"):
+        assert usuario not in saneado
+    for fragmento in ("zorro", "lince", "nutria", "gamo", "%2F"):
+        assert fragmento not in saneado
+    assert saneado.count("<credenciales>") == 2
+    assert " y al reintentar " in saneado
+    assert saneado == (
+        "fallo postgresql://<credenciales> y al reintentar "
+        "postgresql://<credenciales> tampoco conectó"
+    )
+
+
 def test_el_motor_no_soportado_no_incluye_la_url():
     with pytest.raises(MotorNoSoportado) as error:
         verificar_url("mysql+pymysql://usuario:clave_secreta@localhost/base")

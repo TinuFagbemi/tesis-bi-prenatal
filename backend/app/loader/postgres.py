@@ -52,17 +52,59 @@ MOTOR_REQUERIDO = "postgresql"
 DIRECTORIO_BACKEND = Path(__file__).resolve().parents[2]
 DIRECTORIO_ALEMBIC = DIRECTORIO_BACKEND / "alembic"
 
-# user:password inside a connection URL, redacted before anything is printed.
-_CREDENCIALES_EN_URL = re.compile(r"(?<=://)[^\s/@]+:[^\s/@]+(?=@)")
+CREDENCIALES_REDACTADAS = "<credenciales>"
+
+# A URL scheme, ``postgresql+psycopg://`` and friends. It survives redaction so
+# an error still says which driver was involved.
+_ESQUEMA_DE_URL = r"[A-Za-z][A-Za-z0-9+.\-]*://"
+
+# One URL sitting inside free text: its scheme plus everything up to the end of
+# the line or the start of the next URL, whichever comes first. Stopping at the
+# next scheme is what keeps two URLs in the same message independent.
+_URL_EMBEBIDA = re.compile(
+    rf"(?P<esquema>{_ESQUEMA_DE_URL})(?P<resto>(?:(?!{_ESQUEMA_DE_URL})[^\r\n])*)"
+)
+
+
+def _redactar_url(coincidencia: re.Match[str]) -> str:
+    """Hide the credential-bearing part of a single URL occurrence."""
+    esquema = coincidencia.group("esquema")
+    resto = coincidencia.group("resto")
+
+    # No ``@`` means no userinfo section and nothing to hide, so a plain
+    # ``https://sqlalche.me/e/20/e3q8`` back-reference stays readable.
+    ultimo_arroba = resto.rfind("@")
+    if ultimo_arroba == -1:
+        return coincidencia.group(0)
+
+    # Everything up to the *last* ``@`` is treated as credentials, because a
+    # password may contain ``@`` and ``/`` unencoded and the earlier ``@`` would
+    # then be part of it. The rest of that token goes too: in a truncated URL
+    # what follows the last ``@`` is a password tail, not a host.
+    fin = ultimo_arroba
+    while fin < len(resto) and not resto[fin].isspace():
+        fin += 1
+
+    return f"{esquema}{CREDENCIALES_REDACTADAS}{resto[fin:]}"
 
 
 def sanear_mensaje(mensaje: str) -> str:
-    """Redact anything shaped like credentials inside a connection URL.
+    """Redact credentials from any URL embedded in ``mensaje``.
 
-    Driver errors can quote the URL they failed to connect with. The dataset is
-    fictitious, but a password never belongs in a log.
+    The message is never assumed to be a parseable URL: drivers quote URLs
+    inside free text, sometimes truncated or non canonical, so this scans for
+    URL occurrences instead of parsing the whole string. Whenever one carries a
+    userinfo section, everything between the scheme and the end of that section
+    is replaced -- host, port and database included.
+
+    Dropping the host too is deliberate, and it is why this is conservative
+    rather than precise. Keeping it would mean deciding where the password
+    ends, and that decision is not sound: ``user:p@ss@host`` and a truncated
+    ``user:p@ss`` are indistinguishable, so any rule that preserves the tail
+    leaks a password fragment in the second case. The dataset is fictitious,
+    but a password never belongs in a log.
     """
-    return _CREDENCIALES_EN_URL.sub("<credenciales>", mensaje)
+    return _URL_EMBEBIDA.sub(_redactar_url, mensaje)
 
 
 # ---------------------------------------------------------------------------
