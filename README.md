@@ -196,10 +196,13 @@ La conexión sale de `DATABASE_URL`. El archivo que la aplicación lee es tu
 `.env` local, que no se versiona y se crea copiando `.env.example`; **ambos
 traen `db:5432`**, un nombre que solo existe dentro de la red de Docker. Si
 ejecutas el comando directamente desde Windows, define `DATABASE_URL` apuntando
-a `localhost:<POSTGRES_PORT>` en esa terminal —lo que tiene prioridad sobre el
-`.env`— o ejecuta el comando dentro del contenedor. El cargador además solo se
-ejecuta si `APP_ENV` es un ambiente seguro (`development`, `test` o `ci`) y se
-detiene si detecta producción.
+a `127.0.0.1:<POSTGRES_PORT>` en esa terminal —lo que tiene prioridad sobre el
+`.env`— o ejecuta el comando dentro del contenedor. Conviene la dirección IPv4
+literal y no `localhost`: Docker publica PostgreSQL solo en IPv4, mientras que
+`localhost` en Windows se resuelve primero a `::1`, de modo que cada conexión
+espera a que expire ese intento IPv6 antes de reintentar por IPv4. El cargador
+además solo se ejecuta si `APP_ENV` es un ambiente seguro (`development`, `test`
+o `ci`) y se detiene si detecta producción.
 
 ### Qué significa idempotencia aquí
 
