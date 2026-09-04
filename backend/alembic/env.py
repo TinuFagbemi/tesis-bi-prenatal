@@ -1,7 +1,8 @@
+from itertools import chain
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import CheckConstraint, engine_from_config, pool
 
 import app.models  # noqa: F401  -- registers every model on Base.metadata
 from app.config import settings
@@ -21,6 +22,40 @@ target_metadata = Base.metadata
 # would report divergence against a database that is already up to date.
 INCLUDE_SCHEMAS = True
 
+# ``Enum(native_enum=False, create_constraint=True)`` makes SQLAlchemy attach a
+# CHECK constraint that the type owns -- "type bound" in its own vocabulary.
+# Alembic 1.19 started comparing CHECK constraints, but it builds the metadata
+# side with ``all_table_check_constraints()``, which deliberately drops the
+# type-bound ones, while it reflects every named CHECK back from the server.
+# That asymmetry makes autogenerate propose dropping all of them on every run,
+# against a database that is already up to date.
+#
+# The names are derived from the metadata itself, so adding, renaming or
+# removing an enum column keeps this in sync with no list to maintain.
+TYPE_BOUND_CHECK_NAMES = frozenset(
+    constraint.name
+    for table in target_metadata.tables.values()
+    for constraint in chain(
+        table.constraints, *(column.constraints for column in table.columns)
+    )
+    # ``_type_bound`` is private, but it is the same flag Alembic reads to build
+    # the metadata side of the comparison, so both stay in agreement.
+    if isinstance(constraint, CheckConstraint)
+    and getattr(constraint, "_type_bound", False)
+)
+
+
+def include_object(object_, name, type_, reflected, compare_to) -> bool:
+    """Ignore only the reflected CHECK that the Enum type itself redeclares.
+
+    Everything else is left to Alembic: explicit CHECK constraints, columns,
+    indexes, unique constraints and foreign keys keep being compared, so a real
+    divergence still fails ``alembic check``.
+    """
+    if type_ == "check_constraint" and reflected:
+        return name not in TYPE_BOUND_CHECK_NAMES
+    return True
+
 
 def run_migrations_offline() -> None:
     url = config.get_main_option("sqlalchemy.url")
@@ -30,6 +65,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         include_schemas=INCLUDE_SCHEMAS,
+        include_object=include_object,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -46,6 +82,7 @@ def run_migrations_online() -> None:
             connection=connection,
             target_metadata=target_metadata,
             include_schemas=INCLUDE_SCHEMAS,
+            include_object=include_object,
         )
         with context.begin_transaction():
             context.run_migrations()
