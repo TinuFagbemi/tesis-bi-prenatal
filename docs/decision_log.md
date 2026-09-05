@@ -166,3 +166,293 @@ naturaleza— toma además una instantánea previa y la restaura explícitamente
 `setval` en un `try/finally`, fallando si la restauración no funciona. El reporte
 JUnit de ambos archivos se revisa al final del job y una sola prueba omitida lo
 pone en rojo.
+
+## SCRUM-62 — Contratos Pydantic y endpoint de recepción de lecturas biométricas
+
+Se implementó la primera entrada vertical de la aplicación: solicitud HTTP →
+validación Pydantic → validaciones mínimas de negocio → persistencia SQLAlchemy
+→ respuesta tipada. El artefacto es `POST /api/v1/sesiones-monitoreo`, con los
+schemas en `backend/app/schemas/`, la lógica en `backend/app/services/` y el
+router en `backend/app/api/v1/`.
+
+### Decisiones aprobadas
+
+- **Forma del paquete HTTP: una sesión con su colección de lecturas.** El cuerpo
+  trae la `SesionMonitoreo` y, anidada, la lista de sus `LecturaBiometrica`. La
+  relación es **1:N** y la lista **no puede venir vacía**: una sesión sin
+  lecturas no describe ningún evento de monitoreo.
+- **Ruta versionada desde el primer endpoint:** `/api/v1/...`. El consumidor
+  previsto es el nodo edge de SCRUM-64/65, que sincroniza de forma diferida y
+  puede estar corriendo una versión antigua cuando el servidor ya cambió; el
+  prefijo es lo que permite evolucionar el contrato sin romperlo. `GET /health`
+  se mantiene sin prefijo: es operativo, no parte de la API de negocio.
+- **Schemas Pydantic separados de los modelos ORM.** Un modelo SQLAlchemy nunca
+  se acepta como cuerpo HTTP ni se devuelve como respuesta. Los enums sí se
+  importan de `app.models.enums`, para que exista un solo vocabulario.
+- **`extra="forbid"`.** Un campo que el contrato no declara es un error, igual
+  que en el cargador de SCRUM-61. Sin esto, un `id_seison` mal escrito se leería
+  como «el cliente omitió `id_sesion`».
+- **Enteros estrictos, decimales laxos.** `StrictInt` en los identificadores y en
+  `mov_valor`, de modo que `true` no se lea como 1 ni `"119"` como 119. Para los
+  valores biométricos se mantiene la regla laxa: una cadena numérica se acepta y
+  un booleano no. Es exactamente la línea que ya traza `normalizar_valor` en el
+  cargador, y trazarla distinta habría hecho que el mismo dato entrara por una
+  puerta y fuera rechazado por la otra.
+- **Marcas de tiempo con offset obligatorio** (`AwareDatetime`), coherente con
+  las columnas `TIMESTAMPTZ` y con lo que ya exige el cargador. El offset se
+  conserva; no se normaliza a UTC durante la validación.
+- **`None` → `NULL`, nunca cero ni cadena vacía.** Omitir una métrica equivale a
+  enviarla en `null`.
+- **Reparto explícito de validaciones entre capas.** Pydantic se ocupa de la
+  *forma* del mensaje: tipos, obligatorios y opcionales, enums, zona horaria,
+  forma biométrica de cada lectura y coherencia entre `tipo_sesion` y la forma
+  de todas sus lecturas. PostgreSQL conserva la autoridad final sobre los
+  *rangos de valor* (`hr_valor > 0`, `spo2_valor` entre 0 y 100,
+  `mov_valor >= 0`) y sobre la integridad referencial. Restarle esos rangos a la
+  base habría significado abrir una segunda copia del criterio clínico dentro de
+  la API.
+- **Tres reglas se duplican a propósito** —forma biométrica, sincronización no
+  anterior a la captura, y fin de sesión no anterior a su inicio—, porque
+  convertir un error opaco de la base en un 422 que nombra el campo vale más que
+  la línea ahorrada. Los rangos numéricos **no** se duplican.
+- **Coherencia `tipo_sesion` ↔ forma de las lecturas.** `SIGNOS_MATERNOS` solo
+  admite lecturas de HR/SpO₂ y `MOVIMIENTOS_FETALES` solo lecturas de
+  movimiento. Ningún CHECK de SQL puede expresarlo, porque la regla cruza
+  `sesion_monitoreo` y `lectura_biometrica`: el validador de Pydantic es el
+  único lugar donde vive.
+- **Regla de la semana 20 sin duplicar el umbral.** Los movimientos fetales solo
+  se registran desde la semana gestacional 20. El docstring de
+  `LecturaBiometrica` ya asignaba explícitamente esa regla a la capa de
+  servicio, y aquí se aplica **reutilizando de solo lectura** la constante
+  `SEMANA_MINIMA_DE_MOVIMIENTO` que ya declara `app.loader.dataset`. No se
+  ejecuta el cargador ni se modifica nada de SCRUM-61; una prueba verifica que
+  lo único que el endpoint toma de ese módulo es esa constante.
+- **El endpoint no clasifica el semáforo ni deriva la semana gestacional.**
+  Recibe `id_semaforo` e `id_tiempo_gest` ya decididos y solo comprueba que
+  existan. El generador tampoco clasifica —parte de un estado ya elegido y
+  fabrica valores compatibles con él—, así que no hay ninguna tabla de umbrales
+  en el repositorio que copiar, y SCRUM-62 no inaugura una.
+- **Estrategia de identificadores: los genera PostgreSQL.** `id_sesion` e
+  `id_lectura` no forman parte de la entrada; salen de las secuencias `SERIAL` y
+  se devuelven en la respuesta. Aceptarlos del cliente habría chocado con esas
+  secuencias y obligado a reimplementar el ajuste que SCRUM-61 necesitó para
+  cargar identificadores explícitos.
+- **Una sola transacción por paquete, con un único `commit`.** El servicio hace
+  `add` y `flush` y **no** hace `commit` ni `rollback`: la transacción pertenece
+  a quien llama, igual que en el cargador. El dueño explícito es el router. El
+  segundo `flush` es el que fuerza la evaluación de todos los CHECK y las llaves
+  foráneas de las lecturas **antes** del commit, y es lo que hace atómico el
+  paquete: si falla la tercera lectura de cinco, la sesión escrita un momento
+  antes nunca se confirma.
+- **`get_db()` solo abre y cierra.** No decide sobre la transacción, lo que deja
+  la decisión visible en el router y permite que las pruebas sustituyan la
+  dependencia por una sesión unida a una transacción que ellas revierten.
+- **Semántica de respuestas:** `201` creado, `404` referencia inexistente, `409`
+  conflicto de integridad, `422` contrato o regla del dominio incumplidos, `500`
+  error interno. La respuesta de éxito devuelve solo `id_sesion`,
+  `lecturas_creadas` e `ids_lectura`.
+- **Clasificación de errores por `SQLSTATE`, en una función centralizada.**
+  `23514` (CHECK) → 422, porque es un dato que el cliente envió mal; `23503`
+  (FK, por carrera) → 409; `23505` (UNIQUE/PK) → **500** *(corregido en la
+  revisión del PR #10; ver más abajo)*; `23502` (NOT NULL) → **500**, porque
+  Pydantic ya garantiza los campos obligatorios y un `NULL` que llegue hasta la
+  base delata un defecto del servidor, no del payload; `DataError` → **500**
+  salvo que el valor pueda atribuirse al payload de forma controlada, y hoy no
+  existe ese caso porque el contrato ya acota `mov_valor` al rango `SMALLINT`;
+  cualquier otro código → 500. `clasificar_error_de_base` es pura y se prueba
+  con errores fabricados.
+- **Nada se sobrescribe nunca.** Ningún camino actualiza ni reemplaza una fila
+  existente: o se crea el paquete completo, o no queda nada.
+- **Idempotencia HTTP diferida a SCRUM-63.** No se implementan
+  `Idempotency-Key`, tabla o caché de idempotencia, deduplicación ni
+  reutilización de respuestas. Queda constancia de un hallazgo relevante para ese
+  ticket: **ni `sesion_monitoreo` ni `lectura_biometrica` tienen hoy un UNIQUE
+  fuera de su llave primaria**, así que no existe ningún identificador estable
+  con el que reconocer un reenvío. SCRUM-63 necesitará una migración —un
+  identificador externo único, o una tabla de idempotencia—. SCRUM-62 no cierra
+  esa puerta: la respuesta ya devuelve los identificadores que una respuesta
+  idempotente tendría que reutilizar, y `extra="forbid"` no impide añadir
+  después un campo opcional nuevo.
+- **Ningún mensaje del driver sale del proceso**, ni en la respuesta ni en el
+  log. No se usa `str(excepción)` ni `repr(excepción)` en ninguna parte: el
+  cuerpo lleva mensajes fijos escritos en el proyecto, y el log solo registra
+  campos elegidos uno por uno —clase de la excepción, `SQLSTATE`, y los nombres
+  de restricción, tabla y columna que reporta PostgreSQL—. El texto del driver
+  cita la sentencia y sus parámetros, y esos parámetros son el paquete. Tampoco
+  se adjunta `exc_info`: la traza de un error de base arrastra la sentencia en
+  sus marcos.
+- **Sin autenticación y sin despliegue productivo.** El endpoint no tiene JWT ni
+  RBAC —corresponden a un ticket posterior— y **no es apto para producción**. Se
+  ejecuta solo en el entorno controlado, nunca expuesto a una red pública.
+- **No se creó ninguna migración.** El esquema desplegado soporta el endpoint tal
+  como está.
+- **No se añadió ninguna dependencia.** FastAPI, Pydantic, SQLAlchemy, psycopg,
+  pytest y httpx ya instalados fueron suficientes.
+- **`http.HTTPStatus` en vez de `fastapi.status`.** La constante de 422 está
+  deprecada en la versión de Starlette instalada; la de la biblioteca estándar
+  no emite advertencia y no cambia con la versión del framework.
+
+### Validación
+
+Las pruebas se reparten en tres archivos con responsabilidades distintas.
+`test_ingestion_schemas.py` valida el contrato sin FastAPI ni base de datos, e
+incluye pruebas que confirman que un `spo2_valor` de 150 **sí** atraviesa el
+contrato, para que la decisión de dejar los rangos a PostgreSQL no se pierda por
+descuido en un cambio futuro. `test_ingestion_api.py` aísla la capa HTTP con
+dobles: comprueba la traducción de cada `SQLSTATE`, que el `commit` ocurre una
+sola vez y que hay `rollback` ante cualquier fallo, y que ni la respuesta ni el
+log filtran la contraseña, la URL, el SQL o la traza de un error fabricado que
+los lleva a propósito. También verifica, sobre el árbol sintáctico, que los
+módulos que atienden la petición no invocan el cargador ni crean esquema.
+
+`test_ingestion_api_postgresql.py` ejecuta el ciclo real contra PostgreSQL 16 con
+`SCRUM62_TEST_DATABASE_URL`, sin recurso alternativo a `DATABASE_URL`. No ejecuta
+ninguna sentencia DDL: cada prueba abre una transacción exterior que revierte
+siempre, y la `Session` que atiende la petición se une a ella con
+`join_transaction_mode="create_savepoint"`. Ese modo es explícito y necesario:
+con el valor por omisión la Session caería en `rollback_only`, y entonces el
+`rollback()` del endpoint arrastraría también la transacción exterior, borrando
+las filas de referencia y haciendo imposible distinguir «revirtió el paquete» de
+«revirtió todo». Con el SAVEPOINT, el `commit` del endpoint es real y observable
+pero no sobrevive. Las filas de referencia son ficticias, con valores UNIQUE
+prefijados por el ticket, y las del catálogo se reutilizan si ya existen, de modo
+que la suite corre igual sobre la base vacía de CI que sobre una de desarrollo.
+En CI comparte la misma base efímera de SCRUM-52 y SCRUM-61, y su reporte JUnit
+se suma a la verificación que pone el job en rojo si alguna prueba queda omitida.
+
+**Colisión real de llave primaria.** Como el cliente no envía identificadores y
+no hay UNIQUE fuera de la PK, un choque solo puede provocarse adelantando la
+secuencia de `id_sesion` para que el siguiente `nextval` devuelva un valor ya
+ocupado. La prueba crea primero una sesión legítima por el endpoint, adelanta la
+secuencia hasta el `id_sesion` de esa sesión y envía un segundo paquete
+deliberadamente distinto en tipo, fechas y forma biométrica. El resultado es
+`500` —es una secuencia desincronizada, no algo que el cliente pudiera haber
+hecho—, la fila previa queda idéntica campo por campo, no aparece una segunda
+sesión, no queda ninguna lectura del paquete fallido, la respuesta no es un 2xx
+ni devuelve identificadores, y no filtra SQL, credenciales, nombre de
+restricción ni `SQLSTATE`.
+
+Tres salvaguardas rodean la maniobra. La secuencia se descubre desde el catálogo
+con `pg_get_serial_sequence`, en vez de componer su nombre a mano. Su estado
+`(last_value, is_called)` se fotografía antes y se restaura después con `setval`
+en un `try/finally` que falla explícitamente si la restauración no funciona; esa
+restauración corre con `lock_timeout`, porque `ALTER SEQUENCE` toma un bloqueo
+exclusivo y así un problema de orden se manifiesta como error y nunca como un
+bloqueo indefinido. Y una prueba aparte mide que el rollback de la transacción
+exterior deshace el `ALTER SEQUENCE` por sí solo, antes de que la red de
+seguridad actúe, de modo que un fallo del aislamiento se vería en lugar de
+quedar tapado. Verificado también desde fuera de las pruebas: la secuencia
+`operacional.sesion_monitoreo_id_sesion_seq` queda en el mismo estado antes y
+después de la suite completa.
+
+### Correcciones de la revisión del PR #10
+
+La revisión encontró cinco invariantes que el endpoint no estaba sosteniendo.
+Ninguna necesitó migración: el esquema ya las soportaba, lo que faltaba era
+comprobarlas.
+
+- **El dispositivo debe estar asignado a ese embarazo durante la sesión.**
+  Comprobar por separado que el embarazo existe y que el dispositivo existe no
+  demuestra que ese dispositivo se le hubiera entregado a esa gestante:
+  cualquier combinación de dos filas válidas pasaba. `AsignacionDispositivo` es
+  justamente la tabla que los une, y los une **durante un período**, así que la
+  regla es temporal: la asignación tiene que empezar antes o el mismo día que la
+  sesión, y si tiene `fecha_fin`, terminar después o el mismo día que ella. Una
+  asignación sin `fecha_fin` sigue vigente y cubre cualquier sesión posterior a
+  su inicio.
+
+  Deliberadamente **no** se mira `activo`. Ese campo describe el préstamo
+  *ahora*, y juzgar con él una sesión pasada invalidaría retroactivamente todas
+  las lecturas tomadas durante un préstamo que después se cerró. Hay una prueba
+  dedicada a eso: una asignación con `activo=False` que sí cubría las fechas se
+  acepta.
+
+  Una consulta por paquete, no por lectura. Si el paquete es imposible, el
+  código es `422`: las dos referencias existen, lo que no se sostiene es la
+  combinación.
+
+- **`id_tiempo_gest` se valida contra el embarazo y la fecha de captura.**
+  Antes solo se comprobaba que la fila del catálogo existiera, lo que
+  demostraba qué semana *declaraba* el cliente, no en qué semana estaba el
+  embarazo cuando se capturó la lectura. Ahora la semana se calcula desde
+  `Embarazo.fecha_inicio` con la misma aritmética que usa el generador
+  —semanas completas transcurridas, contando la primera como semana 1— y se
+  exige que coincida con la del catálogo.
+
+  Esto arregla dos cosas a la vez. La primera es la veracidad de la propia
+  dimensión: una lectura archivada en la semana 31 pero capturada en la 12
+  corrompería cualquier agrupación gestacional que la ETL construya después. La
+  segunda es la regla de la semana 20, que hasta ahora era **trivial de
+  esquivar**: bastaba con apuntar `id_tiempo_gest` a cualquier semana ≥ 20 y un
+  movimiento capturado en la semana 12 entraba sin problema. Aplicada sobre la
+  semana calculada, esa puerta se cierra, y hay una prueba que lo comprueba
+  intentando exactamente ese engaño.
+
+  También se rechaza de forma controlada una captura anterior al inicio del
+  embarazo o que caiga fuera del rango 1-42 que admite el catálogo.
+
+  Sin consultas nuevas: la fecha de inicio del embarazo se lee en la misma
+  consulta que prueba que existe, y las semanas del catálogo ya venían en lote.
+
+- **`23505` sobre las llaves primarias generadas es un error interno, no un
+  conflicto del cliente.** Un duplicado normalmente significa «mandaste algo que
+  ya está», y `409` sería la respuesta honesta. Aquí no puede significar eso: el
+  cliente no envía `id_sesion` ni `id_lectura`, las dos llaves salen de
+  secuencias de PostgreSQL, y ninguna de las dos tablas tiene una clave de
+  negocio con la que pudiera chocar. Una llave duplicada solo puede describir
+  una secuencia que quedó por detrás de las filas guardadas, que es un fallo de
+  este lado. Devolver `409` culparía al cliente de un problema del servidor y,
+  además, se leería como «detecté tu reenvío», que es precisamente lo que
+  SCRUM-62 **no** hace. Pasa a `500`. Cuando SCRUM-63 introduzca un
+  identificador que envíe el cliente, un `409` real será posible y esta decisión
+  volverá a mirarse.
+
+  `23503` (llave foránea por carrera) se queda en `409`: es lo único que hoy
+  puede provocar el cliente y merecer ese código.
+
+- **Cada lectura tiene que haberse capturado dentro de su sesión.** Se validaba
+  que la sincronización no precediera a la captura y que la sesión no terminara
+  antes de empezar, pero nada ataba la lectura a la sesión en el tiempo: una
+  sesión de media hora podía traer una lectura capturada semanas antes o
+  después. Ahora `fecha_hora_captura` debe caer entre `fecha_inicio` y
+  `fecha_fin`, extremos incluidos.
+
+  `fecha_hora_sincronizacion` queda fuera de la regla a propósito: sincronizar
+  mucho después de que la sesión terminó es el comportamiento normal de un
+  sistema pensado para conectividad intermitente, no una anomalía.
+
+- **`estado_sesion` y `fecha_fin` tienen que decir lo mismo.** No se inventa una
+  máquina de estados: se aplica literalmente la semántica que ya documenta
+  `SesionMonitoreo`, donde `fecha_fin` permanece NULL mientras la sesión sigue
+  `PENDIENTE` o quedó `INTERRUMPIDA`. Por tanto esos dos estados no admiten
+  `fecha_fin`, y `COMPLETADA` y `PROCESADA` la exigen: una sesión que declara
+  haber terminado tiene que decir cuándo. Omitir el estado se valida como
+  `PENDIENTE`, porque es lo que la base va a guardar, así que omitirlo y mandar
+  `fecha_fin` es tan incoherente como declararlo.
+
+### Lo que SCRUM-62 sigue sin hacer con un reenvío
+
+Conviene dejarlo por escrito sin ambigüedad, porque la redacción anterior de
+este documento se prestaba a leerse al revés: **este endpoint no reconoce
+reenvíos en absoluto**. El mismo JSON enviado dos veces crea dos sesiones, con
+dos `id_sesion` distintos, y las dos respuestas son `201`. No hay detección, ni
+deduplicación, ni reutilización de respuestas, y un `409` nunca significa «era
+un reenvío». Hay una prueba de integración dedicada a dejar constancia de ese
+comportamiento, para que nadie lo suponga distinto.
+
+La idempotencia HTTP real sigue siendo alcance de SCRUM-63, y necesitará una
+migración que añada la clave que hoy no existe.
+
+### Datos de prueba corregidos
+
+La fixture de PostgreSQL describía una combinación imposible: un embarazo
+iniciado el 2025-08-01 con capturas el 2026-03-01 declaradas como semana 41,
+cuando esa fecha cae en la **semana 31**, y sin ninguna `AsignacionDispositivo`
+que prestara el dispositivo a esa gestante. Las pruebas pasaban porque el
+endpoint no comprobaba ninguna de las dos cosas.
+
+Ahora la fixture crea la asignación y deriva las semanas de las fechas: dos
+ventanas, una en la semana 31 (2026-03-01, por encima del umbral de movimiento)
+y otra en la semana 12 (2025-10-17, por debajo), ambas calculadas a mano desde
+la fecha de inicio del embarazo y no copiadas de la implementación que
+verifican.

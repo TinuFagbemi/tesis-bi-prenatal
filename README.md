@@ -124,7 +124,7 @@ tesis-bi-prenatal/
 
 ## Estado actual del proyecto
 
-El repositorio se encuentra en una etapa temprana. Actualmente contiene principalmente la estructura inicial de un sprint previo (Sprint 0) y archivos de tipo placeholder (por ejemplo, un script de generación de datos sin lógica real). **Aún no existen implementaciones funcionales de backend, simulación de nodo edge, base de datos definitiva, ETL, seguridad ni dashboards.** El desarrollo activo se encuentra actualmente en el Sprint 4, y todo el trabajo se desarrolla y prueba en un entorno controlado/local, no en comunidades rurales reales.
+El repositorio se encuentra en una etapa temprana. Lo que ya existe y funciona es el esquema operacional en PostgreSQL con sus migraciones, el generador del dataset simulado, su carga idempotente y la primera entrada de la API: el endpoint que recibe una sesión de monitoreo con sus lecturas biométricas. **Aún no existen la simulación del nodo edge, el ETL, el modelo dimensional, la autenticación y autorización, ni los dashboards**, y el endpoint disponible todavía no tiene control de acceso. El desarrollo activo se encuentra actualmente en el Sprint 4, y todo el trabajo se desarrolla y prueba en un entorno controlado/local, no en comunidades rurales reales.
 
 ## Roadmap general
 
@@ -234,9 +234,182 @@ distinto de cero. La base queda exactamente como estaba: una violación de
 dejar filas a medias. Los mensajes nunca incluyen la URL de conexión ni
 contraseñas.
 
+## Recepción de lecturas biométricas por la API
+
+Primera entrada vertical de la aplicación: una solicitud HTTP llega, Pydantic la
+valida, se comprueban las referencias, se persiste con SQLAlchemy y se responde
+con un contrato tipado. Todos los datos son simulados y ficticios.
+
+> **Este endpoint no es apto para producción.** No tiene autenticación ni
+> control de acceso: JWT y RBAC corresponden a un ticket posterior. Se ejecuta
+> únicamente en el entorno controlado de desarrollo y pruebas, nunca expuesto a
+> una red pública.
+
+### 1. Preparar la base y levantar la API
+
+La API **no crea el esquema**. Hay que desplegar las migraciones primero:
+
+```powershell
+docker compose up -d db
+cd backend
+alembic upgrade head
+```
+
+Y después levantar el servidor, también desde `backend/`:
+
+```powershell
+uvicorn app.main:app --reload
+```
+
+La documentación interactiva queda en `http://localhost:8000/docs`, generada
+automáticamente a partir de los schemas.
+
+Alternativa: `docker compose up -d` levanta la base y la API juntas, y el
+contenedor ya ejecuta ese mismo `uvicorn`.
+
+### 2. Ruta y método
+
+```
+POST /api/v1/sesiones-monitoreo
+```
+
+Recibe **una sesión de monitoreo junto con una o varias lecturas biométricas**.
+La relación es 1:N: una sesión agrupa todas las lecturas del evento, y la lista
+nunca puede venir vacía.
+
+Los cuatro identificadores que trae el paquete —`id_embarazo`,
+`id_dispositivo`, `id_tiempo_gest` e `id_semaforo`— son **referencias a filas
+que ya deben existir**. El endpoint no crea catálogos ni entidades clínicas como
+efecto secundario. En cambio `id_sesion` e `id_lectura` **los genera
+PostgreSQL**: el cliente no los envía y los recibe en la respuesta.
+
+### 3. Ejemplo de solicitud válida (datos simulados)
+
+```json
+{
+  "id_embarazo": 100,
+  "id_dispositivo": 100,
+  "tipo_sesion": "SIGNOS_MATERNOS",
+  "fecha_inicio": "2026-03-01T09:00:00-05:00",
+  "fecha_fin": "2026-03-01T09:30:00-05:00",
+  "estado_sesion": "COMPLETADA",
+  "lecturas": [
+    {
+      "id_tiempo_gest": 119,
+      "id_semaforo": 100,
+      "fecha_hora_captura": "2026-03-01T09:05:00-05:00",
+      "fecha_hora_sincronizacion": "2026-03-01T09:40:00-05:00",
+      "hr_valor": 88.5,
+      "spo2_valor": 97,
+      "mov_valor": null
+    }
+  ]
+}
+```
+
+Reglas del cuerpo:
+
+- **Las marcas de tiempo llevan offset obligatorio.** Las columnas son
+  `TIMESTAMPTZ`; una fecha sin zona horaria se rechaza.
+- **Una métrica que no aplica va en `null`**, nunca en cero ni en cadena vacía:
+  la ETL tiene que poder distinguir «no se midió» de «se midió cero». Omitir el
+  campo equivale a enviarlo en `null`.
+- **Cada lectura tiene una de dos formas**: `hr_valor` + `spo2_valor` con
+  `mov_valor` en `null`, o `mov_valor` con las otras dos en `null`. Una mezcla
+  se rechaza.
+- **La forma tiene que coincidir con `tipo_sesion`**: `SIGNOS_MATERNOS` solo
+  admite lecturas de HR/SpO₂ y `MOVIMIENTOS_FETALES` solo lecturas de
+  movimiento.
+- **Los movimientos fetales se registran desde la semana gestacional 20**; antes
+  de esa semana el paquete se rechaza.
+- **Cada lectura tiene que haberse capturado durante su sesión**, entre
+  `fecha_inicio` y `fecha_fin` (los extremos cuentan). La sincronización sí
+  puede ser posterior al fin: en un sistema con conectividad intermitente, ése
+  es el caso normal.
+- **`estado_sesion` y `fecha_fin` tienen que coincidir.** `PENDIENTE` e
+  `INTERRUMPIDA` no admiten `fecha_fin`; `COMPLETADA` y `PROCESADA` la exigen.
+  Omitir el estado equivale a `PENDIENTE`, así que omitirlo y mandar `fecha_fin`
+  también se rechaza.
+- **No se aceptan campos desconocidos.** Un nombre mal escrito es un error, no
+  un campo omitido.
+
+Y dos reglas más que se comprueban contra la base, porque no se pueden decidir
+leyendo solo el mensaje:
+
+- **El dispositivo debe estar asignado a ese embarazo durante la sesión.** No
+  basta con que el embarazo exista y el dispositivo exista: tiene que haber una
+  `AsignacionDispositivo` que cubra las fechas de la sesión. La comprobación es
+  temporal y no mira el campo `activo`, para que una sesión antigua siga siendo
+  válida después de que el dispositivo se devolviera.
+- **`id_tiempo_gest` debe ser la semana real del embarazo en la fecha de
+  captura.** Se calcula desde `Embarazo.fecha_inicio` y se compara con la semana
+  del catálogo. Esto es también lo que impide esquivar la regla de la semana 20:
+  apuntar a otra semana ya no sirve, porque la semana sale del embarazo y no del
+  paquete.
+
+### 4. Ejemplo de respuesta exitosa
+
+`201 Created`:
+
+```json
+{
+  "id_sesion": 733,
+  "lecturas_creadas": 1,
+  "ids_lectura": [1181]
+}
+```
+
+Solo identificadores y un conteo. La respuesta nunca devuelve hashes,
+credenciales, configuración de conexión, SQL ni detalles internos del servidor.
+
+### 5. Códigos de respuesta
+
+| Código | Cuándo |
+| --- | --- |
+| `201` | La sesión y todas sus lecturas quedaron registradas. |
+| `404` | Alguna referencia del paquete no existe todavía. |
+| `409` | Una referencia dejó de existir mientras se procesaba el paquete. No se guardó nada. |
+| `422` | El cuerpo no cumple el contrato, o rompe una regla del dominio o una restricción de validez de la base. |
+| `500` | Error interno. La transacción completa fue revertida. |
+
+Ningún mensaje de error incluye la URL de conexión, contraseñas, SQL, nombres de
+restricción ni trazas. El diagnóstico técnico queda en el log del servidor,
+reducido a la clase de la excepción, el `SQLSTATE` y los nombres de restricción,
+tabla y columna.
+
+### 6. Atomicidad
+
+**La sesión y todas sus lecturas se escriben en una única transacción**, con un
+solo `commit`. Ante cualquier fallo —una referencia inexistente, una regla del
+dominio, una restricción que PostgreSQL rechaza o un error imprevisto— se
+revierte todo: no queda una sesión huérfana ni una carga parcial. Si falla la
+tercera lectura de cinco, tampoco queda la sesión.
+
+### 7. Reenvíos: pendiente de SCRUM-63
+
+**Este endpoint no reconoce reenvíos en absoluto.** Conviene decirlo sin rodeos,
+porque es fácil suponer lo contrario:
+
+- Enviar **el mismo JSON dos veces crea dos sesiones**, con dos `id_sesion`
+  distintos, y las dos respuestas son `201`.
+- No hay detección, ni deduplicación, ni reutilización de respuestas.
+- Un `409` **no** significa «detecté tu reenvío»: significa que una referencia
+  del paquete desapareció mientras se procesaba.
+
+El motivo es estructural: el cliente no envía ningún identificador, y ni
+`sesion_monitoreo` ni `lectura_biometrica` tienen hoy una clave de negocio con
+la que reconocer que dos paquetes son el mismo. Por eso un `23505` sobre esas
+llaves primarias —que genera PostgreSQL— se trata como **error interno (`500`)**
+y no como conflicto del cliente: solo puede venir de una secuencia
+desincronizada.
+
+El reconocimiento de reenvíos —`Idempotency-Key`, identificador externo estable
+y reutilización de la respuesta— corresponde a SCRUM-63, y necesitará una
+migración para añadir esa clave.
+
 ## Calidad del proyecto
 
-- **Integración continua:** el workflow [`CI`](.github/workflows/ci.yml) se ejecuta en cada Pull Request hacia `main`, instala el backend con Python 3.12 y corre las pruebas automatizadas, incluida la validación de las migraciones contra un servicio PostgreSQL 16 efímero.
+- **Integración continua:** el workflow [`CI`](.github/workflows/ci.yml) se ejecuta en cada Pull Request hacia `main`, instala el backend con Python 3.12 y corre las pruebas automatizadas. Contra un servicio PostgreSQL 16 efímero se validan las migraciones, la carga idempotente del dataset y el endpoint de ingesta; el job queda en rojo si alguna de esas pruebas se omite en lugar de ejecutarse.
 - **Criterios de cierre de un ticket:** [Definition of Done](docs/definition_of_done.md).
 
 ## Estrategia de ramas

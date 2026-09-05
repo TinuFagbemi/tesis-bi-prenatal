@@ -73,13 +73,14 @@ jobs:
 
       # Primera capa: todo lo que no necesita un servidor PostgreSQL
       # (API, modelos, migración renderizada offline, dataset simulado,
-      # validación del cargador).
+      # validación del cargador, contratos Pydantic y capa HTTP del endpoint).
       - name: Pruebas sin servidor PostgreSQL
         working-directory: backend
         run: |
           python -m pytest -q \
             --ignore=tests/test_migration_postgresql.py \
-            --ignore=tests/test_load_mock_data_postgresql.py
+            --ignore=tests/test_load_mock_data_postgresql.py \
+            --ignore=tests/test_ingestion_api_postgresql.py
 
       # Segunda capa: ciclo real upgrade -> downgrade -> upgrade -> alembic check
       # contra el servicio PostgreSQL de arriba. Corre antes que las pruebas del
@@ -102,10 +103,21 @@ jobs:
           SCRUM61_TEST_DATABASE_URL: postgresql+psycopg://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
         run: python -m pytest -q -rs tests/test_load_mock_data_postgresql.py --junitxml=pytest-scrum61.xml
 
+      # Cuarta capa: el endpoint de ingesta contra la misma base efímera. No
+      # migra, no crea y no borra: cada prueba abre una transacción exterior que
+      # revierte siempre, y la Session del endpoint se une a ella por SAVEPOINT,
+      # de modo que su commit es real y observable pero no sobrevive. La base
+      # queda como estaba, así que puede compartirse con SCRUM-52 y SCRUM-61.
+      - name: Pruebas del endpoint contra PostgreSQL (SCRUM-62)
+        working-directory: backend
+        env:
+          SCRUM62_TEST_DATABASE_URL: postgresql+psycopg://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
+        run: python -m pytest -q -rs tests/test_ingestion_api_postgresql.py --junitxml=pytest-scrum62.xml
+
       # La variable de entorno de cada capa es lo único que evita que su archivo
       # quede omitido, y pytest devuelve 0 aunque se salte todo. Por eso los
       # reportes JUnit se revisan después: un solo <skipped> en cualquiera de
-      # los dos tumba el job.
+      # los tres tumba el job.
       - name: Verificar que ninguna prueba de PostgreSQL quedó omitida
         working-directory: backend
         run: |
@@ -117,6 +129,7 @@ jobs:
           REPORTES = {
               "pytest-postgresql.xml": "SCRUM52_TEST_DATABASE_URL",
               "pytest-scrum61.xml": "SCRUM61_TEST_DATABASE_URL",
+              "pytest-scrum62.xml": "SCRUM62_TEST_DATABASE_URL",
           }
 
           fallo = False
