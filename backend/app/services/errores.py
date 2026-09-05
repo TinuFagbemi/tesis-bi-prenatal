@@ -22,11 +22,11 @@ SQLSTATE Condición            HTTP   Razón
 23514    check_violation      422    Dato rechazado por una restricción
                                      de validez. Es el cliente quien lo
                                      envió mal.
-23505    unique_violation     409    Conflicto de integridad: la fila ya
-                                     existe. Nunca se sobrescribe.
 23503    foreign_key_violation 409   La referencia existía al verificarla
                                      y dejó de existir: una carrera, que
                                      es un conflicto, no un dato inválido.
+23505    unique_violation     500    Ver abajo: hoy no puede originarlo
+                                     el cliente.
 23502    not_null_violation   500    Pydantic ya garantiza los campos
                                      obligatorios, así que un NULL que
                                      llegue hasta aquí delata un defecto
@@ -34,6 +34,18 @@ SQLSTATE Condición            HTTP   Razón
 otro     lo que sea           500    Sin clasificación no se inventa
                                      semántica.
 ======== ==================== ====== ===================================
+
+**Why 23505 is a 500 and not a 409.** A duplicate key normally means "you sent
+something that is already there", and 409 would be the honest answer. That is
+not what it can mean here. In SCRUM-62 the client sends no ``id_sesion`` and no
+``id_lectura``; both primary keys come from PostgreSQL sequences, and neither
+table carries a business UNIQUE the client could collide with. So a duplicate
+key on these inserts cannot describe anything the caller did -- it describes a
+sequence that has fallen behind the rows already stored, which is a fault on
+this side of the wire. Answering 409 would blame the client for a server
+problem, and would also read as "your resend was detected", which is precisely
+what SCRUM-62 does **not** do. When SCRUM-63 introduces an identifier the client
+supplies, a real 409 becomes possible and this row will change.
 
 ``DataError`` -- a value the column cannot store -- maps to 500 as well. The
 rule agreed for this ticket is that it only becomes a 422 when the offending
@@ -67,9 +79,12 @@ MENSAJE_CHECK = (
     "La base de datos rechazó la lectura por una restricción de validez de "
     "los valores enviados. No se registró ninguna fila."
 )
+# Solo para 23503: una referencia que existía al verificarla y desapareció
+# antes del INSERT. Es lo único que hoy puede provocar el cliente y merecer un
+# 409.
 MENSAJE_CONFLICTO = (
-    "No se pudo registrar la sesión por un conflicto de integridad con datos "
-    "ya existentes. No se sobrescribió nada."
+    "No se pudo registrar la sesión: una referencia del paquete cambió "
+    "mientras se procesaba. No se guardó nada."
 )
 MENSAJE_INESPERADO = (
     "No se pudo registrar la sesión por un error interno. No se conservó "
@@ -78,8 +93,8 @@ MENSAJE_INESPERADO = (
 
 _MENSAJE_POR_SQLSTATE: dict[str, tuple[int, str]] = {
     SQLSTATE_CHECK: (HTTPStatus.UNPROCESSABLE_ENTITY, MENSAJE_CHECK),
-    SQLSTATE_UNIQUE: (HTTPStatus.CONFLICT, MENSAJE_CONFLICTO),
     SQLSTATE_FOREIGN_KEY: (HTTPStatus.CONFLICT, MENSAJE_CONFLICTO),
+    SQLSTATE_UNIQUE: (HTTPStatus.INTERNAL_SERVER_ERROR, MENSAJE_INESPERADO),
     SQLSTATE_NOT_NULL: (HTTPStatus.INTERNAL_SERVER_ERROR, MENSAJE_INESPERADO),
 }
 

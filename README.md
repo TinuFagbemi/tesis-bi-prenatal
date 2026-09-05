@@ -322,8 +322,30 @@ Reglas del cuerpo:
   movimiento.
 - **Los movimientos fetales se registran desde la semana gestacional 20**; antes
   de esa semana el paquete se rechaza.
+- **Cada lectura tiene que haberse capturado durante su sesión**, entre
+  `fecha_inicio` y `fecha_fin` (los extremos cuentan). La sincronización sí
+  puede ser posterior al fin: en un sistema con conectividad intermitente, ése
+  es el caso normal.
+- **`estado_sesion` y `fecha_fin` tienen que coincidir.** `PENDIENTE` e
+  `INTERRUMPIDA` no admiten `fecha_fin`; `COMPLETADA` y `PROCESADA` la exigen.
+  Omitir el estado equivale a `PENDIENTE`, así que omitirlo y mandar `fecha_fin`
+  también se rechaza.
 - **No se aceptan campos desconocidos.** Un nombre mal escrito es un error, no
   un campo omitido.
+
+Y dos reglas más que se comprueban contra la base, porque no se pueden decidir
+leyendo solo el mensaje:
+
+- **El dispositivo debe estar asignado a ese embarazo durante la sesión.** No
+  basta con que el embarazo exista y el dispositivo exista: tiene que haber una
+  `AsignacionDispositivo` que cubra las fechas de la sesión. La comprobación es
+  temporal y no mira el campo `activo`, para que una sesión antigua siga siendo
+  válida después de que el dispositivo se devolviera.
+- **`id_tiempo_gest` debe ser la semana real del embarazo en la fecha de
+  captura.** Se calcula desde `Embarazo.fecha_inicio` y se compara con la semana
+  del catálogo. Esto es también lo que impide esquivar la regla de la semana 20:
+  apuntar a otra semana ya no sirve, porque la semana sale del embarazo y no del
+  paquete.
 
 ### 4. Ejemplo de respuesta exitosa
 
@@ -346,7 +368,7 @@ credenciales, configuración de conexión, SQL ni detalles internos del servidor
 | --- | --- |
 | `201` | La sesión y todas sus lecturas quedaron registradas. |
 | `404` | Alguna referencia del paquete no existe todavía. |
-| `409` | Conflicto de integridad: la fila ya existe. **No se sobrescribe nada.** |
+| `409` | Una referencia dejó de existir mientras se procesaba el paquete. No se guardó nada. |
 | `422` | El cuerpo no cumple el contrato, o rompe una regla del dominio o una restricción de validez de la base. |
 | `500` | Error interno. La transacción completa fue revertida. |
 
@@ -365,11 +387,25 @@ tercera lectura de cinco, tampoco queda la sesión.
 
 ### 7. Reenvíos: pendiente de SCRUM-63
 
-**La idempotencia de reenvíos no está implementada.** Este endpoint **no** trata
-un paquete repetido como un éxito: si un reenvío provoca un conflicto de
-integridad, responde `409` y no sobrescribe nada. El reconocimiento de reenvíos
-—`Idempotency-Key`, identificador externo estable y reutilización de la
-respuesta— corresponde a SCRUM-63.
+**Este endpoint no reconoce reenvíos en absoluto.** Conviene decirlo sin rodeos,
+porque es fácil suponer lo contrario:
+
+- Enviar **el mismo JSON dos veces crea dos sesiones**, con dos `id_sesion`
+  distintos, y las dos respuestas son `201`.
+- No hay detección, ni deduplicación, ni reutilización de respuestas.
+- Un `409` **no** significa «detecté tu reenvío»: significa que una referencia
+  del paquete desapareció mientras se procesaba.
+
+El motivo es estructural: el cliente no envía ningún identificador, y ni
+`sesion_monitoreo` ni `lectura_biometrica` tienen hoy una clave de negocio con
+la que reconocer que dos paquetes son el mismo. Por eso un `23505` sobre esas
+llaves primarias —que genera PostgreSQL— se trata como **error interno (`500`)**
+y no como conflicto del cliente: solo puede venir de una secuencia
+desincronizada.
+
+El reconocimiento de reenvíos —`Idempotency-Key`, identificador externo estable
+y reutilización de la respuesta— corresponde a SCRUM-63, y necesitará una
+migración para añadir esa clave.
 
 ## Calidad del proyecto
 

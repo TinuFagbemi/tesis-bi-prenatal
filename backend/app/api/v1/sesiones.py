@@ -13,7 +13,12 @@ There is no path that answers success before the commit, and none that swallows
 an error and keeps inserting.
 
 Not in this ticket, on purpose: HTTP idempotency of resends (SCRUM-63) and
-authentication. A repeated package is **not** treated as a success here.
+authentication. Being explicit about what that means, because it is easy to
+misread: **this endpoint does not recognise a resend at all.** Posting the very
+same JSON twice creates two sessions with two different ``id_sesion``, and both
+answers are 201. Nothing here detects, deduplicates or replays. Making a resend
+identifiable needs an identifier the client supplies, and that arrives with
+SCRUM-63.
 """
 
 from http import HTTPStatus
@@ -54,7 +59,10 @@ router = APIRouter(prefix="/api/v1", tags=["monitoreo"])
             "description": "Alguna referencia del paquete no existe todavía."
         },
         HTTPStatus.CONFLICT: {
-            "description": "Conflicto de integridad. No se sobrescribe nada."
+            "description": (
+                "Una referencia dejó de existir mientras se procesaba el "
+                "paquete. No se guardó nada."
+            )
         },
         HTTPStatus.UNPROCESSABLE_ENTITY: {
             "description": "El paquete no cumple el contrato o una regla del dominio."
@@ -72,7 +80,13 @@ def registrar_sesion_de_monitoreo(
 
     The session and its readings are written inside a single transaction and
     confirmed with a single ``commit``. Nothing is created as a side effect: the
-    four identifiers in the package must already name existing rows.
+    four identifiers in the package must already name existing rows, the device
+    must be assigned to that pregnancy over the session's dates, and every
+    reading must be captured during the session and filed under the gestational
+    week the pregnancy is actually in.
+
+    Resends are not detected: sending the same package twice creates two
+    sessions. Idempotency belongs to SCRUM-63.
 
     All data is fictitious and simulated. This endpoint has no authentication
     yet and is **not production-ready**.

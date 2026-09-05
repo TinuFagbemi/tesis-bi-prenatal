@@ -298,8 +298,8 @@ def test_una_regla_de_negocio_violada_devuelve_422_y_revierte(
     ("sqlstate", "esperado"),
     [
         (SQLSTATE_CHECK, 422),
-        (SQLSTATE_UNIQUE, 409),
         (SQLSTATE_FOREIGN_KEY, 409),
+        (SQLSTATE_UNIQUE, 500),
         (SQLSTATE_NOT_NULL, 500),
         ("42P01", 500),
         (None, 500),
@@ -317,20 +317,39 @@ def test_la_clasificacion_por_sqlstate_llega_hasta_la_respuesta(
     assert sesion_falsa.rollbacks == 1
 
 
-def test_un_conflicto_de_pk_devuelve_409_sin_tratarlo_como_exito(cliente, servicio):
-    """Escenario E en la capa HTTP: un reenvío no es un éxito idempotente.
+def test_una_colision_de_pk_generada_es_un_error_interno(cliente, servicio):
+    """``23505`` sobre una PK que genera la base no puede culpar al cliente.
 
-    Aquí se cubre la traducción ``23505 -> 409`` con un error fabricado. La
-    colisión real contra el servidor, provocada adelantando la secuencia de
-    ``id_sesion``, vive en ``test_ingestion_api_postgresql.py``.
+    El cliente no envía ``id_sesion`` ni ``id_lectura``, y ninguna de las dos
+    tablas tiene un UNIQUE de negocio con el que pudiera chocar. Una llave
+    duplicada aquí solo puede venir de una secuencia desincronizada, que es un
+    defecto del servidor: 500, no 409. Responder 409 además sugeriría que se
+    detectó un reenvío, y SCRUM-62 no detecta reenvíos.
+
+    La colisión real contra el servidor vive en
+    ``test_ingestion_api_postgresql.py``.
     """
     servicio(error_de_integridad(SQLSTATE_UNIQUE, constraint_name="pk_sesion_monitoreo"))
 
     respuesta = cliente.post(RUTA, json=paquete())
 
+    assert respuesta.status_code == 500
+    assert respuesta.json()["detail"] == MENSAJE_INESPERADO
+    assert "id_sesion" not in respuesta.text
+
+
+def test_una_carrera_de_llave_foranea_si_es_un_conflicto(cliente, servicio):
+    """``23503`` es lo único que hoy merece un 409: la referencia se esfumó."""
+    servicio(
+        error_de_integridad(
+            SQLSTATE_FOREIGN_KEY, constraint_name="fk_sesion_monitoreo_id_embarazo_embarazo"
+        )
+    )
+
+    respuesta = cliente.post(RUTA, json=paquete())
+
     assert respuesta.status_code == 409
     assert respuesta.json()["detail"] == MENSAJE_CONFLICTO
-    assert "id_sesion" not in respuesta.text
 
 
 def test_un_data_error_devuelve_500_por_defecto(cliente, servicio, sesion_falsa):
@@ -454,15 +473,19 @@ def test_clasificar_un_check_da_422_con_su_mensaje():
     assert respuesta.detalle == MENSAJE_CHECK
 
 
-def test_clasificar_un_unique_da_409():
-    assert clasificar_error_de_base(error_de_integridad(SQLSTATE_UNIQUE)).status_code == 409
+def test_clasificar_un_unique_da_500():
+    """Hoy ningún UNIQUE de estas tablas puede originarlo el cliente."""
+    respuesta = clasificar_error_de_base(error_de_integridad(SQLSTATE_UNIQUE))
+
+    assert respuesta.status_code == 500
+    assert respuesta.detalle == MENSAJE_INESPERADO
 
 
 def test_clasificar_una_fk_da_409():
-    assert (
-        clasificar_error_de_base(error_de_integridad(SQLSTATE_FOREIGN_KEY)).status_code
-        == 409
-    )
+    respuesta = clasificar_error_de_base(error_de_integridad(SQLSTATE_FOREIGN_KEY))
+
+    assert respuesta.status_code == 409
+    assert respuesta.detalle == MENSAJE_CONFLICTO
 
 
 def test_clasificar_un_not_null_da_500():
@@ -498,7 +521,7 @@ def test_registrar_fallo_usa_error_para_los_500(caplog):
 
 
 def test_registrar_fallo_usa_warning_para_los_4xx(caplog):
-    error = error_de_integridad(SQLSTATE_UNIQUE)
+    error = error_de_integridad(SQLSTATE_FOREIGN_KEY)
     respuesta = clasificar_error_de_base(error)
 
     with caplog.at_level(logging.DEBUG, logger="app.services.errores"):

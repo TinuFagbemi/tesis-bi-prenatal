@@ -2,10 +2,13 @@
 
 What is validated here, and what is deliberately left out, is the whole design:
 
-* **Here** -- the *shape* of the message. Types, which fields are required and
-  which are optional, controlled vocabularies, timezone-aware timestamps, the
-  biometric shape of a single reading, and the agreement between the session
-  type and the shape of every reading it carries.
+* **Here** -- the *shape* of the message, and every rule that can be decided by
+  reading the message alone. Types, which fields are required and which are
+  optional, controlled vocabularies, timezone-aware timestamps, the biometric
+  shape of a single reading, the agreement between the session type and the
+  shape of every reading it carries, the fact that a reading must have been
+  captured during its own session, and the agreement between ``estado_sesion``
+  and ``fecha_fin``.
 * **Not here** -- value ranges (``hr_valor > 0``, ``spo2_valor`` between 0 and
   100, ``mov_valor >= 0``) and referential integrity. Those belong to
   PostgreSQL, which stays the final authority. Restating them in this module
@@ -76,6 +79,18 @@ MENSAJE_FORMA_NO_CORRESPONDE = {
         "fetal."
     ),
 }
+
+# Coherencia entre el estado de la sesión y su cierre. No es una máquina de
+# estados nueva: es literalmente lo que ya documenta ``SesionMonitoreo``, donde
+# ``fecha_fin`` permanece NULL mientras la sesión sigue PENDIENTE o quedó
+# INTERRUMPIDA. Una sesión que declara haber terminado tiene que decir cuándo.
+ESTADOS_SIN_FECHA_FIN = frozenset({EstadoSesion.PENDIENTE, EstadoSesion.INTERRUMPIDA})
+ESTADOS_CON_FECHA_FIN = frozenset({EstadoSesion.COMPLETADA, EstadoSesion.PROCESADA})
+
+# Estado que la base aplica cuando el cliente omite el campo. Se usa para
+# validar, de modo que omitir el estado y enviar ``fecha_fin`` sea tan
+# incoherente como declarar PENDIENTE con ``fecha_fin``.
+ESTADO_POR_OMISION = EstadoSesion.PENDIENTE
 
 
 class _Entrada(BaseModel):
@@ -248,6 +263,59 @@ class SesionMonitoreoEntrada(_Entrada):
                     f"lecturas[{indice}]: "
                     f"{MENSAJE_FORMA_NO_CORRESPONDE[self.tipo_sesion]}"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _validar_capturas_dentro_de_la_sesion(self) -> SesionMonitoreoEntrada:
+        """Cada lectura tiene que haberse capturado durante su propia sesión.
+
+        Sin esto, una sesión de media hora podía traer una lectura capturada
+        semanas antes o después y el paquete se aceptaba: la sesión y sus
+        lecturas quedaban unidas por la llave foránea pero no por el tiempo.
+        Los extremos cuentan como dentro.
+
+        ``fecha_hora_sincronizacion`` queda deliberadamente fuera de esta
+        regla. Una lectura puede sincronizarse mucho después de que la sesión
+        terminó, y en un sistema pensado para conectividad intermitente eso es
+        el caso normal, no una anomalía.
+        """
+        for indice, lectura in enumerate(self.lecturas):
+            if lectura.fecha_hora_captura < self.fecha_inicio:
+                raise ValueError(
+                    f"lecturas[{indice}]: 'fecha_hora_captura' es anterior al "
+                    "inicio de la sesión."
+                )
+            if (
+                self.fecha_fin is not None
+                and lectura.fecha_hora_captura > self.fecha_fin
+            ):
+                raise ValueError(
+                    f"lecturas[{indice}]: 'fecha_hora_captura' es posterior al "
+                    "fin de la sesión."
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _validar_estado_y_cierre(self) -> SesionMonitoreoEntrada:
+        """El estado de la sesión y su ``fecha_fin`` tienen que decir lo mismo.
+
+        Es la semántica que el modelo ya documenta, aplicada al mensaje. Omitir
+        el estado equivale a declararlo PENDIENTE, porque eso es lo que la base
+        va a guardar: por eso omitirlo y mandar ``fecha_fin`` es tan incoherente
+        como enviar PENDIENTE con ``fecha_fin``.
+        """
+        estado = self.estado_sesion if self.estado_sesion is not None else ESTADO_POR_OMISION
+
+        if estado in ESTADOS_SIN_FECHA_FIN and self.fecha_fin is not None:
+            raise ValueError(
+                f"una sesión '{estado.value}' no puede traer 'fecha_fin': "
+                "todavía no ha terminado."
+            )
+        if estado in ESTADOS_CON_FECHA_FIN and self.fecha_fin is None:
+            raise ValueError(
+                f"una sesión '{estado.value}' tiene que traer 'fecha_fin': "
+                "declara haber terminado y no dice cuándo."
+            )
         return self
 
 

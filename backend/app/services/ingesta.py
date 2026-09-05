@@ -13,11 +13,20 @@ Two more boundaries, both deliberate:
   device, a gestational week or a semaphore level, and the input schema has no
   field that could describe one.
 * **No clinical criterion is reimplemented.** The endpoint never decides a
-  semaphore level and never derives a gestational week: it receives both as
-  references and checks that they exist. The single clinical rule it does
-  enforce -- fetal movement is only meaningful from week 20 -- is the one the
-  ``LecturaBiometrica`` model explicitly leaves to the service layer, and it
-  reuses the existing threshold instead of writing a second copy of it.
+  semaphore level: it receives ``id_semaforo`` already classified and only
+  checks that it exists. The single clinical rule it enforces -- fetal movement
+  is only meaningful from week 20 -- is the one the ``LecturaBiometrica`` model
+  explicitly leaves to the service layer, and it reuses the existing threshold
+  instead of writing a second copy of it.
+
+What this module *does* decide are the invariants that no single table can
+express, because each of them spans several rows:
+
+* the device must have been **assigned to that pregnancy** over the period of
+  the session, judged by dates and not by the ``activo`` flag;
+* the ``id_tiempo_gest`` a reading points at must be the week the pregnancy was
+  **actually in** on the capture date, so the week-20 rule cannot be sidestepped
+  by pointing at a different catalogue row.
 
 All data handled here is fictitious and simulated.
 """
@@ -25,8 +34,9 @@ All data handled here is fictitious and simulated.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 # Read-only reuse of the approved threshold. The constant is imported from the
@@ -35,8 +45,34 @@ from sqlalchemy.orm import Session
 from app.loader.dataset import SEMANA_MINIMA_DE_MOVIMIENTO
 from app.models.catalogos import Semaforo, TiempoGestacional
 from app.models.clinico import Embarazo
-from app.models.monitoreo import Dispositivo, LecturaBiometrica, SesionMonitoreo
+from app.models.monitoreo import (
+    AsignacionDispositivo,
+    Dispositivo,
+    LecturaBiometrica,
+    SesionMonitoreo,
+)
 from app.schemas.monitoreo import SesionMonitoreoEntrada
+
+# Gestational weeks the catalogue can hold at all, mirroring
+# ``ck_tiempo_gestacional_semana_rango``. A capture that lands outside this
+# range cannot match any row, and saying so plainly beats reporting a
+# mismatch against a catalogue entry that could never have existed.
+SEMANA_GESTACIONAL_MINIMA = 1
+SEMANA_GESTACIONAL_MAXIMA = 42
+
+DIAS_POR_SEMANA = 7
+
+
+def semana_gestacional(fecha_inicio_embarazo: date, captura: datetime) -> int:
+    """Gestational week a pregnancy is in on a given capture instant.
+
+    Same arithmetic the dataset generator uses for the very same purpose:
+    whole weeks elapsed since the pregnancy started, counting the first week as
+    week 1. Keeping the two in agreement is what makes a generated dataset and
+    an ingested package describe the same thing.
+    """
+    dias = (captura.date() - fecha_inicio_embarazo).days
+    return (dias // DIAS_POR_SEMANA) + 1
 
 
 class ErrorDeIngesta(Exception):
@@ -67,14 +103,21 @@ class ResultadoIngesta:
     ids_lectura: tuple[int, ...]
 
 
-def _verificar_embarazo(sesion_bd: Session, id_embarazo: int) -> None:
-    existe = sesion_bd.scalar(
-        select(Embarazo.id_embarazo).where(Embarazo.id_embarazo == id_embarazo)
-    )
-    if existe is None:
+def _leer_embarazo(sesion_bd: Session, id_embarazo: int) -> date:
+    """Start date of the pregnancy, or refuse because it is not there.
+
+    The date is read in the same query that proves the row exists: every
+    gestational week in the package is computed against it, and fetching it
+    twice would be a round trip for something already on its way.
+    """
+    fila = sesion_bd.execute(
+        select(Embarazo.fecha_inicio).where(Embarazo.id_embarazo == id_embarazo)
+    ).one_or_none()
+    if fila is None:
         raise ReferenciaInexistente(
             f"No existe un embarazo con id_embarazo={id_embarazo}."
         )
+    return fila[0]
 
 
 def _verificar_dispositivo(sesion_bd: Session, id_dispositivo: int) -> None:
@@ -86,6 +129,54 @@ def _verificar_dispositivo(sesion_bd: Session, id_dispositivo: int) -> None:
     if existe is None:
         raise ReferenciaInexistente(
             f"No existe un dispositivo con id_dispositivo={id_dispositivo}."
+        )
+
+
+def _verificar_asignacion(
+    sesion_bd: Session, entrada: SesionMonitoreoEntrada
+) -> None:
+    """The device must have been lent to *this* pregnancy over the session.
+
+    Two existing foreign keys only prove that the pregnancy exists and that the
+    device exists. ``AsignacionDispositivo`` is what ties them together, and it
+    ties them over a period, so the check is temporal.
+
+    ``activo`` is deliberately ignored. It describes the assignment *now*, and
+    judging a past session by it would retroactively invalidate every reading
+    taken during a lending period that has since been closed. What matters is
+    whether the assignment covered the session when the session happened.
+
+    The period compared is the session's own: from ``fecha_inicio`` to
+    ``fecha_fin`` when the session declares one, and otherwise just the starting
+    instant, because a session still open has no end to cover yet. An assignment
+    with no ``fecha_fin`` is still running and covers anything from its start.
+
+    One query per package -- never one per reading.
+    """
+    inicio_sesion = entrada.fecha_inicio.date()
+    fin_sesion = (
+        entrada.fecha_fin.date() if entrada.fecha_fin is not None else inicio_sesion
+    )
+
+    asignacion = sesion_bd.scalar(
+        select(AsignacionDispositivo.id_asignacion)
+        .where(
+            AsignacionDispositivo.id_embarazo == entrada.id_embarazo,
+            AsignacionDispositivo.id_dispositivo == entrada.id_dispositivo,
+            AsignacionDispositivo.fecha_inicio <= inicio_sesion,
+            or_(
+                AsignacionDispositivo.fecha_fin.is_(None),
+                AsignacionDispositivo.fecha_fin >= fin_sesion,
+            ),
+        )
+        .limit(1)
+    )
+    if asignacion is None:
+        raise ReglaDeNegocioViolada(
+            f"El dispositivo id_dispositivo={entrada.id_dispositivo} no tiene "
+            f"una asignación al embarazo id_embarazo={entrada.id_embarazo} que "
+            f"cubra la sesión del {inicio_sesion.isoformat()} al "
+            f"{fin_sesion.isoformat()}."
         )
 
 
@@ -119,24 +210,57 @@ def _verificar_semaforos(sesion_bd: Session, identificadores: set[int]) -> None:
         )
 
 
-def _verificar_semana_de_movimiento(
-    entrada: SesionMonitoreoEntrada, semana_por_tiempo: dict[int, int]
+def _verificar_semanas_gestacionales(
+    entrada: SesionMonitoreoEntrada,
+    fecha_inicio_embarazo: date,
+    semana_por_tiempo: dict[int, int],
 ) -> None:
-    """Fetal movement is only clinically meaningful from week 20 onwards.
+    """``id_tiempo_gest`` must name the week the pregnancy was really in.
 
-    The rule spans ``sesion_monitoreo`` and ``tiempo_gestacional``, so no
-    row-level SQL CHECK can express it -- the ``LecturaBiometrica`` docstring
-    says as much and leaves it to this layer. The threshold is the one already
-    approved and declared elsewhere; it is read, not redefined.
+    Checking only that the catalogue row exists proves nothing: it says which
+    week the *client claimed*, not which week the pregnancy was in when the
+    reading was captured. Two rules ride on that difference.
+
+    The first is truthfulness of the dimension itself -- a reading filed under
+    week 31 that was captured in week 12 would corrupt every gestational
+    grouping the ETL builds later.
+
+    The second is the week-20 rule for fetal movement. Applied to the declared
+    week it was trivially avoidable: point ``id_tiempo_gest`` at any week 20 or
+    later and a movement captured in week 12 went straight in. Applied to the
+    computed week, the escape hatch closes, because the week now comes from the
+    pregnancy and the capture date rather than from the payload.
+
+    Purely in memory: the pregnancy's start date and the catalogue weeks were
+    both fetched already, so no reading costs a query.
     """
     for indice, lectura in enumerate(entrada.lecturas):
-        if not lectura.es_de_movimiento:
-            continue
-        semana = semana_por_tiempo[lectura.id_tiempo_gest]
-        if semana < SEMANA_MINIMA_DE_MOVIMIENTO:
+        esperada = semana_gestacional(fecha_inicio_embarazo, lectura.fecha_hora_captura)
+
+        if esperada < SEMANA_GESTACIONAL_MINIMA:
+            raise ReglaDeNegocioViolada(
+                f"lecturas[{indice}]: la captura es anterior al inicio del "
+                f"embarazo ({fecha_inicio_embarazo.isoformat()})."
+            )
+        if esperada > SEMANA_GESTACIONAL_MAXIMA:
+            raise ReglaDeNegocioViolada(
+                f"lecturas[{indice}]: la captura corresponde a la semana "
+                f"gestacional {esperada}, fuera del rango "
+                f"{SEMANA_GESTACIONAL_MINIMA}-{SEMANA_GESTACIONAL_MAXIMA}."
+            )
+
+        declarada = semana_por_tiempo[lectura.id_tiempo_gest]
+        if declarada != esperada:
+            raise ReglaDeNegocioViolada(
+                f"lecturas[{indice}]: 'id_tiempo_gest' corresponde a la semana "
+                f"{declarada}, pero la captura cae en la semana {esperada} de "
+                "este embarazo."
+            )
+
+        if lectura.es_de_movimiento and esperada < SEMANA_MINIMA_DE_MOVIMIENTO:
             raise ReglaDeNegocioViolada(
                 f"lecturas[{indice}]: registra movimiento fetal en la semana "
-                f"{semana}; no se registran movimientos antes de la semana "
+                f"{esperada}; no se registran movimientos antes de la semana "
                 f"{SEMANA_MINIMA_DE_MOVIMIENTO}."
             )
 
@@ -144,10 +268,16 @@ def _verificar_semana_de_movimiento(
 def verificar_referencias(
     sesion_bd: Session, entrada: SesionMonitoreoEntrada
 ) -> None:
-    """Every reference must already exist, and the package must obey week 20.
+    """Every reference must exist, and the package must hold together.
 
-    Four queries for a package of any size: the catalogue identifiers are
-    gathered across all readings and looked up once each, not once per reading.
+    Five queries for a package of any size, regardless of how many readings it
+    carries: the pregnancy, the device, the assignment that ties them, and one
+    batched lookup for each catalogue. The identifiers are gathered across all
+    readings and looked up once each, never one query per reading.
+
+    Existence is checked first and coherence second, so the answer names the
+    most specific thing that is wrong: a missing row is a 404, and a package
+    whose parts do not fit together is a 422.
 
     This runs before a single row is written, so a package that names something
     that is not there fails with a precise message instead of an opaque foreign
@@ -155,7 +285,7 @@ def verificar_referencias(
     the INSERT a referenced row could still disappear, and PostgreSQL remains
     the authority that catches it.
     """
-    _verificar_embarazo(sesion_bd, entrada.id_embarazo)
+    fecha_inicio_embarazo = _leer_embarazo(sesion_bd, entrada.id_embarazo)
     _verificar_dispositivo(sesion_bd, entrada.id_dispositivo)
 
     tiempos_pedidos = {lectura.id_tiempo_gest for lectura in entrada.lecturas}
@@ -170,7 +300,9 @@ def verificar_referencias(
     _verificar_semaforos(
         sesion_bd, {lectura.id_semaforo for lectura in entrada.lecturas}
     )
-    _verificar_semana_de_movimiento(entrada, semana_por_tiempo)
+
+    _verificar_asignacion(sesion_bd, entrada)
+    _verificar_semanas_gestacionales(entrada, fecha_inicio_embarazo, semana_por_tiempo)
 
 
 def _construir_sesion(entrada: SesionMonitoreoEntrada) -> SesionMonitoreo:

@@ -30,7 +30,14 @@ from app.schemas.monitoreo import (
 INICIO = "2026-03-01T14:00:00+00:00"
 FIN = "2026-03-01T14:30:00+00:00"
 CAPTURA = "2026-03-01T14:05:00+00:00"
+# Dentro de la sesión y posterior a CAPTURA: sirve para probar el orden entre
+# captura y sincronización sin salirse del intervalo.
+CAPTURA_TARDIA = "2026-03-01T14:20:00+00:00"
+# Deliberadamente posterior a FIN: sincronizar después de que la sesión terminó
+# es el caso normal en un sistema con conectividad intermitente.
 SINCRONIZACION = "2026-03-01T14:40:00+00:00"
+ANTES_DEL_INICIO = "2026-03-01T13:59:00+00:00"
+DESPUES_DEL_FIN = "2026-03-01T14:31:00+00:00"
 
 # Identificadores ficticios; ninguno se consulta aquí.
 ID_EMBARAZO = 100
@@ -75,15 +82,33 @@ def paquete(
     lecturas: list[dict[str, Any]] | None = None,
     **cambios: Any,
 ) -> dict[str, Any]:
-    """Paquete válido de referencia; cada prueba altera solo lo que le interesa."""
+    """Paquete válido de referencia; cada prueba altera solo lo que le interesa.
+
+    Trae ``fecha_fin``, así que declara ``COMPLETADA``: desde que el estado y el
+    cierre deben coincidir, una sesión con fin y sin estado sería incoherente.
+    """
     cuerpo: dict[str, Any] = {
         "id_embarazo": ID_EMBARAZO,
         "id_dispositivo": ID_DISPOSITIVO,
         "tipo_sesion": tipo_sesion,
         "fecha_inicio": INICIO,
         "fecha_fin": FIN,
+        "estado_sesion": EstadoSesion.COMPLETADA.value,
         "lecturas": [lectura_hr()] if lecturas is None else lecturas,
     }
+    cuerpo.update(cambios)
+    return cuerpo
+
+
+def paquete_abierto(**cambios: Any) -> dict[str, Any]:
+    """Sesión que sigue abierta: sin ``fecha_fin`` y, por omisión, sin estado.
+
+    Los campos se retiran **antes** de aplicar ``cambios``, para que una prueba
+    pueda volver a poner ``estado_sesion`` y seguir sin ``fecha_fin``.
+    """
+    cuerpo = paquete()
+    cuerpo.pop("fecha_fin", None)
+    cuerpo.pop("estado_sesion", None)
     cuerpo.update(cambios)
     return cuerpo
 
@@ -120,10 +145,11 @@ def test_el_paquete_minimo_valido_se_acepta():
 
 def test_los_campos_opcionales_omitidos_quedan_en_none():
     """Omitirlos deja que el modelo ORM aplique su propio valor por omisión."""
-    entrada = SesionMonitoreoEntrada.model_validate(paquete())
+    entrada = SesionMonitoreoEntrada.model_validate(paquete_abierto())
 
     assert entrada.estado_sesion is None
     assert entrada.origen_dato is None
+    assert entrada.fecha_fin is None
 
 
 def test_los_campos_opcionales_enviados_se_conservan():
@@ -333,17 +359,20 @@ def test_el_offset_se_conserva_sin_convertirse_a_utc():
 
 
 def test_una_sincronizacion_anterior_a_la_captura_se_rechaza():
-    with pytest.raises(ValidationError):
+    """Ambos instantes caen dentro de la sesión: lo único inválido es su orden."""
+    with pytest.raises(ValidationError) as error:
         SesionMonitoreoEntrada.model_validate(
             paquete(
                 lecturas=[
                     lectura_hr(
-                        fecha_hora_captura=SINCRONIZACION,
+                        fecha_hora_captura=CAPTURA_TARDIA,
                         fecha_hora_sincronizacion=CAPTURA,
                     )
                 ]
             )
         )
+
+    assert "fecha_hora_sincronizacion" in str(error.value)
 
 
 def test_una_sincronizacion_igual_a_la_captura_se_acepta():
@@ -365,6 +394,147 @@ def test_una_fecha_fin_anterior_al_inicio_se_rechaza():
         SesionMonitoreoEntrada.model_validate(
             paquete(fecha_inicio=FIN, fecha_fin=INICIO)
         )
+
+
+# ---------------------------------------------------------------------------
+# Cada lectura tiene que haberse capturado durante su sesión
+# ---------------------------------------------------------------------------
+
+
+def test_una_captura_justo_en_el_inicio_es_valida():
+    """Los extremos cuentan como dentro."""
+    entrada = SesionMonitoreoEntrada.model_validate(
+        paquete(lecturas=[lectura_hr(fecha_hora_captura=INICIO)])
+    )
+
+    assert entrada.lecturas[0].fecha_hora_captura == entrada.fecha_inicio
+
+
+def test_una_captura_justo_en_el_fin_es_valida():
+    entrada = SesionMonitoreoEntrada.model_validate(
+        paquete(lecturas=[lectura_hr(fecha_hora_captura=FIN)])
+    )
+
+    assert entrada.lecturas[0].fecha_hora_captura == entrada.fecha_fin
+
+
+def test_una_captura_anterior_al_inicio_de_la_sesion_se_rechaza():
+    with pytest.raises(ValidationError) as error:
+        SesionMonitoreoEntrada.model_validate(
+            paquete(lecturas=[lectura_hr(fecha_hora_captura=ANTES_DEL_INICIO)])
+        )
+
+    assert "anterior al inicio de la sesión" in str(error.value)
+
+
+def test_una_captura_posterior_al_fin_de_la_sesion_se_rechaza():
+    with pytest.raises(ValidationError) as error:
+        SesionMonitoreoEntrada.model_validate(
+            paquete(
+                lecturas=[
+                    lectura_hr(
+                        fecha_hora_captura=DESPUES_DEL_FIN,
+                        fecha_hora_sincronizacion="2026-03-01T15:30:00+00:00",
+                    )
+                ]
+            )
+        )
+
+    assert "posterior al fin de la sesión" in str(error.value)
+
+
+def test_la_captura_senala_la_lectura_concreta_que_esta_fuera():
+    with pytest.raises(ValidationError) as error:
+        SesionMonitoreoEntrada.model_validate(
+            paquete(
+                lecturas=[
+                    lectura_hr(),
+                    lectura_hr(fecha_hora_captura=ANTES_DEL_INICIO),
+                    lectura_hr(),
+                ]
+            )
+        )
+
+    assert "lecturas[1]" in str(error.value)
+
+
+def test_una_sesion_abierta_solo_acota_por_su_inicio():
+    """Sin ``fecha_fin`` no hay límite superior que comprobar."""
+    entrada = SesionMonitoreoEntrada.model_validate(
+        paquete_abierto(lecturas=[lectura_hr(fecha_hora_captura=DESPUES_DEL_FIN)])
+    )
+
+    assert entrada.fecha_fin is None
+
+
+def test_una_sesion_abierta_sigue_rechazando_una_captura_previa():
+    with pytest.raises(ValidationError):
+        SesionMonitoreoEntrada.model_validate(
+            paquete_abierto(lecturas=[lectura_hr(fecha_hora_captura=ANTES_DEL_INICIO)])
+        )
+
+
+def test_sincronizar_despues_del_fin_de_la_sesion_es_valido():
+    """Offline-first: la sincronización llega cuando vuelve la conectividad."""
+    entrada = SesionMonitoreoEntrada.model_validate(
+        paquete(
+            lecturas=[
+                lectura_hr(fecha_hora_sincronizacion="2026-03-04T08:00:00+00:00")
+            ]
+        )
+    )
+
+    assert entrada.lecturas[0].fecha_hora_sincronizacion > entrada.fecha_fin
+
+
+# ---------------------------------------------------------------------------
+# Coherencia entre estado_sesion y fecha_fin
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("estado", ["PENDIENTE", "INTERRUMPIDA"])
+def test_un_estado_sin_cierre_no_admite_fecha_fin(estado):
+    with pytest.raises(ValidationError) as error:
+        SesionMonitoreoEntrada.model_validate(paquete(estado_sesion=estado))
+
+    assert "no puede traer 'fecha_fin'" in str(error.value)
+
+
+@pytest.mark.parametrize("estado", ["PENDIENTE", "INTERRUMPIDA"])
+def test_un_estado_sin_cierre_se_acepta_sin_fecha_fin(estado):
+    entrada = SesionMonitoreoEntrada.model_validate(
+        paquete_abierto(estado_sesion=estado)
+    )
+
+    assert entrada.estado_sesion is EstadoSesion(estado)
+    assert entrada.fecha_fin is None
+
+
+@pytest.mark.parametrize("estado", ["COMPLETADA", "PROCESADA"])
+def test_un_estado_terminado_exige_fecha_fin(estado):
+    with pytest.raises(ValidationError) as error:
+        SesionMonitoreoEntrada.model_validate(paquete_abierto(estado_sesion=estado))
+
+    assert "tiene que traer 'fecha_fin'" in str(error.value)
+
+
+@pytest.mark.parametrize("estado", ["COMPLETADA", "PROCESADA"])
+def test_un_estado_terminado_se_acepta_con_fecha_fin(estado):
+    entrada = SesionMonitoreoEntrada.model_validate(paquete(estado_sesion=estado))
+
+    assert entrada.estado_sesion is EstadoSesion(estado)
+    assert entrada.fecha_fin is not None
+
+
+def test_omitir_el_estado_equivale_a_pendiente_y_prohibe_fecha_fin():
+    """El default real de la base es PENDIENTE, y se valida como tal."""
+    cuerpo = paquete()
+    del cuerpo["estado_sesion"]
+
+    with pytest.raises(ValidationError) as error:
+        SesionMonitoreoEntrada.model_validate(cuerpo)
+
+    assert "PENDIENTE" in str(error.value)
 
 
 # ---------------------------------------------------------------------------

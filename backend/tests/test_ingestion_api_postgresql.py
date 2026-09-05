@@ -24,16 +24,25 @@ tocar lo de fuera. Hay una prueba dedicada a dejar constancia de ello.
 Alembic; estas pruebas lo comprueban y fallan pidiendo ``alembic upgrade head``,
 pero no migran por su cuenta.
 
-**La colisión de llave primaria (escenario E).** Ni ``sesion_monitoreo`` ni
+**La colisión de llave primaria.** Ni ``sesion_monitoreo`` ni
 ``lectura_biometrica`` tienen un UNIQUE fuera de su PK, y el cliente no envía
 identificadores, así que la única forma de provocar un choque real es adelantar
 la secuencia de ``id_sesion`` para que el siguiente ``nextval`` devuelva un valor
-ya ocupado. Eso hace el escenario E, con tres salvaguardas: la secuencia se
-descubre desde el catálogo con ``pg_get_serial_sequence`` en lugar de suponer su
-nombre; su estado se fotografía antes y se restaura después con ``setval`` en un
-``try/finally`` que falla explícitamente si la restauración no funciona; y esa
-restauración corre con ``lock_timeout``, para que un problema de aislamiento se
-manifieste como un error y nunca como un bloqueo indefinido.
+ya ocupado. Eso reproduce lo que de verdad significa hoy un ``23505`` en estas
+tablas: una secuencia desincronizada, o sea un defecto del servidor, y por eso
+la respuesta esperada es **500 y no 409**. No es un reenvío: un cliente no puede
+provocarlo ni queriendo.
+
+La maniobra lleva tres salvaguardas: la secuencia se descubre desde el catálogo
+con ``pg_get_serial_sequence`` en lugar de suponer su nombre; su estado se
+fotografía antes y se restaura después con ``setval`` en un ``try/finally`` que
+falla explícitamente si la restauración no funciona; y esa restauración corre
+con ``lock_timeout``, para que un problema de aislamiento se manifieste como un
+error y nunca como un bloqueo indefinido.
+
+**Sobre reenvíos.** SCRUM-62 no los detecta, y hay una prueba que lo deja por
+escrito: el mismo JSON enviado dos veces crea dos sesiones distintas, ambas con
+201.
 
 Ejecución desde ``backend/``::
 
@@ -63,9 +72,14 @@ from app.main import app
 from app.models.catalogos import Semaforo, TiempoGestacional
 from app.models.clinico import Clinica, Embarazo, Paciente
 from app.models.enums import CodigoSemaforo, EstadoSesion, OrigenDato, TipoSesion
-from app.models.monitoreo import Dispositivo, LecturaBiometrica, SesionMonitoreo
+from app.models.monitoreo import (
+    AsignacionDispositivo,
+    Dispositivo,
+    LecturaBiometrica,
+    SesionMonitoreo,
+)
 from app.models.seguridad import AuditoriaLog
-from app.services.errores import MENSAJE_CONFLICTO
+from app.services.errores import MENSAJE_INESPERADO
 
 VARIABLE_DE_ENTORNO = "SCRUM62_TEST_DATABASE_URL"
 MOTOR_REQUERIDO = "postgresql"
@@ -86,19 +100,56 @@ RUC_FICTICIO = "SCRUM62-RUC-0001"
 CEDULA_FICTICIA = "SCRUM62-8-000-0001"
 EMAIL_FICTICIO = "scrum62.paciente@example.invalid"
 CODIGO_DISPOSITIVO_FICTICIO = "SCRUM62-DISP-0001"
-
-# Semanas gestacionales usadas por las pruebas: una por encima del umbral de
-# movimiento y otra por debajo.
-SEMANA_CON_MOVIMIENTO = 41
-SEMANA_SIN_MOVIMIENTO = 12
+CODIGO_DISPOSITIVO_SIN_ASIGNAR = "SCRUM62-DISP-0002"
 
 # Identificador que no puede existir; cabe en un INTEGER de PostgreSQL.
 ID_INEXISTENTE = 2_000_000_000
 
-INICIO = datetime(2026, 3, 1, 14, 0, tzinfo=timezone.utc)
-FIN = INICIO + timedelta(minutes=30)
-CAPTURA = INICIO + timedelta(minutes=5)
-SINCRONIZACION = INICIO + timedelta(minutes=40)
+# El embarazo ficticio del que cuelga todo. Las semanas gestacionales de las
+# ventanas de abajo se derivan de esta fecha, no se eligen a mano.
+FECHA_INICIO_EMBARAZO = date(2025, 8, 1)
+FECHA_PROBABLE_PARTO = date(2026, 5, 8)
+
+
+@dataclass(frozen=True)
+class Ventana:
+    """Una sesión situada en el tiempo, con la semana gestacional que le toca.
+
+    La semana está calculada a mano a partir de ``FECHA_INICIO_EMBARAZO`` y no
+    copiada de la implementación: es el valor contra el que se la verifica.
+    """
+
+    inicio: datetime
+    captura: datetime
+    sincronizacion: datetime
+    fin: datetime
+    semana: int
+
+
+def _ventana(inicio: datetime, semana: int) -> Ventana:
+    return Ventana(
+        inicio=inicio,
+        captura=inicio + timedelta(minutes=5),
+        sincronizacion=inicio + timedelta(minutes=40),
+        fin=inicio + timedelta(minutes=30),
+        semana=semana,
+    )
+
+
+# 2026-03-01 - 2025-08-01 = 212 días -> (212 // 7) + 1 = semana 31.
+# Por encima de la semana 20, así que admite movimiento fetal.
+VENTANA = _ventana(datetime(2026, 3, 1, 14, 0, tzinfo=timezone.utc), semana=31)
+
+# 2025-10-17 - 2025-08-01 = 77 días -> (77 // 7) + 1 = semana 12.
+# Por debajo de la semana 20: el movimiento fetal aquí debe rechazarse.
+VENTANA_TEMPRANA = _ventana(
+    datetime(2025, 10, 17, 14, 0, tzinfo=timezone.utc), semana=12
+)
+
+INICIO = VENTANA.inicio
+FIN = VENTANA.fin
+CAPTURA = VENTANA.captura
+SINCRONIZACION = VENTANA.sincronizacion
 
 # Viola ck_lectura_biometrica_spo2_rango. El contrato Pydantic lo deja pasar a
 # propósito: el rango 0-100 es autoridad de PostgreSQL.
@@ -205,9 +256,27 @@ class Referencias:
     id_paciente: int
     id_embarazo: int
     id_dispositivo: int
-    id_tiempo_con_movimiento: int
-    id_tiempo_sin_movimiento: int
+    id_dispositivo_sin_asignar: int
+    id_asignacion: int
+    id_tiempo_por_semana: dict[int, int]
     id_semaforo: int
+
+    def id_tiempo(self, semana: int) -> int:
+        return self.id_tiempo_por_semana[semana]
+
+
+def _trimestre_de(semana: int) -> int:
+    """Trimestre que corresponde a una semana, según el corte del generador."""
+    if semana <= 13:
+        return 1
+    if semana <= 27:
+        return 2
+    return 3
+
+
+def _mes_de(semana: int) -> int:
+    """Aproximación de mes gestacional usada por el generador."""
+    return min(9, ((semana - 1) // 4) + 1)
 
 
 def _asegurar_tiempo_gestacional(conexion, semana: int, mes: int, trimestre: int) -> int:
@@ -264,9 +333,63 @@ def _asegurar_semaforo(conexion) -> int:
     ).scalar_one()
 
 
+def _crear_dispositivo(conexion, id_clinica: int, codigo: str) -> int:
+    return conexion.execute(
+        insert(Dispositivo)
+        .values(
+            id_clinica=id_clinica,
+            codigo_dispositivo=codigo,
+            modelo="FetalAlert Simulado",
+            version_firmware="0.0.0-sim",
+        )
+        .returning(Dispositivo.id_dispositivo)
+    ).scalar_one()
+
+
+def _crear_asignacion(
+    conexion,
+    *,
+    id_dispositivo: int,
+    id_embarazo: int,
+    fecha_inicio: date,
+    fecha_fin: date | None = None,
+    activo: bool = True,
+) -> int:
+    """Presta un dispositivo a un embarazo durante un período concreto."""
+    return conexion.execute(
+        insert(AsignacionDispositivo)
+        .values(
+            id_dispositivo=id_dispositivo,
+            id_embarazo=id_embarazo,
+            fecha_inicio=fecha_inicio,
+            fecha_fin=fecha_fin,
+            activo=activo,
+        )
+        .returning(AsignacionDispositivo.id_asignacion)
+    ).scalar_one()
+
+
+def _asegurar_semanas(conexion, semanas) -> dict[int, int]:
+    return {
+        semana: _asegurar_tiempo_gestacional(
+            conexion, semana, mes=_mes_de(semana), trimestre=_trimestre_de(semana)
+        )
+        for semana in semanas
+    }
+
+
 @pytest.fixture
 def referencias(conexion_revertida) -> Referencias:
     """Crea el mínimo de filas ficticias que un paquete necesita referenciar.
+
+    Incluye la ``AsignacionDispositivo`` que presta el dispositivo al embarazo:
+    sin ella el paquete ya no describe una combinación posible, porque un
+    dispositivo que existe no es lo mismo que un dispositivo entregado a esa
+    gestante. La asignación se abre el día en que empieza el embarazo y se deja
+    sin cerrar, así que cubre las dos ventanas de prueba.
+
+    También crea un segundo dispositivo **sin** asignación, para poder pedir un
+    paquete imposible sin inventar identificadores inexistentes.
 
     Los identificadores no se fijan a mano: se dejan a las secuencias de
     PostgreSQL y se leen con ``RETURNING``, igual que hará el endpoint. Todo
@@ -304,33 +427,36 @@ def referencias(conexion_revertida) -> Referencias:
             id_clinica=id_clinica,
             numero_gestas=2,
             numero_partos=1,
-            fecha_inicio=date(2025, 8, 1),
-            fecha_probable_parto=date(2026, 5, 8),
+            fecha_inicio=FECHA_INICIO_EMBARAZO,
+            fecha_probable_parto=FECHA_PROBABLE_PARTO,
         )
         .returning(Embarazo.id_embarazo)
     ).scalar_one()
 
-    id_dispositivo = conexion_revertida.execute(
-        insert(Dispositivo)
-        .values(
-            id_clinica=id_clinica,
-            codigo_dispositivo=CODIGO_DISPOSITIVO_FICTICIO,
-            modelo="FetalAlert Simulado",
-            version_firmware="0.0.0-sim",
-        )
-        .returning(Dispositivo.id_dispositivo)
-    ).scalar_one()
+    id_dispositivo = _crear_dispositivo(
+        conexion_revertida, id_clinica, CODIGO_DISPOSITIVO_FICTICIO
+    )
+    id_dispositivo_sin_asignar = _crear_dispositivo(
+        conexion_revertida, id_clinica, CODIGO_DISPOSITIVO_SIN_ASIGNAR
+    )
+
+    id_asignacion = _crear_asignacion(
+        conexion_revertida,
+        id_dispositivo=id_dispositivo,
+        id_embarazo=id_embarazo,
+        fecha_inicio=FECHA_INICIO_EMBARAZO,
+        fecha_fin=None,
+    )
 
     return Referencias(
         id_clinica=id_clinica,
         id_paciente=id_paciente,
         id_embarazo=id_embarazo,
         id_dispositivo=id_dispositivo,
-        id_tiempo_con_movimiento=_asegurar_tiempo_gestacional(
-            conexion_revertida, SEMANA_CON_MOVIMIENTO, mes=10, trimestre=3
-        ),
-        id_tiempo_sin_movimiento=_asegurar_tiempo_gestacional(
-            conexion_revertida, SEMANA_SIN_MOVIMIENTO, mes=3, trimestre=1
+        id_dispositivo_sin_asignar=id_dispositivo_sin_asignar,
+        id_asignacion=id_asignacion,
+        id_tiempo_por_semana=_asegurar_semanas(
+            conexion_revertida, (VENTANA.semana, VENTANA_TEMPRANA.semana)
         ),
         id_semaforo=_asegurar_semaforo(conexion_revertida),
     )
@@ -444,12 +570,20 @@ def secuencia_de_sesiones(engine_de_pruebas):
 # ---------------------------------------------------------------------------
 
 
-def lectura_de_signos(referencias: Referencias, **cambios: Any) -> dict[str, Any]:
+def lectura_de_signos(
+    referencias: Referencias, *, ventana: Ventana = VENTANA, **cambios: Any
+) -> dict[str, Any]:
+    """Lectura de signos maternos situada dentro de ``ventana``.
+
+    ``id_tiempo_gest`` sale de la semana que le corresponde a esa ventana, no
+    de una constante suelta: el endpoint comprueba ahora que la semana declarada
+    sea la que el embarazo tiene en la fecha de captura.
+    """
     fila: dict[str, Any] = {
-        "id_tiempo_gest": referencias.id_tiempo_con_movimiento,
+        "id_tiempo_gest": referencias.id_tiempo(ventana.semana),
         "id_semaforo": referencias.id_semaforo,
-        "fecha_hora_captura": CAPTURA.isoformat(),
-        "fecha_hora_sincronizacion": SINCRONIZACION.isoformat(),
+        "fecha_hora_captura": ventana.captura.isoformat(),
+        "fecha_hora_sincronizacion": ventana.sincronizacion.isoformat(),
         "hr_valor": 88.5,
         "spo2_valor": 97,
         "mov_valor": None,
@@ -458,12 +592,14 @@ def lectura_de_signos(referencias: Referencias, **cambios: Any) -> dict[str, Any
     return fila
 
 
-def lectura_de_movimiento(referencias: Referencias, **cambios: Any) -> dict[str, Any]:
+def lectura_de_movimiento(
+    referencias: Referencias, *, ventana: Ventana = VENTANA, **cambios: Any
+) -> dict[str, Any]:
     fila: dict[str, Any] = {
-        "id_tiempo_gest": referencias.id_tiempo_con_movimiento,
+        "id_tiempo_gest": referencias.id_tiempo(ventana.semana),
         "id_semaforo": referencias.id_semaforo,
-        "fecha_hora_captura": CAPTURA.isoformat(),
-        "fecha_hora_sincronizacion": SINCRONIZACION.isoformat(),
+        "fecha_hora_captura": ventana.captura.isoformat(),
+        "fecha_hora_sincronizacion": ventana.sincronizacion.isoformat(),
         "hr_valor": None,
         "spo2_valor": None,
         "mov_valor": 12,
@@ -472,42 +608,50 @@ def lectura_de_movimiento(referencias: Referencias, **cambios: Any) -> dict[str,
     return fila
 
 
-def paquete_de_signos(
+def _paquete(
     referencias: Referencias,
-    *,
-    lecturas: list[dict[str, Any]] | None = None,
-    **cambios: Any,
+    tipo_sesion: str,
+    ventana: Ventana,
+    lecturas: list[dict[str, Any]] | None,
+    cambios: dict[str, Any],
 ) -> dict[str, Any]:
+    """Sesión cerrada y coherente: trae ``fecha_fin``, así que va COMPLETADA."""
+    constructor = (
+        lectura_de_movimiento if tipo_sesion == "MOVIMIENTOS_FETALES" else lectura_de_signos
+    )
     cuerpo: dict[str, Any] = {
         "id_embarazo": referencias.id_embarazo,
         "id_dispositivo": referencias.id_dispositivo,
-        "tipo_sesion": "SIGNOS_MATERNOS",
-        "fecha_inicio": INICIO.isoformat(),
-        "fecha_fin": FIN.isoformat(),
-        "lecturas": [lectura_de_signos(referencias)] if lecturas is None else lecturas,
+        "tipo_sesion": tipo_sesion,
+        "fecha_inicio": ventana.inicio.isoformat(),
+        "fecha_fin": ventana.fin.isoformat(),
+        "estado_sesion": "COMPLETADA",
+        "lecturas": (
+            [constructor(referencias, ventana=ventana)] if lecturas is None else lecturas
+        ),
     }
     cuerpo.update(cambios)
     return cuerpo
+
+
+def paquete_de_signos(
+    referencias: Referencias,
+    *,
+    ventana: Ventana = VENTANA,
+    lecturas: list[dict[str, Any]] | None = None,
+    **cambios: Any,
+) -> dict[str, Any]:
+    return _paquete(referencias, "SIGNOS_MATERNOS", ventana, lecturas, cambios)
 
 
 def paquete_de_movimiento(
     referencias: Referencias,
     *,
+    ventana: Ventana = VENTANA,
     lecturas: list[dict[str, Any]] | None = None,
     **cambios: Any,
 ) -> dict[str, Any]:
-    cuerpo: dict[str, Any] = {
-        "id_embarazo": referencias.id_embarazo,
-        "id_dispositivo": referencias.id_dispositivo,
-        "tipo_sesion": "MOVIMIENTOS_FETALES",
-        "fecha_inicio": INICIO.isoformat(),
-        "fecha_fin": FIN.isoformat(),
-        "lecturas": (
-            [lectura_de_movimiento(referencias)] if lecturas is None else lecturas
-        ),
-    }
-    cuerpo.update(cambios)
-    return cuerpo
+    return _paquete(referencias, "MOVIMIENTOS_FETALES", ventana, lecturas, cambios)
 
 
 # ---------------------------------------------------------------------------
@@ -615,9 +759,14 @@ def test_a_la_sesion_persiste_los_valores_enviados(
 def test_a_los_valores_por_omision_los_aplica_el_modelo(
     cliente, referencias, conexion_revertida
 ):
-    """Omitir estado y origen deja que el modelo ponga los suyos."""
+    """Omitir estado y origen deja que el modelo ponga los suyos.
+
+    También se quita ``fecha_fin``: una sesión sin estado se guarda como
+    PENDIENTE, y una PENDIENTE no puede declarar cuándo terminó.
+    """
     cuerpo = paquete_de_signos(referencias)
     del cuerpo["fecha_fin"]
+    del cuerpo["estado_sesion"]
 
     cliente.post(RUTA, json=cuerpo)
 
@@ -810,6 +959,242 @@ def test_c_las_referencias_validas_de_la_fixture_sobreviven_al_rechazo(
 
 
 # ---------------------------------------------------------------------------
+# El dispositivo tiene que estar asignado a ese embarazo durante la sesión
+# ---------------------------------------------------------------------------
+
+
+def test_un_dispositivo_asignado_al_embarazo_se_acepta(
+    cliente, referencias, conexion_revertida
+):
+    """Camino feliz con una AsignacionDispositivo real detrás."""
+    respuesta = cliente.post(RUTA, json=paquete_de_signos(referencias))
+
+    assert respuesta.status_code == 201
+    assert contar_sesiones(conexion_revertida, referencias.id_embarazo) == 1
+
+
+def test_un_dispositivo_existente_pero_no_asignado_se_rechaza(
+    cliente, referencias, conexion_revertida
+):
+    """Dos llaves foráneas válidas no demuestran que el préstamo exista."""
+    respuesta = cliente.post(
+        RUTA,
+        json=paquete_de_signos(
+            referencias, id_dispositivo=referencias.id_dispositivo_sin_asignar
+        ),
+    )
+
+    assert respuesta.status_code == 422
+    assert "asignación" in respuesta.json()["detail"]
+    assert contar_sesiones(conexion_revertida, referencias.id_embarazo) == 0
+
+
+def test_una_asignacion_que_empieza_despues_de_la_sesion_se_rechaza(
+    cliente, referencias, conexion_revertida
+):
+    id_dispositivo = _crear_dispositivo(
+        conexion_revertida, referencias.id_clinica, "SCRUM62-DISP-TARDE"
+    )
+    _crear_asignacion(
+        conexion_revertida,
+        id_dispositivo=id_dispositivo,
+        id_embarazo=referencias.id_embarazo,
+        fecha_inicio=VENTANA.fin.date() + timedelta(days=1),
+    )
+
+    respuesta = cliente.post(
+        RUTA, json=paquete_de_signos(referencias, id_dispositivo=id_dispositivo)
+    )
+
+    assert respuesta.status_code == 422
+    assert contar_sesiones(conexion_revertida, referencias.id_embarazo) == 0
+
+
+def test_una_asignacion_que_termino_antes_de_la_sesion_se_rechaza(
+    cliente, referencias, conexion_revertida
+):
+    id_dispositivo = _crear_dispositivo(
+        conexion_revertida, referencias.id_clinica, "SCRUM62-DISP-CERRADA"
+    )
+    _crear_asignacion(
+        conexion_revertida,
+        id_dispositivo=id_dispositivo,
+        id_embarazo=referencias.id_embarazo,
+        fecha_inicio=FECHA_INICIO_EMBARAZO,
+        fecha_fin=VENTANA.inicio.date() - timedelta(days=1),
+        activo=False,
+    )
+
+    respuesta = cliente.post(
+        RUTA, json=paquete_de_signos(referencias, id_dispositivo=id_dispositivo)
+    )
+
+    assert respuesta.status_code == 422
+    assert contar_sesiones(conexion_revertida, referencias.id_embarazo) == 0
+
+
+def test_una_asignacion_historica_cerrada_que_cubre_la_sesion_se_acepta(
+    cliente, referencias, conexion_revertida
+):
+    """``activo=False`` no invalida una sesión de cuando el préstamo seguía vivo.
+
+    Ésta es la razón de que la regla sea temporal y no un simple booleano: los
+    dispositivos se devuelven, y las sesiones que se tomaron con ellos siguen
+    siendo válidas después.
+    """
+    id_dispositivo = _crear_dispositivo(
+        conexion_revertida, referencias.id_clinica, "SCRUM62-DISP-HISTORICA"
+    )
+    _crear_asignacion(
+        conexion_revertida,
+        id_dispositivo=id_dispositivo,
+        id_embarazo=referencias.id_embarazo,
+        fecha_inicio=FECHA_INICIO_EMBARAZO,
+        fecha_fin=VENTANA.fin.date() + timedelta(days=30),
+        activo=False,
+    )
+
+    respuesta = cliente.post(
+        RUTA, json=paquete_de_signos(referencias, id_dispositivo=id_dispositivo)
+    )
+
+    assert respuesta.status_code == 201
+    assert contar_sesiones(conexion_revertida, referencias.id_embarazo) == 1
+
+
+def test_una_asignacion_de_otro_embarazo_no_sirve(
+    cliente, referencias, conexion_revertida
+):
+    """El dispositivo está prestado, pero a otra gestante."""
+    id_otro_paciente = conexion_revertida.execute(
+        insert(Paciente)
+        .values(
+            cedula="SCRUM62-8-000-0002",
+            primer_nombre="Otra",
+            apellido_paterno="Simulada",
+            email_pac="scrum62.otra@example.invalid",
+            fecha_nac=date(1996, 2, 3),
+        )
+        .returning(Paciente.id_paciente)
+    ).scalar_one()
+    id_otro_embarazo = conexion_revertida.execute(
+        insert(Embarazo)
+        .values(
+            id_paciente=id_otro_paciente,
+            id_clinica=referencias.id_clinica,
+            numero_gestas=1,
+            numero_partos=0,
+            fecha_inicio=FECHA_INICIO_EMBARAZO,
+            fecha_probable_parto=FECHA_PROBABLE_PARTO,
+        )
+        .returning(Embarazo.id_embarazo)
+    ).scalar_one()
+
+    id_dispositivo = _crear_dispositivo(
+        conexion_revertida, referencias.id_clinica, "SCRUM62-DISP-AJENA"
+    )
+    _crear_asignacion(
+        conexion_revertida,
+        id_dispositivo=id_dispositivo,
+        id_embarazo=id_otro_embarazo,
+        fecha_inicio=FECHA_INICIO_EMBARAZO,
+    )
+
+    respuesta = cliente.post(
+        RUTA, json=paquete_de_signos(referencias, id_dispositivo=id_dispositivo)
+    )
+
+    assert respuesta.status_code == 422
+    assert contar_sesiones(conexion_revertida, referencias.id_embarazo) == 0
+
+
+# ---------------------------------------------------------------------------
+# La semana declarada tiene que ser la semana real del embarazo
+# ---------------------------------------------------------------------------
+
+
+def test_la_semana_declarada_debe_coincidir_con_la_de_la_captura(
+    cliente, referencias, conexion_revertida
+):
+    """Semana 12 en el catálogo para una captura que cae en la semana 31."""
+    respuesta = cliente.post(
+        RUTA,
+        json=paquete_de_signos(
+            referencias,
+            lecturas=[
+                lectura_de_signos(
+                    referencias,
+                    id_tiempo_gest=referencias.id_tiempo(VENTANA_TEMPRANA.semana),
+                )
+            ],
+        ),
+    )
+
+    assert respuesta.status_code == 422
+    detalle = respuesta.json()["detail"]
+    assert str(VENTANA.semana) in detalle
+    assert str(VENTANA_TEMPRANA.semana) in detalle
+    assert contar_sesiones(conexion_revertida, referencias.id_embarazo) == 0
+
+
+def test_la_semana_correcta_se_acepta(cliente, referencias, conexion_revertida):
+    respuesta = cliente.post(
+        RUTA, json=paquete_de_signos(referencias, ventana=VENTANA_TEMPRANA)
+    )
+
+    assert respuesta.status_code == 201
+    lectura = lecturas_del_embarazo(conexion_revertida, referencias.id_embarazo)[0]
+    assert lectura["id_tiempo_gest"] == referencias.id_tiempo(VENTANA_TEMPRANA.semana)
+
+
+def test_una_captura_anterior_al_inicio_del_embarazo_se_rechaza(
+    cliente, referencias, conexion_revertida
+):
+    """Semana gestacional 0 o negativa: fuera del dominio del catálogo.
+
+    Necesita un dispositivo prestado desde antes de que empezara el embarazo;
+    con la asignación normal, la sesión de julio fallaría primero por no estar
+    cubierta, y la prueba estaría midiendo la otra regla.
+    """
+    antes = _ventana(
+        datetime(2025, 7, 1, 14, 0, tzinfo=timezone.utc), semana=VENTANA.semana
+    )
+    id_dispositivo = _crear_dispositivo(
+        conexion_revertida, referencias.id_clinica, "SCRUM62-DISP-PREVIA"
+    )
+    _crear_asignacion(
+        conexion_revertida,
+        id_dispositivo=id_dispositivo,
+        id_embarazo=referencias.id_embarazo,
+        fecha_inicio=date(2025, 6, 1),
+    )
+
+    respuesta = cliente.post(
+        RUTA,
+        json=paquete_de_signos(referencias, ventana=antes, id_dispositivo=id_dispositivo),
+    )
+
+    assert respuesta.status_code == 422
+    assert "anterior al inicio del embarazo" in respuesta.json()["detail"]
+    assert contar_sesiones(conexion_revertida, referencias.id_embarazo) == 0
+
+
+def test_una_captura_mas_alla_del_rango_gestacional_se_rechaza(
+    cliente, referencias, conexion_revertida
+):
+    """Semana 60: el catálogo solo admite de la 1 a la 42."""
+    tardia = _ventana(
+        datetime(2026, 9, 26, 14, 0, tzinfo=timezone.utc), semana=VENTANA.semana
+    )
+
+    respuesta = cliente.post(RUTA, json=paquete_de_signos(referencias, ventana=tardia))
+
+    assert respuesta.status_code == 422
+    assert "fuera del rango" in respuesta.json()["detail"]
+    assert contar_sesiones(conexion_revertida, referencias.id_embarazo) == 0
+
+
+# ---------------------------------------------------------------------------
 # Escenario D: rollback provocado por una lectura inválida
 # ---------------------------------------------------------------------------
 
@@ -879,31 +1264,35 @@ def test_d_un_movimiento_negativo_tambien_revierte(
 
 
 # ---------------------------------------------------------------------------
-# Escenario E: colisión real de llave primaria contra el servidor
+# Colisión interna de secuencia: una PK generada que choca con una existente
 # ---------------------------------------------------------------------------
+
+# Un día después de la ventana normal: sigue en la semana 31 (212 y 213 días
+# desde el inicio del embarazo caen ambos en la misma semana), así que el
+# paquete es válido y llega hasta el INSERT.
+VENTANA_DISTINGUIBLE = _ventana(
+    VENTANA.inicio + timedelta(days=1), semana=VENTANA.semana
+)
 
 
 def paquete_distinguible(referencias: Referencias) -> dict[str, Any]:
     """Segundo paquete, deliberadamente distinto del primero en todo lo visible.
 
-    Si el endpoint llegara a sobrescribir en vez de rechazar, la fila guardada
-    cambiaría de tipo, de estado, de fecha y de forma biométrica: comparar
-    contra estos valores es lo que convierte «no sobrescribió» en algo
-    comprobable y no en una afirmación de fe.
+    Si el endpoint llegara a sobrescribir en vez de fallar, la fila guardada
+    cambiaría de tipo, de fechas y de forma biométrica: comparar contra estos
+    valores es lo que convierte «no sobrescribió» en algo comprobable y no en
+    una afirmación de fe.
+
+    Va COMPLETADA y no INTERRUMPIDA porque trae ``fecha_fin``: tiene que ser un
+    paquete plenamente válido para que el fallo que se observa sea el choque de
+    llave primaria y no una validación previa.
     """
     return paquete_de_movimiento(
         referencias,
-        fecha_inicio=(INICIO + timedelta(days=1)).isoformat(),
-        fecha_fin=(FIN + timedelta(days=1)).isoformat(),
-        estado_sesion="INTERRUMPIDA",
+        ventana=VENTANA_DISTINGUIBLE,
         lecturas=[
             lectura_de_movimiento(
-                referencias,
-                fecha_hora_captura=(CAPTURA + timedelta(days=1)).isoformat(),
-                fecha_hora_sincronizacion=(
-                    SINCRONIZACION + timedelta(days=1)
-                ).isoformat(),
-                mov_valor=99,
+                referencias, ventana=VENTANA_DISTINGUIBLE, mov_valor=99
             )
         ],
     )
@@ -912,6 +1301,11 @@ def paquete_distinguible(referencias: Referencias) -> dict[str, Any]:
 @pytest.fixture
 def colision_de_pk(secuencia_de_sesiones, cliente, referencias, conexion_revertida):
     """Crea una sesión legítima y deja la secuencia apuntando a su ``id_sesion``.
+
+    Esto **no** simula un reenvío: el cliente nunca envía ``id_sesion``, así que
+    no tiene forma de provocar una llave duplicada. Lo que reproduce es una
+    secuencia que quedó por detrás de las filas ya guardadas, que es un defecto
+    del servidor. Por eso la respuesta esperada es 500.
 
     ``secuencia_de_sesiones`` va primero en la firma a propósito: así se monta
     antes que la transacción exterior y se desmonta después de su rollback.
@@ -938,15 +1332,16 @@ def colision_de_pk(secuencia_de_sesiones, cliente, referencias, conexion_reverti
     return id_ocupado, dict(original), segunda
 
 
-def test_e_una_colision_real_de_pk_devuelve_409(colision_de_pk):
+def test_e_una_colision_de_secuencia_es_un_error_interno(colision_de_pk):
+    """500, no 409: la llave duplicada no la pudo causar el cliente."""
     _, _, respuesta = colision_de_pk
 
-    assert respuesta.status_code == 409
-    assert respuesta.json()["detail"] == MENSAJE_CONFLICTO
+    assert respuesta.status_code == 500
+    assert respuesta.json()["detail"] == MENSAJE_INESPERADO
 
 
-def test_e_el_conflicto_no_se_trata_como_reenvio_exitoso(colision_de_pk):
-    """Un reenvío no es un éxito: sin 2xx y sin identificadores devueltos."""
+def test_e_la_colision_no_devuelve_identificadores(colision_de_pk):
+    """Nada de 2xx y nada que se parezca a una creación."""
     _, _, respuesta = colision_de_pk
     cuerpo = respuesta.json()
 
@@ -966,7 +1361,7 @@ def test_e_el_registro_previo_no_fue_sobrescrito(
     assert dict(actual) == original
     assert actual["id_sesion"] == id_ocupado
     assert actual["tipo_sesion"] is TipoSesion.SIGNOS_MATERNOS
-    assert actual["estado_sesion"] is EstadoSesion.PENDIENTE
+    assert actual["estado_sesion"] is EstadoSesion.COMPLETADA
     assert actual["fecha_inicio"] == INICIO
 
 
@@ -979,7 +1374,7 @@ def test_e_no_aparecio_una_sesion_adicional(
 def test_e_no_quedaron_lecturas_parciales(
     colision_de_pk, referencias, conexion_revertida
 ):
-    """Solo sobrevive la lectura de la sesión legítima; la del paquete rechazado no."""
+    """Solo sobrevive la lectura de la sesión legítima; la del paquete fallido no."""
     lecturas = lecturas_del_embarazo(conexion_revertida, referencias.id_embarazo)
 
     assert len(lecturas) == 1
@@ -987,13 +1382,41 @@ def test_e_no_quedaron_lecturas_parciales(
     assert lecturas[0]["mov_valor"] is None
 
 
-def test_e_la_respuesta_del_conflicto_no_filtra_nada(colision_de_pk):
+def test_e_la_respuesta_de_la_colision_no_filtra_nada(colision_de_pk):
     _, _, respuesta = colision_de_pk
 
     for fragmento in FRAGMENTOS_PROHIBIDOS:
         assert fragmento not in respuesta.text
     assert "pk_sesion_monitoreo" not in respuesta.text
     assert "23505" not in respuesta.text
+
+
+# ---------------------------------------------------------------------------
+# Lo que SCRUM-62 hace hoy con un reenvío: nada
+# ---------------------------------------------------------------------------
+
+
+def test_el_mismo_paquete_enviado_dos_veces_crea_dos_sesiones(
+    cliente, referencias, conexion_revertida
+):
+    """La verdad incómoda sobre el estado actual, escrita como prueba.
+
+    No hay detección de reenvíos: el mismo JSON, byte por byte, produce dos
+    sesiones distintas y dos respuestas 201. Es exactamente lo que SCRUM-63
+    tendrá que cambiar, y dejarlo documentado en una prueba evita que alguien
+    suponga lo contrario leyendo el 409 de la tabla de errores.
+    """
+    cuerpo = paquete_de_signos(referencias)
+
+    primera = cliente.post(RUTA, json=cuerpo)
+    segunda = cliente.post(RUTA, json=cuerpo)
+
+    assert primera.status_code == 201
+    assert segunda.status_code == 201
+    assert primera.json()["id_sesion"] != segunda.json()["id_sesion"]
+    assert not set(primera.json()["ids_lectura"]) & set(segunda.json()["ids_lectura"])
+    assert contar_sesiones(conexion_revertida, referencias.id_embarazo) == 2
+    assert contar_lecturas(conexion_revertida, referencias.id_embarazo) == 2
 
 
 def test_e_el_rollback_restaura_la_secuencia_alterada(
@@ -1032,21 +1455,23 @@ def test_e_el_rollback_restaura_la_secuencia_alterada(
 def test_el_movimiento_antes_de_la_semana_20_se_rechaza(
     cliente, referencias, conexion_revertida
 ):
+    """Sesión situada de verdad en la semana 12, no solo declarada como tal."""
     respuesta = cliente.post(
-        RUTA,
-        json=paquete_de_movimiento(
-            referencias,
-            lecturas=[
-                lectura_de_movimiento(
-                    referencias, id_tiempo_gest=referencias.id_tiempo_sin_movimiento
-                )
-            ],
-        ),
+        RUTA, json=paquete_de_movimiento(referencias, ventana=VENTANA_TEMPRANA)
     )
 
     assert respuesta.status_code == 422
-    assert "semana" in respuesta.json()["detail"]
+    assert str(VENTANA_TEMPRANA.semana) in respuesta.json()["detail"]
     assert contar_sesiones(conexion_revertida, referencias.id_embarazo) == 0
+
+
+def test_el_movimiento_desde_la_semana_20_se_acepta(
+    cliente, referencias, conexion_revertida
+):
+    respuesta = cliente.post(RUTA, json=paquete_de_movimiento(referencias))
+
+    assert respuesta.status_code == 201
+    assert contar_lecturas(conexion_revertida, referencias.id_embarazo) == 1
 
 
 def test_los_signos_maternos_antes_de_la_semana_20_si_se_aceptan(
@@ -1054,19 +1479,41 @@ def test_los_signos_maternos_antes_de_la_semana_20_si_se_aceptan(
 ):
     """La regla es de los movimientos fetales, no de todas las lecturas."""
     respuesta = cliente.post(
+        RUTA, json=paquete_de_signos(referencias, ventana=VENTANA_TEMPRANA)
+    )
+
+    assert respuesta.status_code == 201
+    assert contar_lecturas(conexion_revertida, referencias.id_embarazo) == 1
+
+
+def test_no_se_puede_esquivar_la_semana_20_declarando_otra_semana(
+    cliente, referencias, conexion_revertida
+):
+    """El agujero que cerró esta revisión, probado explícitamente.
+
+    Antes bastaba con apuntar ``id_tiempo_gest`` a una semana >= 20 para colar
+    un movimiento capturado en la semana 12: la regla miraba la semana que traía
+    el paquete. Ahora la semana se calcula desde el embarazo y la fecha de
+    captura, así que la mentira se detecta antes de llegar al umbral.
+    """
+    respuesta = cliente.post(
         RUTA,
-        json=paquete_de_signos(
+        json=paquete_de_movimiento(
             referencias,
+            ventana=VENTANA_TEMPRANA,
             lecturas=[
-                lectura_de_signos(
-                    referencias, id_tiempo_gest=referencias.id_tiempo_sin_movimiento
+                lectura_de_movimiento(
+                    referencias,
+                    ventana=VENTANA_TEMPRANA,
+                    # Semana 31: por encima del umbral, y falsa para esta captura.
+                    id_tiempo_gest=referencias.id_tiempo(VENTANA.semana),
                 )
             ],
         ),
     )
 
-    assert respuesta.status_code == 201
-    assert contar_lecturas(conexion_revertida, referencias.id_embarazo) == 1
+    assert respuesta.status_code == 422
+    assert contar_sesiones(conexion_revertida, referencias.id_embarazo) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1209,31 +1656,33 @@ def _referencias_para(conexion) -> Referencias:
             id_clinica=id_clinica,
             numero_gestas=2,
             numero_partos=1,
-            fecha_inicio=date(2025, 8, 1),
-            fecha_probable_parto=date(2026, 5, 8),
+            fecha_inicio=FECHA_INICIO_EMBARAZO,
+            fecha_probable_parto=FECHA_PROBABLE_PARTO,
         )
         .returning(Embarazo.id_embarazo)
     ).scalar_one()
-    id_dispositivo = conexion.execute(
-        insert(Dispositivo)
-        .values(
-            id_clinica=id_clinica,
-            codigo_dispositivo=CODIGO_DISPOSITIVO_FICTICIO,
-            modelo="FetalAlert Simulado",
-            version_firmware="0.0.0-sim",
-        )
-        .returning(Dispositivo.id_dispositivo)
-    ).scalar_one()
+    id_dispositivo = _crear_dispositivo(
+        conexion, id_clinica, CODIGO_DISPOSITIVO_FICTICIO
+    )
+    id_dispositivo_sin_asignar = _crear_dispositivo(
+        conexion, id_clinica, CODIGO_DISPOSITIVO_SIN_ASIGNAR
+    )
+    id_asignacion = _crear_asignacion(
+        conexion,
+        id_dispositivo=id_dispositivo,
+        id_embarazo=id_embarazo,
+        fecha_inicio=FECHA_INICIO_EMBARAZO,
+        fecha_fin=None,
+    )
     return Referencias(
         id_clinica=id_clinica,
         id_paciente=id_paciente,
         id_embarazo=id_embarazo,
         id_dispositivo=id_dispositivo,
-        id_tiempo_con_movimiento=_asegurar_tiempo_gestacional(
-            conexion, SEMANA_CON_MOVIMIENTO, mes=10, trimestre=3
-        ),
-        id_tiempo_sin_movimiento=_asegurar_tiempo_gestacional(
-            conexion, SEMANA_SIN_MOVIMIENTO, mes=3, trimestre=1
+        id_dispositivo_sin_asignar=id_dispositivo_sin_asignar,
+        id_asignacion=id_asignacion,
+        id_tiempo_por_semana=_asegurar_semanas(
+            conexion, (VENTANA.semana, VENTANA_TEMPRANA.semana)
         ),
         id_semaforo=_asegurar_semaforo(conexion),
     )

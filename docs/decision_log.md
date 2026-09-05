@@ -252,16 +252,17 @@ router en `backend/app/api/v1/`.
   error interno. La respuesta de éxito devuelve solo `id_sesion`,
   `lecturas_creadas` e `ids_lectura`.
 - **Clasificación de errores por `SQLSTATE`, en una función centralizada.**
-  `23514` (CHECK) → 422, porque es un dato que el cliente envió mal; `23505`
-  (UNIQUE/PK) y `23503` (FK, por carrera) → 409; `23502` (NOT NULL) → **500**,
-  porque Pydantic ya garantiza los campos obligatorios y un `NULL` que llegue
-  hasta la base delata un defecto del servidor, no del payload; `DataError` →
-  **500** salvo que el valor pueda atribuirse al payload de forma controlada, y
-  hoy no existe ese caso porque el contrato ya acota `mov_valor` al rango
-  `SMALLINT`; cualquier otro código → 500. `clasificar_error_de_base` es pura y
-  se prueba con errores fabricados.
-- **Conflictos rechazados sin sobrescribir.** Un `409` nunca actualiza ni
-  reemplaza nada, y un reenvío **no** se trata como éxito.
+  `23514` (CHECK) → 422, porque es un dato que el cliente envió mal; `23503`
+  (FK, por carrera) → 409; `23505` (UNIQUE/PK) → **500** *(corregido en la
+  revisión del PR #10; ver más abajo)*; `23502` (NOT NULL) → **500**, porque
+  Pydantic ya garantiza los campos obligatorios y un `NULL` que llegue hasta la
+  base delata un defecto del servidor, no del payload; `DataError` → **500**
+  salvo que el valor pueda atribuirse al payload de forma controlada, y hoy no
+  existe ese caso porque el contrato ya acota `mov_valor` al rango `SMALLINT`;
+  cualquier otro código → 500. `clasificar_error_de_base` es pura y se prueba
+  con errores fabricados.
+- **Nada se sobrescribe nunca.** Ningún camino actualiza ni reemplaza una fila
+  existente: o se crea el paquete completo, o no queda nada.
 - **Idempotencia HTTP diferida a SCRUM-63.** No se implementan
   `Idempotency-Key`, tabla o caché de idempotencia, deduplicación ni
   reutilización de respuestas. Queda constancia de un hallazgo relevante para ese
@@ -323,12 +324,13 @@ se suma a la verificación que pone el job en rojo si alguna prueba queda omitid
 no hay UNIQUE fuera de la PK, un choque solo puede provocarse adelantando la
 secuencia de `id_sesion` para que el siguiente `nextval` devuelva un valor ya
 ocupado. La prueba crea primero una sesión legítima por el endpoint, adelanta la
-secuencia hasta el `id_sesion` de esa sesión y reenvía un segundo paquete
-deliberadamente distinto en tipo, estado, fechas y forma biométrica. El
-resultado es `409`, la fila previa queda idéntica campo por campo, no aparece
-una segunda sesión, no queda ninguna lectura del paquete rechazado, la respuesta
-no es un 2xx ni devuelve identificadores —un reenvío no es un éxito
-idempotente— y no filtra SQL, credenciales, nombre de restricción ni `SQLSTATE`.
+secuencia hasta el `id_sesion` de esa sesión y envía un segundo paquete
+deliberadamente distinto en tipo, fechas y forma biométrica. El resultado es
+`500` —es una secuencia desincronizada, no algo que el cliente pudiera haber
+hecho—, la fila previa queda idéntica campo por campo, no aparece una segunda
+sesión, no queda ninguna lectura del paquete fallido, la respuesta no es un 2xx
+ni devuelve identificadores, y no filtra SQL, credenciales, nombre de
+restricción ni `SQLSTATE`.
 
 Tres salvaguardas rodean la maniobra. La secuencia se descubre desde el catálogo
 con `pg_get_serial_sequence`, en vez de componer su nombre a mano. Su estado
@@ -342,3 +344,115 @@ seguridad actúe, de modo que un fallo del aislamiento se vería en lugar de
 quedar tapado. Verificado también desde fuera de las pruebas: la secuencia
 `operacional.sesion_monitoreo_id_sesion_seq` queda en el mismo estado antes y
 después de la suite completa.
+
+### Correcciones de la revisión del PR #10
+
+La revisión encontró cinco invariantes que el endpoint no estaba sosteniendo.
+Ninguna necesitó migración: el esquema ya las soportaba, lo que faltaba era
+comprobarlas.
+
+- **El dispositivo debe estar asignado a ese embarazo durante la sesión.**
+  Comprobar por separado que el embarazo existe y que el dispositivo existe no
+  demuestra que ese dispositivo se le hubiera entregado a esa gestante:
+  cualquier combinación de dos filas válidas pasaba. `AsignacionDispositivo` es
+  justamente la tabla que los une, y los une **durante un período**, así que la
+  regla es temporal: la asignación tiene que empezar antes o el mismo día que la
+  sesión, y si tiene `fecha_fin`, terminar después o el mismo día que ella. Una
+  asignación sin `fecha_fin` sigue vigente y cubre cualquier sesión posterior a
+  su inicio.
+
+  Deliberadamente **no** se mira `activo`. Ese campo describe el préstamo
+  *ahora*, y juzgar con él una sesión pasada invalidaría retroactivamente todas
+  las lecturas tomadas durante un préstamo que después se cerró. Hay una prueba
+  dedicada a eso: una asignación con `activo=False` que sí cubría las fechas se
+  acepta.
+
+  Una consulta por paquete, no por lectura. Si el paquete es imposible, el
+  código es `422`: las dos referencias existen, lo que no se sostiene es la
+  combinación.
+
+- **`id_tiempo_gest` se valida contra el embarazo y la fecha de captura.**
+  Antes solo se comprobaba que la fila del catálogo existiera, lo que
+  demostraba qué semana *declaraba* el cliente, no en qué semana estaba el
+  embarazo cuando se capturó la lectura. Ahora la semana se calcula desde
+  `Embarazo.fecha_inicio` con la misma aritmética que usa el generador
+  —semanas completas transcurridas, contando la primera como semana 1— y se
+  exige que coincida con la del catálogo.
+
+  Esto arregla dos cosas a la vez. La primera es la veracidad de la propia
+  dimensión: una lectura archivada en la semana 31 pero capturada en la 12
+  corrompería cualquier agrupación gestacional que la ETL construya después. La
+  segunda es la regla de la semana 20, que hasta ahora era **trivial de
+  esquivar**: bastaba con apuntar `id_tiempo_gest` a cualquier semana ≥ 20 y un
+  movimiento capturado en la semana 12 entraba sin problema. Aplicada sobre la
+  semana calculada, esa puerta se cierra, y hay una prueba que lo comprueba
+  intentando exactamente ese engaño.
+
+  También se rechaza de forma controlada una captura anterior al inicio del
+  embarazo o que caiga fuera del rango 1-42 que admite el catálogo.
+
+  Sin consultas nuevas: la fecha de inicio del embarazo se lee en la misma
+  consulta que prueba que existe, y las semanas del catálogo ya venían en lote.
+
+- **`23505` sobre las llaves primarias generadas es un error interno, no un
+  conflicto del cliente.** Un duplicado normalmente significa «mandaste algo que
+  ya está», y `409` sería la respuesta honesta. Aquí no puede significar eso: el
+  cliente no envía `id_sesion` ni `id_lectura`, las dos llaves salen de
+  secuencias de PostgreSQL, y ninguna de las dos tablas tiene una clave de
+  negocio con la que pudiera chocar. Una llave duplicada solo puede describir
+  una secuencia que quedó por detrás de las filas guardadas, que es un fallo de
+  este lado. Devolver `409` culparía al cliente de un problema del servidor y,
+  además, se leería como «detecté tu reenvío», que es precisamente lo que
+  SCRUM-62 **no** hace. Pasa a `500`. Cuando SCRUM-63 introduzca un
+  identificador que envíe el cliente, un `409` real será posible y esta decisión
+  volverá a mirarse.
+
+  `23503` (llave foránea por carrera) se queda en `409`: es lo único que hoy
+  puede provocar el cliente y merecer ese código.
+
+- **Cada lectura tiene que haberse capturado dentro de su sesión.** Se validaba
+  que la sincronización no precediera a la captura y que la sesión no terminara
+  antes de empezar, pero nada ataba la lectura a la sesión en el tiempo: una
+  sesión de media hora podía traer una lectura capturada semanas antes o
+  después. Ahora `fecha_hora_captura` debe caer entre `fecha_inicio` y
+  `fecha_fin`, extremos incluidos.
+
+  `fecha_hora_sincronizacion` queda fuera de la regla a propósito: sincronizar
+  mucho después de que la sesión terminó es el comportamiento normal de un
+  sistema pensado para conectividad intermitente, no una anomalía.
+
+- **`estado_sesion` y `fecha_fin` tienen que decir lo mismo.** No se inventa una
+  máquina de estados: se aplica literalmente la semántica que ya documenta
+  `SesionMonitoreo`, donde `fecha_fin` permanece NULL mientras la sesión sigue
+  `PENDIENTE` o quedó `INTERRUMPIDA`. Por tanto esos dos estados no admiten
+  `fecha_fin`, y `COMPLETADA` y `PROCESADA` la exigen: una sesión que declara
+  haber terminado tiene que decir cuándo. Omitir el estado se valida como
+  `PENDIENTE`, porque es lo que la base va a guardar, así que omitirlo y mandar
+  `fecha_fin` es tan incoherente como declararlo.
+
+### Lo que SCRUM-62 sigue sin hacer con un reenvío
+
+Conviene dejarlo por escrito sin ambigüedad, porque la redacción anterior de
+este documento se prestaba a leerse al revés: **este endpoint no reconoce
+reenvíos en absoluto**. El mismo JSON enviado dos veces crea dos sesiones, con
+dos `id_sesion` distintos, y las dos respuestas son `201`. No hay detección, ni
+deduplicación, ni reutilización de respuestas, y un `409` nunca significa «era
+un reenvío». Hay una prueba de integración dedicada a dejar constancia de ese
+comportamiento, para que nadie lo suponga distinto.
+
+La idempotencia HTTP real sigue siendo alcance de SCRUM-63, y necesitará una
+migración que añada la clave que hoy no existe.
+
+### Datos de prueba corregidos
+
+La fixture de PostgreSQL describía una combinación imposible: un embarazo
+iniciado el 2025-08-01 con capturas el 2026-03-01 declaradas como semana 41,
+cuando esa fecha cae en la **semana 31**, y sin ninguna `AsignacionDispositivo`
+que prestara el dispositivo a esa gestante. Las pruebas pasaban porque el
+endpoint no comprobaba ninguna de las dos cosas.
+
+Ahora la fixture crea la asignación y deriva las semanas de las fechas: dos
+ventanas, una en la semana 31 (2026-03-01, por encima del umbral de movimiento)
+y otra en la semana 12 (2025-10-17, por debajo), ambas calculadas a mano desde
+la fecha de inicio del embarazo y no copiadas de la implementación que
+verifican.
