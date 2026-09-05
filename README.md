@@ -138,6 +138,102 @@ El repositorio se encuentra en una etapa temprana. Actualmente contiene principa
 - Incorporación de auditoría (`AuditoriaLog`), anonimización y controles de cumplimiento con la Ley 81 de 2019.
 - Pruebas automatizadas y documentación final de la tesis.
 
+## Carga del dataset simulado en PostgreSQL
+
+El dataset simulado se genera con un script y se carga en el esquema operacional
+`operacional` con otro. Los dos trabajan **exclusivamente con datos ficticios**.
+
+### 1. Levantar PostgreSQL
+
+```powershell
+docker compose up -d db
+docker compose ps
+```
+
+El contenedor debe aparecer como `healthy` antes de continuar.
+
+### 2. Desplegar el esquema
+
+La carga **no crea el esquema**: exige que las migraciones ya estén aplicadas.
+
+```powershell
+cd backend
+alembic upgrade head
+```
+
+### 3. Generar el dataset
+
+Los dos scripts se ejecutan desde la raíz del repositorio, así que hay que
+volver desde `backend/`:
+
+```powershell
+cd ..
+$env:PYTHONIOENCODING = "utf-8"
+python scripts/generate_mock_data.py
+```
+
+`PYTHONIOENCODING` es necesaria en consolas de Windows con una codificación
+heredada: sin ella, el resumen final del generador no puede imprimir el símbolo
+`SpO₂` y el comando termina con error **después** de haber escrito
+correctamente el dataset.
+
+Los archivos quedan en `data/generated/`, que **no se versiona**: son
+reproducibles ejecutando de nuevo el generador con su semilla fija.
+
+### 4. Cargar el dataset
+
+Seguimos en la raíz del repositorio:
+
+```powershell
+python scripts/load_mock_data.py
+```
+
+Por omisión procesa `data/generated/dataset_fetalalert.json`. Acepta una ruta
+alternativa como único argumento; nunca recibe la URL de la base ni ninguna
+credencial por línea de comandos.
+
+La conexión sale de `DATABASE_URL`. El archivo que la aplicación lee es tu
+`.env` local, que no se versiona y se crea copiando `.env.example`; **ambos
+traen `db:5432`**, un nombre que solo existe dentro de la red de Docker. Si
+ejecutas el comando directamente desde Windows, define `DATABASE_URL` apuntando
+a `127.0.0.1:<POSTGRES_PORT>` en esa terminal —lo que tiene prioridad sobre el
+`.env`— o ejecuta el comando dentro del contenedor. Conviene la dirección IPv4
+literal y no `localhost`: Docker publica PostgreSQL solo en IPv4, mientras que
+`localhost` en Windows se resuelve primero a `::1`, de modo que cada conexión
+espera a que expire ese intento IPv6 antes de reintentar por IPv4. El cargador
+además solo se ejecuta si `APP_ENV` es un ambiente seguro (`development`, `test`
+o `ci`) y se detiene si detecta producción.
+
+### Qué significa idempotencia aquí
+
+Que la carga se pueda repetir sin duplicar nada y sin pisar nada:
+
+- **Registro ausente** — se inserta.
+- **Registro ya presente e idéntico** — se deja como está y se cuenta como
+  existente sin cambios.
+- **Registro ya presente con contenido distinto bajo la misma llave primaria** —
+  se considera un conflicto: la carga se detiene, informa la tabla, la llave y
+  los campos que difieren, y **revierte la transacción completa**. Nunca
+  sobrescribe.
+
+La carga entera ocurre en **una única transacción**: o se aplica completa, o no
+queda ningún cambio. No se usa `TRUNCATE`, `DROP`, ni borrados de ningún tipo, y
+la tabla `auditoria_log` no se toca.
+
+### Qué pasa en la segunda ejecución
+
+Nada cambia. La segunda corrida reporta **0 registros insertados** y 2.270
+registros existentes sin cambios, los conteos siguen siendo 732 sesiones y 1.180
+lecturas, y las secuencias no se mueven.
+
+### Qué pasa ante un conflicto o un error
+
+El comando escribe el motivo en la salida de error y termina con un código
+distinto de cero. La base queda exactamente como estaba: una violación de
+`UNIQUE` o de `CHECK` detectada por PostgreSQL revierte toda la carga, sin
+dejar filas a medias. Los mensajes nunca incluyen la URL de conexión ni
+contraseñas.
+
 ## Calidad del proyecto
 
 - **Integración continua:** el workflow [`CI`](.github/workflows/ci.yml) se ejecuta en cada Pull Request hacia `main`, instala el backend con Python 3.12 y corre las pruebas automatizadas, incluida la validación de las migraciones contra un servicio PostgreSQL 16 efímero.

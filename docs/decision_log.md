@@ -106,3 +106,63 @@ Con los 22 modelos SQLAlchemy reales ya disponibles (aunque todavía no fusionad
 - Ninguna de las cantidades biométricas aprobadas cambió: 732 sesiones, 1,180 lecturas, 560 HR/SpO₂, 620 movimientos, 826/295/59 semáforo, 37 usuarios, 40 TelefonoPaciente, 10 TelefonoMedico, 30 UsuarioPaciente, 5 UsuarioMedico.
 
 Durante la revisión técnica se identificó inicialmente una incompatibilidad entre la cardinalidad `SesionMonitoreo` → `LecturaBiometrica` del modelo SQLAlchemy, definida como 1:1 (`id_sesion` único), y la regla funcional aprobada de 5 lecturas procesadas por sesión HR/SpO₂. El modelo fue posteriormente ajustado a una relación 1:N: `LecturaBiometrica.id_sesion` ya no está restringido como único, y `SesionMonitoreo.lecturas` se maneja como una colección. La muestra de SCRUM-54 conserva las 5 lecturas procesadas representativas por sesión HR/SpO₂ definidas para esta granularidad técnica; ese valor no representa un límite máximo de cardinalidad del modelo.
+
+## SCRUM-61 — Carga idempotente del dataset simulado en PostgreSQL
+
+Se implementó el proceso que lleva el dataset simulado aprobado a las tablas
+reales del esquema operacional. El artefacto oficial es
+`scripts/load_mock_data.py`, con la lógica reutilizable en `backend/app/loader/`.
+
+### Decisiones aprobadas
+
+- **JSON como fuente canónica.** Se carga `data/generated/dataset_fetalalert.json`;
+  los CSV siguen siendo una exportación paralela y no participan en la carga.
+- **21 tablas pobladas de 22.** `auditoria_log` no se carga: sus registros se
+  producirán mediante acciones reales durante las pruebas funcionales.
+- **`usuarios_administradores` no se inserta por separado.** Es un subconjunto
+  informativo de `usuarios`; cargarlo aparte duplicaría a los dos administradores.
+- **Carga en orden de llaves foráneas**, declarado explícitamente y verificado
+  por una prueba que deriva las dependencias de `Base.metadata`.
+- **Transacción única.** La carga completa se aplica o no queda nada. La función
+  de carga no hace `commit` ni `rollback`: la transacción pertenece a quien la
+  llama (`engine.begin()` en el comando; una transacción revertida en las pruebas).
+- **Idempotencia sin sobrescritura:** se insertan los registros ausentes, se
+  conservan los ya presentes e idénticos, y una llave primaria existente con
+  contenido distinto se trata como conflicto que aborta la carga y revierte todo.
+- **Sin `ON CONFLICT`.** Un `ON CONFLICT DO NOTHING` ocultaría en silencio una
+  violación `UNIQUE` distinta de la llave primaria. Se comparan los registros
+  existentes y se insertan solo los ausentes, de modo que PostgreSQL sigue siendo
+  la autoridad final sobre `UNIQUE`, `CHECK` y llaves foráneas.
+- **Sin operaciones destructivas:** no se usa `TRUNCATE`, `DROP`, `DELETE` ni
+  recreación del esquema, y no se desactiva ninguna restricción.
+- **El cargador no crea el esquema.** Verifica que exista `alembic_version` y que
+  la revisión desplegada sea exactamente el `head`, obtenido dinámicamente de
+  Alembic. La base se prepara con `alembic upgrade head`.
+- **Guardias antes de conectar:** el cargador solo se ejecuta con `APP_ENV` en
+  `development`, `test` o `ci`, y valida con `make_url` que el destino sea
+  PostgreSQL antes de construir el engine, para que una URL equivocada no alcance
+  a crear nada. La URL nunca se recibe por argumento, no se imprime y se depura
+  de credenciales en cualquier mensaje de error.
+- **Ajuste de secuencias tras insertar IDs explícitos.** Solo para llaves
+  primarias simples autoincrementales, detectadas con `pg_get_serial_sequence`
+  (17 de las 21 tablas cargadas). Se usa `ALTER SEQUENCE ... RESTART WITH`, que es
+  transaccional, en lugar de `setval`, que no lo es: así un rollback tampoco deja
+  la secuencia movida. El máximo se calcula sobre toda la tabla, una secuencia ya
+  adelantada nunca se reduce, y una tabla sin filas se omite.
+- **Verificación poscarga acotada a las llaves primarias del dataset**, no con un
+  `count(*)` global, para que el resultado siga siendo correcto en una base de
+  desarrollo que ya contenga otros registros.
+- **El dataset generado no se versiona.** `data/generated/` permanece ignorado y
+  se reconstruye con el generador y su semilla fija.
+
+### Validación
+
+Las pruebas contra PostgreSQL 16 se ejecutan en CI sobre la misma base efímera de
+SCRUM-52, después del paso que la deja desplegada en `head`. No migran, no crean
+y no borran nada, y la base queda como estaba, pero por dos mecanismos distintos:
+la mayoría revierte su propia transacción, mientras que la prueba que consume
+`nextval` sobre una secuencia real —una operación que no es transaccional por
+naturaleza— toma además una instantánea previa y la restaura explícitamente con
+`setval` en un `try/finally`, fallando si la restauración no funciona. El reporte
+JUnit de ambos archivos se revisa al final del job y una sola prueba omitida lo
+pone en rojo.
