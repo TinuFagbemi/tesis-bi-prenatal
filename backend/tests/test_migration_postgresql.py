@@ -163,6 +163,7 @@ def _revision_estampada(engine) -> str | None:
 @dataclass
 class ResultadoDelCiclo:
     revision_inicial: str
+    revision_head: str
     estructura_tras_primer_upgrade: EstructuraDesplegada
     esquemas_tras_primer_upgrade: set[str]
     esquemas_tras_downgrade: set[str]
@@ -188,14 +189,21 @@ def ciclo() -> ResultadoDelCiclo:
         )
 
     config = construir_config_alembic()
-    revision_inicial = ScriptDirectory.from_config(config).get_bases()[0]
+    script = ScriptDirectory.from_config(config)
+    revision_inicial = script.get_bases()[0]
+    revision_head = script.get_heads()[0]
+    # Desde SCRUM-63 la cadena tiene más de una revisión, así que la base puede
+    # estar legítimamente estampada en cualquiera de ellas -- no solo en la
+    # primera. Lo que el guardián sigue comprobando es lo mismo de siempre: que
+    # el esquema desplegado lo haya creado *esta* cadena y no otra cosa.
+    revisiones_de_la_cadena = {revision.revision for revision in script.walk_revisions()}
 
     estampada = _revision_estampada(engine)
-    if SCHEMA_OPERACIONAL in _esquemas(engine) and estampada != revision_inicial:
+    if SCHEMA_OPERACIONAL in _esquemas(engine) and estampada not in revisiones_de_la_cadena:
         pytest.fail(
             f"La base '{nombre}' ya tiene un esquema {SCHEMA_OPERACIONAL} que esta "
-            f"revisión no creó (alembic_version: {estampada!r}). Se aborta en lugar "
-            "de adoptarlo o eliminarlo."
+            f"cadena de revisiones no creó (alembic_version: {estampada!r}). Se "
+            "aborta en lugar de adoptarlo o eliminarlo."
         )
 
     with pytest.MonkeyPatch.context() as parche:
@@ -203,7 +211,7 @@ def ciclo() -> ResultadoDelCiclo:
         # this is what actually keeps the cycle away from the development database.
         parche.setattr(settings, "database_url", url)
 
-        if estampada == revision_inicial:
+        if estampada in revisiones_de_la_cadena:
             command.downgrade(config, "base")
 
         command.upgrade(config, "head")
@@ -227,6 +235,7 @@ def ciclo() -> ResultadoDelCiclo:
     engine.dispose()
     return ResultadoDelCiclo(
         revision_inicial=revision_inicial,
+        revision_head=revision_head,
         estructura_tras_primer_upgrade=estructura_1,
         esquemas_tras_primer_upgrade=esquemas_1,
         esquemas_tras_downgrade=esquemas_tras_downgrade,
@@ -467,8 +476,15 @@ def test_el_segundo_upgrade_reconstruye_una_estructura_identica(ciclo):
 # --------------------------------------------------------------------------
 
 
-def test_la_base_queda_en_la_revision_inicial(ciclo):
-    assert ciclo.revision_final == ciclo.revision_inicial
+def test_la_base_queda_en_el_head_de_la_cadena(ciclo):
+    """Tras el ciclo completo la base queda desplegada en el head, no en la base.
+
+    Hasta SCRUM-62 ambos coincidían porque solo había una revisión. Desde
+    SCRUM-63 la cadena tiene dos, y lo que el ciclo tiene que dejar es el head:
+    es el estado que las suites del cargador y del endpoint exigen encontrar.
+    """
+    assert ciclo.revision_final == ciclo.revision_head
+    assert ciclo.revision_head != ciclo.revision_inicial
 
 
 def test_alembic_check_no_reporta_divergencia(ciclo):
