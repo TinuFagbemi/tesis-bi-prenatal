@@ -290,22 +290,30 @@ PostgreSQL**: el cliente no los envía y los recibe en la respuesta.
   "id_embarazo": 100,
   "id_dispositivo": 100,
   "tipo_sesion": "SIGNOS_MATERNOS",
-  "fecha_inicio": "2026-03-01T09:00:00-05:00",
-  "fecha_fin": "2026-03-01T09:30:00-05:00",
+  "fecha_inicio": "2025-02-24T11:20:00+00:00",
+  "fecha_fin": "2025-02-24T11:25:00+00:00",
   "estado_sesion": "COMPLETADA",
   "lecturas": [
     {
-      "id_tiempo_gest": 119,
+      "id_tiempo_gest": 107,
       "id_semaforo": 100,
-      "fecha_hora_captura": "2026-03-01T09:05:00-05:00",
-      "fecha_hora_sincronizacion": "2026-03-01T09:40:00-05:00",
-      "hr_valor": 88.5,
+      "fecha_hora_captura": "2025-02-24T11:21:00+00:00",
+      "fecha_hora_sincronizacion": "2025-02-24T11:45:00+00:00",
+      "hr_valor": 90,
       "spo2_valor": 97,
       "mov_valor": null
     }
   ]
 }
 ```
+
+Los cuatro identificadores salen del dataset simulado que produce
+`scripts/generate_mock_data.py`, y las fechas están elegidas para que la
+combinación se sostenga: el embarazo `100` empieza el `2025-01-06`, el
+dispositivo `100` está asignado a él del `2025-01-06` al `2025-10-13`, y el
+`2025-02-24` cae en la **semana gestacional 8**, que es justo la que declara
+`id_tiempo_gest: 107`. Cambiar la fecha sin cambiar la semana —o al revés—
+hace que el paquete deje de ser válido.
 
 Reglas del cuerpo:
 
@@ -361,6 +369,12 @@ leyendo solo el mensaje:
 
 Solo identificadores y un conteo. La respuesta nunca devuelve hashes,
 credenciales, configuración de conexión, SQL ni detalles internos del servidor.
+
+**Los identificadores de éste y de los demás ejemplos de respuesta son
+ilustrativos.** `id_sesion` e `ids_lectura` los asignan las secuencias de
+PostgreSQL, así que dependen de cuántas filas haya en la base y cambian de una
+ejecución a otra. Lo que sí es estable es su forma: un entero, un conteo, y
+tantos identificadores como lecturas traía el paquete, en ese mismo orden.
 
 ### 5. Códigos de respuesta
 
@@ -452,8 +466,9 @@ mismos `ids_lectura`—; lo único que cambia es `Idempotency-Replayed`, que aho
 vale `true`.
 
 Y una colisión: **la misma clave, ya usada arriba, con un cuerpo distinto**. Por
-ejemplo, el paquete del §3 con `tipo_sesion` cambiado a `MOVIMIENTOS_FETALES` y
-sus lecturas ajustadas a esa forma:
+ejemplo, el paquete del §3 con `hr_valor` cambiado de `90` a `91`. Basta con
+eso: no hace falta que el segundo paquete sea inválido, solo que no sea el
+mismo.
 
 ```
 POST /api/v1/sesiones-monitoreo
