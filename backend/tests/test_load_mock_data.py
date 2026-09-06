@@ -467,7 +467,15 @@ def test_referencia_interna_inexistente_falla(dataset):
 # ---------------------------------------------------------------------------
 
 
-def test_el_mapeo_cubre_las_21_tablas_y_excluye_auditoria_log():
+def test_el_mapeo_cubre_las_21_tablas_cargables_y_excluye_las_demas():
+    """Dos tablas físicas quedan fuera del dataset, cada una por su motivo.
+
+    ``auditoria_log`` la escribe el sistema al operar, no un dataset.
+    ``idempotencia_solicitud`` la escribe la API al aceptar un paquete: sus filas
+    son el rastro de solicitudes HTTP reales, no datos clínicos simulados, y
+    sembrarlas equivaldría a afirmar que se recibieron reenvíos que nunca
+    ocurrieron.
+    """
     from app.db.base import Base
 
     fisicas = {tabla.name for tabla in Base.metadata.tables.values()}
@@ -475,7 +483,7 @@ def test_el_mapeo_cubre_las_21_tablas_y_excluye_auditoria_log():
 
     assert len(cargadas) == 21
     assert cargadas == set(ORDEN_DE_CARGA)
-    assert fisicas - cargadas == {"auditoria_log"}
+    assert fisicas - cargadas == {"auditoria_log", "idempotencia_solicitud"}
 
 
 def test_usuarios_administradores_no_es_una_seccion_cargable(dataset):

@@ -1,6 +1,6 @@
 """ORM models of the FetalAlert operational schema.
 
-Importing this package registers all 22 operational tables on ``Base.metadata``,
+Importing this package registers all 23 operational tables on ``Base.metadata``,
 which is what Alembic autogeneration and the DDL tests rely on.
 """
 
@@ -23,6 +23,7 @@ from app.models.clinico import (
     TelefonoMedico,
     TelefonoPaciente,
 )
+from app.models.idempotencia import IdempotenciaSolicitud
 from app.models.monitoreo import (
     AsignacionDispositivo,
     Dispositivo,
@@ -59,6 +60,8 @@ __all__ = [
     "AsignacionDispositivo",
     "SesionMonitoreo",
     "LecturaBiometrica",
+    # Idempotencia
+    "IdempotenciaSolicitud",
     # Seguridad
     "Usuario",
     "UsuarioPaciente",

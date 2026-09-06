@@ -13,6 +13,20 @@ from app.services.errores import (
     extraer_sqlstate,
     registrar_fallo,
 )
+from app.services.idempotencia import (
+    MENSAJE_CLAVE_INVALIDA,
+    MENSAJE_COLISION,
+    RECURSO_SESIONES_MONITOREO,
+    AnomaliaDeIdempotencia,
+    ColisionDeIdempotencia,
+    ErrorDeIdempotencia,
+    ResultadoIdempotente,
+    canonicalizar_paquete,
+    clave_valida,
+    contenido_canonico,
+    huella_del_paquete,
+    procesar_ingesta_idempotente,
+)
 from app.services.ingesta import (
     ErrorDeIngesta,
     ReferenciaInexistente,
@@ -30,6 +44,22 @@ __all__ = [
     "diagnostico_seguro",
     "extraer_sqlstate",
     "registrar_fallo",
+    # Idempotencia. Solo lo que se usa fuera del módulo: el flujo completo, sus
+    # dos fallos, y las funciones puras que las pruebas de canonicalización
+    # ejercen. Los pasos internos -- buscar, reclamar, completar, recuperar --
+    # son privados y se prueban a través del endpoint.
+    "MENSAJE_CLAVE_INVALIDA",
+    "MENSAJE_COLISION",
+    "RECURSO_SESIONES_MONITOREO",
+    "AnomaliaDeIdempotencia",
+    "ColisionDeIdempotencia",
+    "ErrorDeIdempotencia",
+    "ResultadoIdempotente",
+    "canonicalizar_paquete",
+    "clave_valida",
+    "contenido_canonico",
+    "huella_del_paquete",
+    "procesar_ingesta_idempotente",
     # Ingesta
     "ErrorDeIngesta",
     "ReferenciaInexistente",
