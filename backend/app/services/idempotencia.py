@@ -200,7 +200,8 @@ PATRON_DE_CLAVE = re.compile(
 )
 
 MENSAJE_CLAVE_INVALIDA = (
-    "La cabecera 'Idempotency-Key' es obligatoria y debe tener entre 8 y 128 "
+    "La cabecera 'Idempotency-Key' es obligatoria y debe tener entre "
+    f"{LONGITUD_MINIMA_DE_CLAVE} y {LONGITUD_MAXIMA_DE_CLAVE} "
     "caracteres de [A-Za-z0-9_-]."
 )
 

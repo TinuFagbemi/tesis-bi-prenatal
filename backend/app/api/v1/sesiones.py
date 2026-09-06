@@ -78,7 +78,8 @@ REPLAY_NO = "false"
 
 DESCRIPCION_DE_LA_CLAVE = (
     "Identificador que el cliente asigna al paquete, para que un reenvío pueda "
-    "reconocerse. Entre 8 y 128 caracteres de [A-Za-z0-9_-]; un UUID sirve. Su "
+    f"reconocerse. Entre {LONGITUD_MINIMA_DE_CLAVE} y {LONGITUD_MAXIMA_DE_CLAVE} "
+    "caracteres de [A-Za-z0-9_-]; un UUID sirve. Su "
     "ausencia o un formato inválido se responden con 400. La clave identifica un "
     "paquete inmutable: un reenvío repite el mismo cuerpo, y un cuerpo distinto "
     "necesita una clave distinta."
