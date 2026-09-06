@@ -456,3 +456,256 @@ ventanas, una en la semana 31 (2026-03-01, por encima del umbral de movimiento)
 y otra en la semana 12 (2025-10-17, por debajo), ambas calculadas a mano desde
 la fecha de inicio del embarazo y no copiadas de la implementación que
 verifican.
+
+## SCRUM-63 — Idempotencia y manejo de duplicados en la API
+
+SCRUM-62 dejó dicho, y probado, que el endpoint no reconocía reenvíos: el mismo
+JSON enviado dos veces creaba dos sesiones. Esta entrada registra lo que se
+implementó para cambiarlo.
+
+La garantía que ofrece el endpoint se enuncia así, y conviene no exagerarla:
+**para una misma clave y este mismo recurso, la API no crea dos veces el paquete
+confirmado y reproduce su resultado con los mismos identificadores**. No se
+afirma «exactly once»: un cliente que no reutilice su clave obtiene, con toda
+razón, una operación nueva.
+
+### Decisiones aprobadas
+
+- **Unidad idempotente: el paquete completo.** Una sesión con todas sus
+  lecturas, que es exactamente la unidad que ya era atómica. Ni la sesión sola
+  ni una lectura suelta: cualquier otra granularidad obligaría a inventar
+  identidad para filas que no la tienen y a partir la transacción única.
+- **Fuente: la cabecera `Idempotency-Key`, obligatoria.** Va en la cabecera y no
+  en el cuerpo por tres razones: es **metadato de transporte** —identifica el
+  envío, no describe la sesión ni las lecturas—, y mantenerlo fuera del cuerpo
+  deja el contrato de dominio sin campos que no le pertenecen; el cuerpo actual
+  declara `extra="forbid"`, así que aceptarla ahí obligaría a añadirla al
+  schema; y **la clave no forma parte de la huella del payload**, que describe
+  solo el contenido que se persiste.
+- **Ámbito: `(recurso, clave)`.** El recurso es la constante
+  `POST /api/v1/sesiones-monitoreo`. Se descartó acotar por dispositivo: ese
+  identificador viaja **en el cuerpo**, que es justo lo que se está
+  deduplicando, así que el ámbito de la clave habría dependido de un campo del
+  contenido, y la misma clave con otro dispositivo habría creado un registro
+  nuevo en vez de colisionar. El ámbito se decide antes de mirar el cuerpo.
+- **Validación de la cabecera: `^[A-Za-z0-9_-]{8,128}$`,** anclado y aplicado
+  con `fullmatch`. El máximo no es un número suelto: es el ancho de la columna,
+  importado en vez de repetido, así que una clave que pasa la validación siempre
+  cabe donde va a guardarse. El alfabeto cubre un UUID canónico y un token
+  base64url **sin padding**: el carácter `=` no está permitido.
+- **Clave ausente o mal formada → `400`,** no `422`. En este proyecto `422`
+  significa, de forma consistente, «el cuerpo no cumple el contrato o rompe una
+  regla del dominio»; una cabecera que falta es un defecto de encuadre, anterior
+  al cuerpo. Para conseguirlo la cabecera se lee de `Request` en una dependencia
+  —un `Header(...)` obligatorio produciría `422`— y el parámetro se declara a
+  mano en el `openapi_extra` del endpoint, de modo que el esquema publique
+  `required: true` y no contradiga al comportamiento.
+- **Precedencia comprobada, no supuesta.** FastAPI resuelve y ejecuta las
+  subdependencias **antes** de validar el cuerpo, así que una solicitud sin
+  clave y con un cuerpo inválido se responde `400`. Se midió con la versión
+  instalada y hay una prueba de regresión que lo fija.
+- **Canonicalización sobre el modelo Pydantic ya validado, no sobre los bytes.**
+  La pregunta no es «¿mandó los mismos bytes?» sino «¿esto se guardaría igual?».
+  Hashear el cuerpo tal como llegó habría convertido en `409` un reenvío que
+  solo reordenó sus propiedades JSON o escribió `97` donde antes iba `97.00`.
+  Las reglas, todas con prueba propia:
+  - **defaults efectivos**: omitir `estado_sesion` u `origen_dato` equivale a
+    enviar el valor que aplica el modelo, porque la fila resultante es la misma;
+  - **decimales** cuantizados a la escala real de `NUMERIC(5, 2)` y escritos
+    como texto, porque un número JSON no puede llevar la escala;
+  - **datetimes** normalizados a UTC, ya que `TIMESTAMPTZ` guarda el instante y
+    no el offset con que se escribió — la misma regla que ya aplica
+    `normalizar_valor` en el cargador de SCRUM-61;
+  - **enums** por su `value`; **`null`** se conserva como `null` y nunca se
+    convierte en cero ni en cadena vacía; **enteros** siguen siendo enteros;
+  - **el orden de las lecturas se conserva y jamás se ordena**, porque
+    `ids_lectura` vuelve en ese orden y dos órdenes son dos respuestas;
+  - `fecha_hora_sincronizacion` **entra** en la huella como cualquier otro
+    campo. Se persiste, así que dos paquetes que difieren en ella se guardan
+    distinto. La consecuencia es una regla para el cliente, no una excepción
+    aquí: la clave identifica un paquete inmutable, y un reenvío repite el
+    paquete que preparó en vez de volver a sellarlo.
+- **Huella SHA-256** del texto canónico, en hexadecimal, con `hashlib` de la
+  biblioteca estándar.
+- **Tabla `operacional.idempotencia_solicitud`**, en una migración propia
+  (`87d8ed46686b`, sobre `150788f88be7`). Va en una tabla independiente y no
+  como columnas sobre las existentes: la clave y su huella son **metadatos de
+  transporte e idempotencia**, no atributos clínicos, y mezclarlos con las
+  entidades del dominio los volvería parte de su modelo. Así el modelo
+  operacional heredado queda intacto: ninguna de sus tablas cambia.
+- **`UNIQUE (recurso, clave)` es la garantía, y la única.** Ni un diccionario en
+  memoria, ni un lock de Python, ni una consulta previa. Hay una consulta previa
+  —la vía rápida— pero es una optimización que evita que un reenvío secuencial
+  escriba nada; no es lo que decide.
+- **Se almacenan `id_sesion` e `ids_lectura`** para reconstruir la respuesta.
+  `ids_lectura` es un `INTEGER[]` con el orden del paquete: reconstruirlo con
+  `ORDER BY id_lectura` habría dependido de que el orden de inserción coincida
+  con el de la secuencia, cierto hoy pero propiedad del código y no del esquema.
+  `lecturas_creadas` **no** es columna: es la longitud de ese array, y una
+  segunda copia solo podría contradecir a la primera.
+- **Reclamación con `INSERT ... ON CONFLICT (recurso, clave) DO NOTHING
+  RETURNING`,** y no capturando `IntegrityError`. Tres razones: no levanta
+  `23505`, así que el mapa de SQLSTATE de SCRUM-62 sigue significando lo mismo
+  —una llave duplicada en esas tablas sigue siendo una secuencia
+  desincronizada, y sigue siendo `500`—; deja la transacción utilizable, de modo
+  que el perdedor puede leer al ganador sin revertir antes; y la exclusión mutua
+  la aplica PostgreSQL, no este proceso.
+- **La reclamación va antes de `verificar_referencias`.** Es lo que convierte
+  «se tomó la clave y luego el trabajo falló» en una situación que ocurre de
+  verdad y puede probarse, y lo que hace que un duplicado se detenga antes de
+  hacer trabajo que va a descartar.
+- **Recuperación del ganador en la misma transacción, sin rollback previo.** Un
+  retorno vacío del `ON CONFLICT` indica que otra reclamación ganó la carrera, y
+  de ahí salen dos caminos:
+  - **flujo normal** — la reclamación ganadora está confirmada, y el `SELECT`
+    posterior la encuentra porque bajo READ COMMITTED cada sentencia toma un
+    snapshot nuevo. Se recupera su resultado y se reproduce;
+  - **anomalía defensiva** — si esa fila no aparece, o aparece con el resultado
+    incompleto, no hay respuesta que reproducir y se responde `500` saneado.
+    No debería ocurrir mientras el código sea dueño de su transacción y el
+    `RESTRICT` proteja la reclamación, pero se comprueba en vez de suponerse.
+
+  **No hay reintento en ninguna parte**: un competidor que aborta no deja fila
+  viva, PostgreSQL reevalúa dentro de la misma sentencia y el `INSERT` tiene
+  éxito en vez de no hacer nada. Hay una prueba concurrente que lo verifica.
+- **La huella se compara de forma estricta**, y la integridad del resultado se
+  comprueba **antes** que la huella. Un `409` afirma «tu clave ya nombra un
+  paquete *distinto*, y la respuesta de aquel paquete se mantiene»; una fila sin
+  resultado no sostiene esa afirmación, así que comparar huellas primero habría
+  culpado al cliente de un estado que es del servidor.
+- **Semántica de respuestas:** primera vez `201` con `Idempotency-Replayed:
+  false`; reenvío equivalente `201` con el mismo cuerpo y `Idempotency-Replayed:
+  true`; misma clave con otro contenido `409`; reclamación existente pero
+  incompleta `500` saneado, **nunca** un replay inventado ni un `409`. La
+  cabecera de respuesta se documenta en OpenAPI bajo el `201`, con sus dos
+  valores.
+- **El `commit` y todos los `rollback` siguen siendo del router.** El flujo
+  completo —vía rápida, reclamación, referencias, sesión, lecturas y
+  finalización— vive en `procesar_ingesta_idempotente`, que no confirma ni
+  revierte y deja pasar todas las excepciones. Exactamente un `commit` cuando se
+  crea, exactamente un `rollback` en cualquier otro camino, incluidos el replay
+  y la colisión.
+- **Una sola transacción.** Reclamación, verificación de referencias, sesión,
+  lecturas y enlace del resultado se confirman juntos, y un fallo posterior a la
+  reclamación **la retira también**. Ésa es la razón de que la clave no quede
+  envenenada, y por eso se descartó el patrón clásico de dos fases —reclamar y
+  confirmar por separado—, que envenena la clave si el proceso muere entre
+  ambos commits.
+- **El `UPDATE` de finalización comprueba su `rowcount`.** Si no toca
+  exactamente una fila se levanta una anomalía y se revierte: confirmar una
+  sesión cuya reclamación no dice nada dejaría una inconsistencia silenciosa que
+  el siguiente reenvío leería como error interno.
+- **`ON DELETE RESTRICT` desde la reclamación hacia la sesión.** Con `CASCADE`,
+  borrar una sesión habría liberado en silencio la clave que la identificaba, y
+  el siguiente reenvío habría creado una segunda sesión. PostgreSQL lo impide.
+- **PostgreSQL es la autoridad de concurrencia.** Se descartaron Redis, locks
+  distribuidos, locks de Python, colas externas, outbox, reintentos automáticos
+  con backoff y SQLite: ninguno hacía falta —la restricción `UNIQUE` ya resuelve
+  la exclusión— y todos habrían añadido infraestructura que este entorno
+  controlado no necesita. No se añadió ninguna dependencia nueva.
+- **Nada se sobrescribe.** No existe ningún camino que actualice una sesión ya
+  creada a partir de un reenvío.
+- **Trazabilidad con logs seguros.** Se registran tres eventos —replay, colisión
+  y anomalía— con el recurso y un `clave_hash`: los 12 primeros caracteres del
+  SHA-256 de la clave. El campo se llama `clave_hash` y no `clave` justamente
+  para que nadie confunda lo registrado con la clave. Qué es y qué no es, sin
+  adornos:
+  - es un **identificador abreviado de correlación**, para seguir una misma
+    clave entre varias líneas de log;
+  - **evita registrar la clave en claro**, que es texto arbitrario del cliente;
+  - **puede colisionar**: 12 caracteres hexadecimales no son una identidad
+    única, y dos claves distintas podrían compartir prefijo;
+  - **no es un secreto ni una garantía de anonimización.** Una clave predecible
+    —un contador, una fecha, un identificador de dispositivo— podría
+    confirmarse por tanteo comparando su hash con el registrado. Por eso el
+    cliente debe generar **claves de alta entropía**, y un UUID versión 4 es la
+    opción recomendada.
+
+  **Nunca** se escriben la clave en claro, la huella del paquete, ningún valor
+  clínico, SQL, parámetros, la URL de conexión, el texto del driver ni trazas.
+  `AuditoriaLog` **no** se tocó: la auditoría persistente corresponde al ticket
+  de autenticación.
+- **Lo que deliberadamente no existe**, para que nadie lo suponga leyendo lo
+  anterior: no hay **contador de replays** ni ninguna columna que lleve la
+  cuenta de cuántas veces se reprodujo una respuesta; y no hay **expiración ni
+  TTL** de las claves —el esquema no la implementa, y no se definió política de
+  retención, purga ni limpieza—. Si alguna de las dos hiciera falta, sería una
+  decisión propia con su migración.
+- **Compatibilidad con SCRUM-64 y SCRUM-65: solo como contrato.** Lo que aquí
+  queda fijado es qué deberá enviar un futuro nodo edge —una clave por paquete,
+  guardada junto al paquete en su cola de pendientes, reenviada sin volver a
+  sellarla—. **El nodo edge no existe**, ni su cola, ni la sincronización
+  diferida: nada de eso se implementó en este ticket.
+
+### Validación
+
+Tres archivos nuevos, con responsabilidades separadas, además de los ajustes a
+los heredados.
+
+`test_idempotencia.py` valida la canonicalización y la huella con funciones
+puras: sin FastAPI, sin base de datos y sin dobles. La pregunta que responde
+cada caso es la misma —¿estos dos paquetes se guardarían igual?— y las dos
+direcciones importan: dos paquetes que se guardan igual con huellas distintas
+convierten un reenvío legítimo en un `409`, y dos que se guardan distinto con la
+misma huella harían que el segundo recibiera el resultado del primero,
+descartando en silencio lo que el cliente envió.
+
+`test_idempotencia_api.py` aísla el router con dobles y comprueba la decisión:
+qué código responde cada situación, cuándo se confirma y cuándo se revierte. El
+doble de la `Session` anota el **orden** de las sentencias, porque tres
+propiedades del diseño son afirmaciones sobre el orden y no sobre cantidades: la
+reclamación ocurre antes de verificar referencias y de escribir nada, la
+recuperación del ganador ocurre sin un rollback previo, y un reenvío reconocido
+no escribe una sola fila.
+
+`test_ingestion_idempotency_postgresql.py` ejecuta el ciclo real contra
+**PostgreSQL 16**, con `SCRUM63_TEST_DATABASE_URL` y sin recurso alternativo.
+Cubre el ciclo de migración dirigido (`head → 150788f88be7 → head`, con
+`alembic check` sin divergencias), la estructura física de la tabla leída del
+catálogo, la creación, el replay, la colisión, dos claves distintas con el mismo
+cuerpo, los fallos posteriores a la reclamación, la anomalía de una reclamación
+incompleta sembrada a propósito y la integridad real —`RESTRICT`, `rowcount` y
+la relación 1:N—.
+
+**Concurrencia real.** Catorce de esas pruebas ejercen dos solicitudes
+simultáneas, cada una con su propio engine, su propia conexión PostgreSQL, su
+propio `TestClient` y una `Session` nueva; se verifica que los
+`pg_backend_pid()` son distintos. Que dos peticiones salgan a la vez no
+demuestra que se encuentren donde importa, así que la ganadora se detiene en un
+punto conocido —posterior a su reclamación— y se comprueba con
+`pg_blocking_pids` que **la perdedora quedó bloqueada por la transacción de la
+ganadora**. No se usan sleeps fijos para asumir simultaneidad: se sondean
+condiciones observables en los catálogos de PostgreSQL con intervalos breves
+—20 ms— y un deadline que hace fallar la prueba en vez de continuar a ciegas.
+
+Los tres escenarios: **idénticas** —dos `201`, una `false` y una `true`, cuerpos
+e identificadores idénticos, una sesión y una reclamación—; **colisión** —un
+`201` y un `409`, solo las lecturas del ganador, sin mezcla y sin revelar nada
+del paquete anterior—; y **la ganadora que revierte**, donde la primera reclama
+la clave y luego falla de verdad con un `404`, y al revertir, la segunda
+adquiere la clave y completa. Ese último es el que sostiene la decisión de no
+reintentar en ninguna parte. Se ejecutaron **12 veces consecutivas** sin un solo
+fallo, dejando la base **sin filas residuales** cada vez.
+
+El aislamiento difiere según el caso: las pruebas secuenciales reutilizan las
+fixtures de SCRUM-62 —transacción exterior que siempre se revierte—; las
+concurrentes no pueden, porque dos transacciones distintas no ven las filas sin
+confirmar de una tercera, así que confirman sus referencias y luego borran
+exactamente lo que crearon, en orden inverso de llaves foráneas. Sin `TRUNCATE`,
+sin `DROP` y sin `create_all`.
+
+En la reproducción local de los comandos del CI, las cuatro suites de PostgreSQL
+se ejecutaron con **cero pruebas omitidas**, verificado sobre sus reportes JUnit.
+
+### Integración continua
+
+El workflow gana un quinto paso, `Pruebas de idempotencia contra PostgreSQL
+(SCRUM-63)`, con su propia `SCRUM63_TEST_DATABASE_URL` construida de la misma
+fuente única que las otras tres, y su reporte `pytest-scrum63.xml` incorporado
+al guardián que pone el job en rojo si alguna prueba de PostgreSQL queda
+omitida. El archivo se añade además a la lista de ignorados del bloque offline.
+
+Va el último y en un paso propio a propósito: ejecuta DDL real y sus pruebas
+concurrentes toman un candado exclusivo mientras dos peticiones esperan. En
+serie es seguro; compartir la base con otra suite corriendo a la vez no lo
+sería, y por eso no hay matriz ni paralelización.
