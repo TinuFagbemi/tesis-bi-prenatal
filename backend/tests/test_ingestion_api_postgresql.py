@@ -54,6 +54,7 @@ Todos los datos son simulados y completamente ficticios.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -67,6 +68,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.orm import Session
 
+from app.api.v1.sesiones import CABECERA_IDEMPOTENCIA
 from app.db.session import get_db
 from app.main import app
 from app.models.catalogos import Semaforo, TiempoGestacional
@@ -463,10 +465,33 @@ def referencias(conexion_revertida) -> Referencias:
 
 
 @pytest.fixture
-def cliente(sesion_de_pruebas) -> TestClient:
+def clave_de_idempotencia(request) -> str:
+    """Clave válida, única por prueba y determinística entre ejecuciones.
+
+    Desde SCRUM-63 la cabecera es obligatoria. Estas pruebas no la estudian --
+    eso vive en las suites de idempotencia --, así que la reciben ya hecha para
+    poder seguir ejerciendo lo que ejercían.
+
+    Se deriva del identificador de la prueba: dos pruebas nunca comparten clave
+    (y por tanto una no puede convertir a la otra en un reenvío), y la misma
+    prueba obtiene siempre la misma, de modo que un fallo se reproduce igual.
+    """
+    digest = hashlib.sha256(request.node.nodeid.encode("utf-8")).hexdigest()
+    return f"scrum62-{digest[:32]}"
+
+
+def clave_derivada(clave: str, sufijo: str) -> str:
+    """Segunda clave distinta dentro de una misma prueba, igual de determinística."""
+    return f"{clave}-{sufijo}"
+
+
+@pytest.fixture
+def cliente(sesion_de_pruebas, clave_de_idempotencia) -> TestClient:
     app.dependency_overrides[get_db] = lambda: sesion_de_pruebas
     try:
-        yield TestClient(app)
+        yield TestClient(
+            app, headers={CABECERA_IDEMPOTENCIA: clave_de_idempotencia}
+        )
     finally:
         app.dependency_overrides.clear()
 
@@ -1299,7 +1324,13 @@ def paquete_distinguible(referencias: Referencias) -> dict[str, Any]:
 
 
 @pytest.fixture
-def colision_de_pk(secuencia_de_sesiones, cliente, referencias, conexion_revertida):
+def colision_de_pk(
+    secuencia_de_sesiones,
+    cliente,
+    referencias,
+    conexion_revertida,
+    clave_de_idempotencia,
+):
     """Crea una sesión legítima y deja la secuencia apuntando a su ``id_sesion``.
 
     Esto **no** simula un reenvío: el cliente nunca envía ``id_sesion``, así que
@@ -1328,7 +1359,15 @@ def colision_de_pk(secuencia_de_sesiones, cliente, referencias, conexion_reverti
         text(f"ALTER SEQUENCE {secuencia} RESTART WITH {id_ocupado}")
     )
 
-    segunda = cliente.post(RUTA, json=paquete_distinguible(referencias))
+    # Clave distinta de la primera: el segundo paquete es otra operación, no un
+    # reenvío. Con la misma clave el endpoint respondería 409 por colisión de
+    # idempotencia y la secuencia adelantada nunca llegaría a chocar, que es
+    # justo lo que esta prueba necesita comprobar.
+    segunda = cliente.post(
+        RUTA,
+        json=paquete_distinguible(referencias),
+        headers={CABECERA_IDEMPOTENCIA: clave_derivada(clave_de_idempotencia, "2")},
+    )
     return id_ocupado, dict(original), segunda
 
 
@@ -1396,20 +1435,34 @@ def test_e_la_respuesta_de_la_colision_no_filtra_nada(colision_de_pk):
 # ---------------------------------------------------------------------------
 
 
-def test_el_mismo_paquete_enviado_dos_veces_crea_dos_sesiones(
-    cliente, referencias, conexion_revertida
+def test_el_mismo_paquete_con_dos_claves_distintas_crea_dos_sesiones(
+    cliente, referencias, conexion_revertida, clave_de_idempotencia
 ):
-    """La verdad incómoda sobre el estado actual, escrita como prueba.
+    """La misma prueba de SCRUM-62, ahora bajo la regla que la reemplaza.
 
-    No hay detección de reenvíos: el mismo JSON, byte por byte, produce dos
-    sesiones distintas y dos respuestas 201. Es exactamente lo que SCRUM-63
-    tendrá que cambiar, y dejarlo documentado en una prueba evita que alguien
-    suponga lo contrario leyendo el 409 de la tabla de errores.
+    Hasta SCRUM-62 este caso documentaba lo contrario de lo que hoy es cierto:
+    el mismo JSON enviado dos veces creaba dos sesiones porque nada detectaba el
+    reenvío. Desde SCRUM-63 lo que decide no es el contenido sino la clave, y por
+    eso la prueba se conserva con sus mismas afirmaciones y una sola diferencia:
+    los dos envíos van bajo claves distintas.
+
+    Lo que ahora demuestra es igual de necesario, y es la otra mitad de la
+    idempotencia: **dos claves distintas son dos operaciones distintas**, aunque
+    el cuerpo sea idéntico. El endpoint no deduplica por contenido; si lo hiciera,
+    dos monitoreos legítimamente iguales -- misma paciente, mismo dispositivo,
+    mismos valores -- se colapsarían en uno y se perdería un registro clínico.
+
+    El reenvío bajo la *misma* clave se comprueba en
+    ``test_ingestion_idempotency_postgresql.py``.
     """
     cuerpo = paquete_de_signos(referencias)
 
     primera = cliente.post(RUTA, json=cuerpo)
-    segunda = cliente.post(RUTA, json=cuerpo)
+    segunda = cliente.post(
+        RUTA,
+        json=cuerpo,
+        headers={CABECERA_IDEMPOTENCIA: clave_derivada(clave_de_idempotencia, "2")},
+    )
 
     assert primera.status_code == 201
     assert segunda.status_code == 201
@@ -1580,7 +1633,8 @@ def test_la_base_no_conserva_nada_despues_de_una_creacion_exitosa(engine_de_prue
         referencias_locales = _referencias_para(conexion)
         app.dependency_overrides[get_db] = lambda: sesion
         try:
-            with TestClient(app) as cliente_local:
+            cabeceras = {CABECERA_IDEMPOTENCIA: "scrum62-ciclo-completo-revertido"}
+            with TestClient(app, headers=cabeceras) as cliente_local:
                 respuesta = cliente_local.post(
                     RUTA, json=paquete_de_signos(referencias_locales)
                 )

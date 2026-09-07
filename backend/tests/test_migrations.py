@@ -1,9 +1,15 @@
-"""Offline tests for the initial Alembic revision.
+"""Offline tests for the Alembic revision chain.
 
-Nothing here opens a database connection: the revision is rendered to PostgreSQL
-SQL with ``as_sql=True``, exactly the way ``alembic upgrade head --sql`` does it,
-and the resulting DDL is compared against ``Base.metadata``. The real round trip
+Nothing here opens a database connection: the chain is rendered to PostgreSQL SQL
+with ``as_sql=True``, exactly the way ``alembic upgrade head --sql`` does it, and
+the resulting DDL is compared against ``Base.metadata``. The real round trip
 against a PostgreSQL server lives in ``test_migration_postgresql.py``.
+
+**The whole chain, not just the head.** What these tests describe is the schema
+the migrations deploy, and from SCRUM-63 onwards that schema is the sum of more
+than one revision. Rendering only the head would compare a single ``CREATE
+TABLE`` against the twenty-three tables of the metadata and fail for the wrong
+reason.
 
 The comparison is deliberately structural rather than textual: autogenerate
 emits constraints in alphabetical order while the models declare them in
@@ -27,21 +33,23 @@ from app.db.base import SCHEMA_OPERACIONAL, Base
 from tests.conftest import construir_config_alembic
 from tests.test_models import ONDELETE_ESPERADOS, TABLAS_ESPERADAS
 
-# Deploying the operational schema is a single step: SCRUM-52 produces one
-# revision and every later sprint stacks on top of it.
-CANTIDAD_DE_REVISIONES_ESPERADA = 1
+# SCRUM-52 deployed the operational schema in one revision and every later
+# sprint stacks on top of it. SCRUM-63 adds the second: idempotencia_solicitud.
+CANTIDAD_DE_REVISIONES_ESPERADA = 2
 
 # Shape of the deployed schema, pinned so a silent drift in either the models or
-# the revision fails here. UNIQUE went from 18 to 17 when the 1:1 between
-# sesion_monitoreo and lectura_biometrica became 1:N; everything else held.
+# the revisions fails here. UNIQUE went from 18 to 17 when the 1:1 between
+# sesion_monitoreo and lectura_biometrica became 1:N; SCRUM-63 then added one
+# table with one primary key, one foreign key with ON DELETE RESTRICT, one
+# UNIQUE and one CHECK, and no index of its own.
 CANTIDADES_ESPERADAS = {
-    "tablas": 22,
-    "primary_key": 22,
-    "foreign_key": 25,
-    "on_delete_restrict": 15,
+    "tablas": 23,
+    "primary_key": 23,
+    "foreign_key": 26,
+    "on_delete_restrict": 16,
     "on_delete_cascade": 10,
-    "unique": 17,
-    "check": 29,
+    "unique": 18,
+    "check": 30,
     "indices": 13,
 }
 
@@ -95,16 +103,28 @@ def _clausulas_por_tabla(sql: str) -> dict[str, set[str]]:
     }
 
 
+def _revisiones_en_orden(direccion: str) -> list:
+    """Every revision of the chain, in the order that direction applies them.
+
+    ``walk_revisions`` starts at the head, which is already the order a downgrade
+    runs in; an upgrade runs the other way round.
+    """
+    script = ScriptDirectory.from_config(construir_config_alembic())
+    revisiones = list(script.walk_revisions())
+    return revisiones if direccion == "downgrade" else list(reversed(revisiones))
+
+
 def _renderizar(direccion: str) -> str:
-    """Render ``upgrade`` or ``downgrade`` as PostgreSQL SQL, without a server.
+    """Render the whole chain as PostgreSQL SQL, without a server.
+
+    Every revision is applied in order rather than only the head, because what
+    the rest of this module compares against ``Base.metadata`` is the schema the
+    chain deploys, not the delta of its last step.
 
     ``target_metadata`` is passed so Alembic reuses the naming convention of
     ``Base.metadata``; without it the CHECK constraints that back the enums
     would come out under different names than the ones the models declare.
     """
-    script = ScriptDirectory.from_config(construir_config_alembic())
-    modulo = script.get_revision(script.get_heads()[0]).module
-
     salida = io.StringIO()
     contexto = MigrationContext.configure(
         dialect=postgresql.dialect(),
@@ -115,7 +135,8 @@ def _renderizar(direccion: str) -> str:
         },
     )
     with Operations.context(contexto):
-        getattr(modulo, direccion)()
+        for revision in _revisiones_en_orden(direccion):
+            getattr(revision.module, direccion)()
     return salida.getvalue()
 
 
@@ -144,7 +165,8 @@ def sql_downgrade() -> str:
 # --------------------------------------------------------------------------
 
 
-def test_existe_una_sola_revision_inicial():
+def test_la_cadena_de_revisiones_es_lineal():
+    """One base and one head: two heads would mean two schemas to deploy."""
     script = ScriptDirectory.from_config(construir_config_alembic())
     revisiones = list(script.walk_revisions())
 
@@ -159,7 +181,16 @@ def test_la_revision_inicial_no_tiene_predecesora():
     inicial = script.get_revision(script.get_bases()[0])
 
     assert inicial.down_revision is None
-    assert inicial.revision in script.get_heads()
+
+
+def test_la_cadena_va_del_head_a_la_base_sin_saltos():
+    """Walking down from the head must reach the base and pass through nothing else."""
+    script = ScriptDirectory.from_config(construir_config_alembic())
+    recorrido = [revision.revision for revision in script.walk_revisions()]
+
+    assert recorrido[0] == script.get_heads()[0]
+    assert recorrido[-1] == script.get_bases()[0]
+    assert len(recorrido) == CANTIDAD_DE_REVISIONES_ESPERADA
 
 
 # --------------------------------------------------------------------------

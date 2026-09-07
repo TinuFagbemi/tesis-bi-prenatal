@@ -80,7 +80,8 @@ jobs:
           python -m pytest -q \
             --ignore=tests/test_migration_postgresql.py \
             --ignore=tests/test_load_mock_data_postgresql.py \
-            --ignore=tests/test_ingestion_api_postgresql.py
+            --ignore=tests/test_ingestion_api_postgresql.py \
+            --ignore=tests/test_ingestion_idempotency_postgresql.py
 
       # Segunda capa: ciclo real upgrade -> downgrade -> upgrade -> alembic check
       # contra el servicio PostgreSQL de arriba. Corre antes que las pruebas del
@@ -114,10 +115,28 @@ jobs:
           SCRUM62_TEST_DATABASE_URL: postgresql+psycopg://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
         run: python -m pytest -q -rs tests/test_ingestion_api_postgresql.py --junitxml=pytest-scrum62.xml
 
+      # Quinta capa: la idempotencia del endpoint, sobre la misma base efímera.
+      # Sus pruebas secuenciales usan el mismo aislamiento por transacción
+      # revertida que SCRUM-62. Las concurrentes no pueden: dos transacciones
+      # distintas no ven las filas sin confirmar de una tercera, así que esas
+      # confirman sus referencias y luego borran exactamente lo que crearon, en
+      # orden inverso de llaves foráneas. La base vuelve a quedar vacía.
+      #
+      # Va la última y en un step propio a propósito. Ejecuta DDL real -- baja y
+      # vuelve a subir la revisión de SCRUM-63 -- y sus pruebas concurrentes
+      # toman un candado exclusivo sobre 'embarazo' mientras dos peticiones
+      # esperan. En serie es seguro; compartir la base con otra suite corriendo
+      # a la vez no lo sería, y por eso no hay matriz ni paralelización.
+      - name: Pruebas de idempotencia contra PostgreSQL (SCRUM-63)
+        working-directory: backend
+        env:
+          SCRUM63_TEST_DATABASE_URL: postgresql+psycopg://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
+        run: python -m pytest -q -rs tests/test_ingestion_idempotency_postgresql.py --junitxml=pytest-scrum63.xml
+
       # La variable de entorno de cada capa es lo único que evita que su archivo
       # quede omitido, y pytest devuelve 0 aunque se salte todo. Por eso los
       # reportes JUnit se revisan después: un solo <skipped> en cualquiera de
-      # los tres tumba el job.
+      # los cuatro tumba el job.
       - name: Verificar que ninguna prueba de PostgreSQL quedó omitida
         working-directory: backend
         run: |
@@ -130,6 +149,7 @@ jobs:
               "pytest-postgresql.xml": "SCRUM52_TEST_DATABASE_URL",
               "pytest-scrum61.xml": "SCRUM61_TEST_DATABASE_URL",
               "pytest-scrum62.xml": "SCRUM62_TEST_DATABASE_URL",
+              "pytest-scrum63.xml": "SCRUM63_TEST_DATABASE_URL",
           }
 
           fallo = False

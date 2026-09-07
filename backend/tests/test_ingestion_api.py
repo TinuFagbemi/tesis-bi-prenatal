@@ -18,13 +18,17 @@ from __future__ import annotations
 import ast
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import DataError, IntegrityError, OperationalError
+from sqlalchemy.sql import Insert, Select, Update
 
-from app.api.v1 import sesiones as modulo_router
+from app.api.v1.sesiones import CABECERA_IDEMPOTENCIA
+from app.api.v1 import sesiones as modulo_router  # noqa: F401 -- rutas del AST
+from app.services import idempotencia as modulo_idempotencia
 from app.db.session import get_db
 from app.main import app
 from app.services.errores import (
@@ -50,6 +54,11 @@ from tests.test_ingestion_schemas import lectura_hr, paquete
 
 RUTA = "/api/v1/sesiones-monitoreo"
 
+# Clave ficticia y válida según el patrón aprobado. Estas pruebas no comprueban
+# la clave -- eso vive en test_idempotencia_api.py --, la envían para poder
+# seguir ejerciendo lo que ya ejercían.
+CLAVE_VALIDA = "scrum63-clave-ficticia-0001"
+
 DIRECTORIO_APP = Path(__file__).resolve().parents[1] / "app"
 
 # Módulos que atiende la petición. Ninguno puede invocar el cargador.
@@ -57,7 +66,9 @@ MODULOS_DE_LA_PETICION = (
     DIRECTORIO_APP / "api" / "v1" / "sesiones.py",
     DIRECTORIO_APP / "services" / "ingesta.py",
     DIRECTORIO_APP / "services" / "errores.py",
+    DIRECTORIO_APP / "services" / "idempotencia.py",
     DIRECTORIO_APP / "schemas" / "monitoreo.py",
+    DIRECTORIO_APP / "models" / "idempotencia.py",
     DIRECTORIO_APP / "db" / "session.py",
 )
 
@@ -141,21 +152,92 @@ def error_de_datos(sqlstate: str = "22003") -> DataError:
     return DataError(SQL_PELIGROSO, {"mov_valor": 99999}, ErrorDeDriverFalso(sqlstate))
 
 
-class SesionFalsa:
-    """Doble de la Session: solo cuenta commits, rollbacks y cierres."""
+class ResultadoFalso:
+    """Lo mínimo que el endpoint consulta de un ``Result`` de SQLAlchemy."""
 
-    def __init__(self) -> None:
+    def __init__(self, valor, rowcount: int = 0) -> None:
+        self._valor = valor
+        self.rowcount = rowcount
+
+    def one_or_none(self):
+        return self._valor
+
+    def scalar_one_or_none(self):
+        return self._valor
+
+
+class SesionFalsa:
+    """Doble de la Session: cuenta commits y rollbacks, y guiona el SQL.
+
+    Desde SCRUM-63 el endpoint ejecuta sentencias antes de escribir el paquete,
+    así que el doble tiene que responderlas. Se distinguen por su tipo, que es
+    lo que de verdad las diferencia: ``SELECT`` busca la reclamación,
+    ``INSERT`` la toma y ``UPDATE`` la completa.
+
+    Por omisión no hay reclamación previa y la reclamación tiene éxito, que es
+    el escenario de las pruebas heredadas: primera solicitud, paquete nuevo.
+    """
+
+    def __init__(
+        self,
+        *,
+        reclamaciones=None,
+        id_reclamado: int | None = 1,
+        filas_completadas: int = 1,
+    ) -> None:
+        self.filas_completadas = filas_completadas
         self.commits = 0
         self.rollbacks = 0
+        self.selects = 0
+        self.inserts = 0
+        self.updates = 0
+        # Orden real de lo que ocurrió. Es lo que permite afirmar *cuándo* pasó
+        # cada cosa y no solo cuántas veces: que la reclamación va antes de
+        # escribir el paquete, o que no hay rollback antes de recuperar al
+        # ganador, son afirmaciones sobre el orden.
+        self.pasos: list[str] = []
+        # Respuestas sucesivas del SELECT: la primera es la vía rápida, la
+        # segunda -- si la hay -- la recuperación del ganador.
+        self.reclamaciones = list(reclamaciones or [None])
+        self.id_reclamado = id_reclamado
+        self.valores_actualizados = None
+
+    def execute(self, sentencia, *args, **kwargs):
+        if isinstance(sentencia, Select):
+            self.selects += 1
+            self.pasos.append("select")
+            indice = min(self.selects - 1, len(self.reclamaciones) - 1)
+            return ResultadoFalso(self.reclamaciones[indice])
+        if isinstance(sentencia, Insert):
+            self.inserts += 1
+            self.pasos.append("insert")
+            return ResultadoFalso(self.id_reclamado)
+        if isinstance(sentencia, Update):
+            self.updates += 1
+            self.pasos.append("update")
+            self.valores_actualizados = dict(sentencia.compile().params)
+            return ResultadoFalso(None, rowcount=self.filas_completadas)
+        raise AssertionError(f"sentencia inesperada: {type(sentencia).__name__}")
 
     def commit(self) -> None:
         self.commits += 1
+        self.pasos.append("commit")
 
     def rollback(self) -> None:
         self.rollbacks += 1
+        self.pasos.append("rollback")
 
     def close(self) -> None:  # pragma: no cover -- la fixture es la dueña
         pass
+
+
+def reclamacion_falsa(huella: str, id_sesion=733, ids_lectura=(1181, 1182)):
+    """Fila de ``idempotencia_solicitud`` tal como la lee el endpoint."""
+    return SimpleNamespace(
+        huella=huella,
+        id_sesion=id_sesion,
+        ids_lectura=None if ids_lectura is None else list(ids_lectura),
+    )
 
 
 @pytest.fixture
@@ -165,16 +247,28 @@ def sesion_falsa() -> SesionFalsa:
 
 @pytest.fixture
 def cliente(sesion_falsa) -> TestClient:
+    """Cliente con una ``Idempotency-Key`` válida en todas sus peticiones.
+
+    La cabecera es obligatoria desde SCRUM-63, así que enviarla por omisión deja
+    intactas las pruebas heredadas: siguen ejerciendo exactamente lo que
+    ejercían. Su ausencia y su formato se prueban en ``test_idempotencia_api.py``,
+    que construye sus clientes a mano.
+    """
     app.dependency_overrides[get_db] = lambda: sesion_falsa
     try:
-        yield TestClient(app)
+        yield TestClient(app, headers={CABECERA_IDEMPOTENCIA: CLAVE_VALIDA})
     finally:
         app.dependency_overrides.clear()
 
 
 @pytest.fixture
 def servicio(monkeypatch):
-    """Sustituye la persistencia por una función que la prueba controla."""
+    """Sustituye la persistencia por una función que la prueba controla.
+
+    El doble se instala en ``app.services.idempotencia``, que es quien llama a
+    ``registrar_sesion`` desde que SCRUM-63 movió el flujo allí. El router ya no
+    la importa: solo llama a ``procesar_ingesta_idempotente``.
+    """
 
     def instalar(comportamiento):
         registro: dict[str, Any] = {"llamadas": 0, "entrada": None}
@@ -186,7 +280,7 @@ def servicio(monkeypatch):
                 raise comportamiento
             return comportamiento
 
-        monkeypatch.setattr(modulo_router, "registrar_sesion", falso)
+        monkeypatch.setattr(modulo_idempotencia, "registrar_sesion", falso)
         return registro
 
     return instalar

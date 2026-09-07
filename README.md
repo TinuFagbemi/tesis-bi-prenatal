@@ -290,22 +290,30 @@ PostgreSQL**: el cliente no los envía y los recibe en la respuesta.
   "id_embarazo": 100,
   "id_dispositivo": 100,
   "tipo_sesion": "SIGNOS_MATERNOS",
-  "fecha_inicio": "2026-03-01T09:00:00-05:00",
-  "fecha_fin": "2026-03-01T09:30:00-05:00",
+  "fecha_inicio": "2025-02-24T11:20:00+00:00",
+  "fecha_fin": "2025-02-24T11:25:00+00:00",
   "estado_sesion": "COMPLETADA",
   "lecturas": [
     {
-      "id_tiempo_gest": 119,
+      "id_tiempo_gest": 107,
       "id_semaforo": 100,
-      "fecha_hora_captura": "2026-03-01T09:05:00-05:00",
-      "fecha_hora_sincronizacion": "2026-03-01T09:40:00-05:00",
-      "hr_valor": 88.5,
+      "fecha_hora_captura": "2025-02-24T11:21:00+00:00",
+      "fecha_hora_sincronizacion": "2025-02-24T11:45:00+00:00",
+      "hr_valor": 90,
       "spo2_valor": 97,
       "mov_valor": null
     }
   ]
 }
 ```
+
+Los cuatro identificadores salen del dataset simulado que produce
+`scripts/generate_mock_data.py`, y las fechas están elegidas para que la
+combinación se sostenga: el embarazo `100` empieza el `2025-01-06`, el
+dispositivo `100` está asignado a él del `2025-01-06` al `2025-10-13`, y el
+`2025-02-24` cae en la **semana gestacional 8**, que es justo la que declara
+`id_tiempo_gest: 107`. Cambiar la fecha sin cambiar la semana —o al revés—
+hace que el paquete deje de ser válido.
 
 Reglas del cuerpo:
 
@@ -362,13 +370,20 @@ leyendo solo el mensaje:
 Solo identificadores y un conteo. La respuesta nunca devuelve hashes,
 credenciales, configuración de conexión, SQL ni detalles internos del servidor.
 
+**Los identificadores de éste y de los demás ejemplos de respuesta son
+ilustrativos.** `id_sesion` e `ids_lectura` los asignan las secuencias de
+PostgreSQL, así que dependen de cuántas filas haya en la base y cambian de una
+ejecución a otra. Lo que sí es estable es su forma: un entero, un conteo, y
+tantos identificadores como lecturas traía el paquete, en ese mismo orden.
+
 ### 5. Códigos de respuesta
 
 | Código | Cuándo |
 | --- | --- |
-| `201` | La sesión y todas sus lecturas quedaron registradas. |
+| `201` | La sesión y todas sus lecturas quedaron registradas, o ya lo estaban por una solicitud anterior con la misma clave. |
+| `400` | Falta la cabecera `Idempotency-Key` o su formato no es válido. No se registró nada. |
 | `404` | Alguna referencia del paquete no existe todavía. |
-| `409` | Una referencia dejó de existir mientras se procesaba el paquete. No se guardó nada. |
+| `409` | Conflicto. O la clave ya identifica un paquete con contenido distinto, o una referencia dejó de existir mientras se procesaba el paquete. La solicitud en conflicto no agrega ni modifica datos, y la operación que ya estuviera almacenada bajo esa clave permanece intacta. |
 | `422` | El cuerpo no cumple el contrato, o rompe una regla del dominio o una restricción de validez de la base. |
 | `500` | Error interno. La transacción completa fue revertida. |
 
@@ -385,31 +400,123 @@ dominio, una restricción que PostgreSQL rechaza o un error imprevisto— se
 revierte todo: no queda una sesión huérfana ni una carga parcial. Si falla la
 tercera lectura de cinco, tampoco queda la sesión.
 
-### 7. Reenvíos: pendiente de SCRUM-63
+### 7. Reenvíos: la cabecera `Idempotency-Key`
 
-**Este endpoint no reconoce reenvíos en absoluto.** Conviene decirlo sin rodeos,
-porque es fácil suponer lo contrario:
+En un sistema pensado para conectividad intermitente, un reenvío no es una
+anomalía: es lo que hace un nodo edge cuando no llegó a saber si su paquete se
+guardó. Lo que este endpoint garantiza es que, **para una misma clave y este
+mismo recurso, no se crea dos veces el paquete confirmado y se reproduce su
+resultado**, con los mismos identificadores que devolvió la primera vez.
 
-- Enviar **el mismo JSON dos veces crea dos sesiones**, con dos `id_sesion`
-  distintos, y las dos respuestas son `201`.
-- No hay detección, ni deduplicación, ni reutilización de respuestas.
-- Un `409` **no** significa «detecté tu reenvío»: significa que una referencia
-  del paquete desapareció mientras se procesaba.
+**La cabecera es obligatoria.** La genera el cliente:
 
-El motivo es estructural: el cliente no envía ningún identificador, y ni
-`sesion_monitoreo` ni `lectura_biometrica` tienen hoy una clave de negocio con
-la que reconocer que dos paquetes son el mismo. Por eso un `23505` sobre esas
-llaves primarias —que genera PostgreSQL— se trata como **error interno (`500`)**
-y no como conflicto del cliente: solo puede venir de una secuencia
-desincronizada.
+```
+Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
+```
 
-El reconocimiento de reenvíos —`Idempotency-Key`, identificador externo estable
-y reutilización de la respuesta— corresponde a SCRUM-63, y necesitará una
-migración para añadir esa clave.
+- Entre **8 y 128 caracteres**, y solo los del alfabeto `[A-Za-z0-9_-]`. Un UUID
+  sirve tal cual. El patrón exacto que aplica el servidor es
+  `^[A-Za-z0-9_-]{8,128}$`, y es el mismo que publica `/docs`.
+- **Una clave identifica un paquete y solo uno** para este recurso. No es un
+  identificador de sesión ni de dispositivo: nombra *este envío concreto*.
+
+#### Qué responde cada caso
+
+| Situación | Código | `Idempotency-Replayed` |
+| --- | --- | --- |
+| Primera vez con esa clave | `201` | `false` |
+| Reenvío con la misma clave y un contenido equivalente | `201`, mismo cuerpo y mismos identificadores | `true` |
+| Misma clave con un contenido distinto | `409` | — |
+| Cabecera ausente o mal formada | `400` | — |
+
+«Contenido equivalente» significa lo que la base guardaría igual: el servidor
+compara una huella SHA-256 del paquete ya validado, así que reordenar las
+propiedades del JSON, escribir `97` donde antes iba `97.00`, o expresar la misma
+marca de tiempo con otro offset **no** cuentan como un paquete distinto. Cambiar
+un valor, añadir o quitar una lectura, o reordenarlas, sí.
+
+#### Ejemplos
+
+Con el mismo cuerpo del §3, la primera solicitud:
+
+```
+POST /api/v1/sesiones-monitoreo
+Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
+
+201 Created
+Idempotency-Replayed: false
+{"id_sesion": 733, "lecturas_creadas": 1, "ids_lectura": [1181]}
+```
+
+El mismo envío, repetido porque el primero no llegó a confirmarse del lado del
+cliente. **La clave y el cuerpo son exactamente los mismos** que en la solicitud
+anterior:
+
+```
+POST /api/v1/sesiones-monitoreo
+Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
+
+201 Created
+Idempotency-Replayed: true
+{"id_sesion": 733, "lecturas_creadas": 1, "ids_lectura": [1181]}
+```
+
+El cuerpo de la respuesta es idéntico al de la primera —mismo `id_sesion` y
+mismos `ids_lectura`—; lo único que cambia es `Idempotency-Replayed`, que ahora
+vale `true`.
+
+Y una colisión: **la misma clave, ya usada arriba, con un cuerpo distinto**. Por
+ejemplo, el paquete del §3 con `hr_valor` cambiado de `90` a `91`. Basta con
+eso: no hace falta que el segundo paquete sea inválido, solo que no sea el
+mismo.
+
+```
+POST /api/v1/sesiones-monitoreo
+Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
+
+409 Conflict
+```
+
+El `409` no revela nada del paquete anterior: ni sus identificadores, ni su
+huella, ni qué campo difiere. Y la sesión creada por la primera solicitud sigue
+ahí, sin cambios.
+
+#### Recomendación para el cliente
+
+- **Reintentar el mismo paquete: la misma clave.** Genera la clave junto con el
+  paquete y guárdala con él en la cola de pendientes; un reintento reenvía el
+  paquete tal como quedó guardado, ese timestamp de sincronización incluido.
+- **Operación nueva: clave nueva.** Dos monitoreos legítimamente iguales —misma
+  gestante, mismo dispositivo, mismos valores— son dos registros distintos, y la
+  API no los deduplica por contenido. Lo que los distingue es la clave.
+
+#### Atomicidad y claves no envenenadas
+
+La clave se reclama **antes** de escribir ninguna fila de negocio, y la
+reclamación, la sesión, las lecturas y el resultado se confirman en **una sola
+transacción**. De ahí se siguen dos cosas:
+
+- o queda todo —clave, sesión y lecturas—, o no queda nada;
+- si algo falla después de reclamar —una referencia inexistente, una regla del
+  dominio, una restricción de la base—, el rollback **también retira la
+  reclamación**. La clave queda libre y el reintento corregido funciona con esa
+  misma clave.
+
+Quien decide la carrera cuando dos solicitudes llegan a la vez es PostgreSQL,
+mediante una restricción `UNIQUE` sobre el par (recurso, clave): una crea y la
+otra reproduce la respuesta de la primera, o recibe `409` si su contenido era
+otro.
+
+#### Antes de probarlo
+
+La tabla que sostiene todo esto llega en una migración, así que la base tiene
+que estar en el `head` de Alembic —el mismo `alembic upgrade head` del §1—. Y lo
+de siempre: **solo datos simulados**, y solo en el entorno local o de pruebas.
+Este endpoint no tiene autenticación y no es apto para producción.
 
 ## Calidad del proyecto
 
-- **Integración continua:** el workflow [`CI`](.github/workflows/ci.yml) se ejecuta en cada Pull Request hacia `main`, instala el backend con Python 3.12 y corre las pruebas automatizadas. Contra un servicio PostgreSQL 16 efímero se validan las migraciones, la carga idempotente del dataset y el endpoint de ingesta; el job queda en rojo si alguna de esas pruebas se omite en lugar de ejecutarse.
+- **Integración continua:** el workflow [`CI`](.github/workflows/ci.yml) se ejecuta en cada Pull Request hacia `main`, instala el backend con Python 3.12 y corre las pruebas automatizadas. Contra un servicio PostgreSQL 16 efímero se validan las migraciones, la carga idempotente del dataset, el endpoint de ingesta y la idempotencia de reenvíos —concurrencia real incluida—; el job queda en rojo si alguna de esas pruebas se omite en lugar de ejecutarse.
 - **Criterios de cierre de un ticket:** [Definition of Done](docs/definition_of_done.md).
 
 ## Estrategia de ramas

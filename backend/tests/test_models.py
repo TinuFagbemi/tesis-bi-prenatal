@@ -40,6 +40,8 @@ TABLAS_ESPERADAS = {
     "asignacion_dispositivo",
     "sesion_monitoreo",
     "lectura_biometrica",
+    # Idempotencia
+    "idempotencia_solicitud",
     # Seguridad
     "usuario",
     "usuario_paciente",
@@ -66,6 +68,7 @@ PRIMARY_KEYS_ESPERADAS = {
     "asignacion_dispositivo": ("id_asignacion",),
     "sesion_monitoreo": ("id_sesion",),
     "lectura_biometrica": ("id_lectura",),
+    "idempotencia_solicitud": ("id_idempotencia",),
     "usuario": ("id_usuario",),
     "usuario_paciente": ("id_usuario",),
     "usuario_medico": ("id_usuario",),
@@ -92,6 +95,7 @@ FOREIGN_KEYS_ESPERADAS = {
     ("lectura_biometrica", "id_sesion"): ("sesion_monitoreo", "id_sesion"),
     ("lectura_biometrica", "id_tiempo_gest"): ("tiempo_gestacional", "id_tiempo_gest"),
     ("lectura_biometrica", "id_semaforo"): ("semaforo", "id_semaforo"),
+    ("idempotencia_solicitud", "id_sesion"): ("sesion_monitoreo", "id_sesion"),
     ("usuario", "id_rol"): ("rol", "id_rol"),
     ("usuario_paciente", "id_usuario"): ("usuario", "id_usuario"),
     ("usuario_paciente", "id_paciente"): ("paciente", "id_paciente"),
@@ -115,6 +119,10 @@ ONDELETE_ESPERADOS = {
     ("embarazo", "id_paciente"): "RESTRICT",
     ("embarazo_factor_riesgo", "id_embarazo"): "CASCADE",
     ("embarazo_factor_riesgo", "id_factor_riesgo"): "RESTRICT",
+    # Una reclamación de idempotencia no puede desaparecer con la sesión que
+    # identifica: eso liberaría en silencio una clave ya usada y el siguiente
+    # reenvío crearía una segunda sesión.
+    ("idempotencia_solicitud", "id_sesion"): "RESTRICT",
     ("lectura_biometrica", "id_semaforo"): "RESTRICT",
     ("lectura_biometrica", "id_sesion"): "CASCADE",
     ("lectura_biometrica", "id_tiempo_gest"): "RESTRICT",
@@ -159,6 +167,10 @@ COLUMNAS_NULLABLE_ESPERADAS = {
         "spo2_valor",
         "mov_valor",
     },
+    # El resultado se completa por UPDATE dentro de la misma transacción que
+    # reclamó la clave; entre la reclamación y ese UPDATE ambas columnas están
+    # en NULL. El CHECK de la tabla impide que queden a medias.
+    "idempotencia_solicitud": {"id_sesion", "ids_lectura"},
     "usuario": set(),
     "usuario_paciente": set(),
     "usuario_medico": set(),
@@ -208,11 +220,11 @@ def test_configure_mappers_sin_errores():
 # --------------------------------------------------------------------------
 
 
-def test_metadata_contiene_exactamente_las_22_tablas_operacionales():
+def test_metadata_contiene_exactamente_las_23_tablas_operacionales():
     registradas = {t.name for t in Base.metadata.tables.values()}
 
     assert registradas == TABLAS_ESPERADAS
-    assert len(Base.metadata.tables) == 22
+    assert len(Base.metadata.tables) == 23
 
 
 def test_todas_las_tablas_pertenecen_al_esquema_operacional():

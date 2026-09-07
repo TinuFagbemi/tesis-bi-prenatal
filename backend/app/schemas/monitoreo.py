@@ -87,10 +87,16 @@ MENSAJE_FORMA_NO_CORRESPONDE = {
 ESTADOS_SIN_FECHA_FIN = frozenset({EstadoSesion.PENDIENTE, EstadoSesion.INTERRUMPIDA})
 ESTADOS_CON_FECHA_FIN = frozenset({EstadoSesion.COMPLETADA, EstadoSesion.PROCESADA})
 
-# Estado que la base aplica cuando el cliente omite el campo. Se usa para
-# validar, de modo que omitir el estado y enviar ``fecha_fin`` sea tan
-# incoherente como declarar PENDIENTE con ``fecha_fin``.
+# Valores que la base aplica cuando el cliente omite el campo, porque
+# ``_construir_sesion`` no envía el atributo y deja actuar al ``default`` del
+# modelo. ``ESTADO_POR_OMISION`` se usa para validar, de modo que omitir el
+# estado y enviar ``fecha_fin`` sea tan incoherente como declarar PENDIENTE con
+# ``fecha_fin``. Los dos se usan además para canonicalizar el paquete: omitir un
+# campo y enviarlo con su valor por omisión se guarda igual, así que tiene que
+# producir la misma huella. Una prueba los ata a los ``default`` de
+# ``SesionMonitoreo``, para que no puedan quedar desfasados.
 ESTADO_POR_OMISION = EstadoSesion.PENDIENTE
+ORIGEN_POR_OMISION = OrigenDato.DISPOSITIVO
 
 
 class _Entrada(BaseModel):
