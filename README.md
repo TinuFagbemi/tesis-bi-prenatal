@@ -584,7 +584,7 @@ python scripts/edge_node.py --base data/edge/demo.sqlite3 init
 | `EDGE_SQLITE_PATH` | `data/edge/nodo_edge.sqlite3` | archivo local del nodo |
 | `EDGE_API_BASE_URL` | `http://127.0.0.1:8000` | API a la que se entrega |
 | `EDGE_HTTP_TIMEOUT` | `10.0` | segundos de espera por respuesta |
-
+| `EDGE_BUSY_TIMEOUT_MS` | `5000` | milisegundos de espera por bloqueo de SQLite |
 `data/edge/` está en `.gitignore`: la base del nodo es un artefacto local y
 **nunca** se versiona. No hay ninguna variable para credenciales, porque el nodo
 no las necesita: escribe en un archivo local y habla HTTP con un endpoint que
