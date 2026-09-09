@@ -709,3 +709,295 @@ Va el último y en un paso propio a propósito: ejecuta DDL real y sus pruebas
 concurrentes toman un candado exclusivo mientras dos peticiones esperan. En
 serie es seguro; compartir la base con otra suite corriendo a la vez no lo
 sería, y por eso no hay matriz ni paralelización.
+
+## SCRUM-64 — Nodo edge simulado con SQLite y patrón outbox
+
+SCRUM-63 dejó la API capaz de reconocer un reenvío. Esta entrada registra al
+cliente que lo necesita: el nodo edge simulado, que acepta una sesión de
+monitoreo **con la API apagada**, la conserva a través de un reinicio y la
+entrega después sin que se registre dos veces.
+
+La propiedad que se implementa conviene enunciarla con precisión, porque es
+fácil prometer de más. **No** es «entrega exactamente una vez»: ningún cliente
+puede garantizar eso sobre una red donde una respuesta se puede perder después
+de que el servidor confirmó. Lo que sí se garantiza es:
+
+> el paquete sobrevive localmente hasta que se confirma, un reintento repite
+> exactamente la misma clave y los mismos bytes, y por eso el efecto de negocio
+> en PostgreSQL ocurre una sola vez.
+
+La otra mitad —algo que ejecute esa pasada por su cuenta— es trabajo posterior y
+no se implementó aquí.
+
+### Decisiones aprobadas
+
+- **Unidad de captura: el paquete completo**, una `SesionMonitoreoEntrada` con
+  todas sus lecturas. Es la misma unidad que el endpoint trata como una
+  operación idempotente y la misma que ya era atómica en PostgreSQL. Partirla
+  por lectura permitiría que una sesión quedara a medias en el servidor, y
+  ningún reintento la recompondría.
+
+- **SQLite, y no un archivo JSON ni un diccionario en memoria.** La captura y su
+  registro de envío tienen que escribirse **juntos o ninguno**, y sobrevivir a
+  que el proceso se cierre. Eso es una transacción y una restricción, que es
+  justo lo que un archivo plano no ofrece. Tampoco se añadió una cola externa
+  —Redis, RabbitMQ, Celery—: sería infraestructura nueva para un prototipo de un
+  solo escritor, y la garantía que hace falta ya la da el propio archivo.
+
+- **Dos tablas: `captura_local` y `outbox`.** El paquete es inmutable desde que
+  se acepta; el estado de entrega cambia en cada intento. Separarlos hace que
+  «el payload y la clave no cambian entre intentos» sea visible en el esquema en
+  lugar de ser una promesa del código. `outbox.id_captura` es `UNIQUE`, así que
+  un paquete no puede encolarse dos veces.
+
+- **Integridad en el esquema, no en Python.** Llave primaria por fila, llave
+  foránea de la outbox hacia su captura, `UNIQUE` sobre la referencia y sobre la
+  clave, `NOT NULL` donde hace falta y cinco `CHECK`. `PRAGMA foreign_keys = ON`
+  se activa en **cada** conexión —es por conexión y viene apagado—, y fuera de
+  toda transacción, porque SQLite ignora el pragma dentro de una y no avisa.
+
+- **La restricción de evidencia remota, escrita con `CASE`.** Redactada como
+  bicondicional sobre el `AND` de las tres columnas admitía evidencia a medias:
+  con el estado distinto de `ENVIADO` bastaba que una fuera `NULL` para que el
+  lado derecho resultara falso, los dos lados coincidieran y la fila entrara sin
+  ruido. La forma `CASE` dice lo que se quería decir: la evidencia está completa
+  exactamente cuando el estado es `ENVIADO`, y ausente por completo en cualquier
+  otro. Hay pruebas para las cinco combinaciones parciales en los dos estados no
+  enviados.
+
+- **Identidad estable: un UUID4 canónico, generado una sola vez.** Sus 36
+  caracteres cumplen el `^[A-Za-z0-9_-]{8,128}$` del servidor, no contienen
+  nombre, dato clínico ni credencial, y se persisten en la misma transacción que
+  el paquete. Esa cadena es la `Idempotency-Key` de todos los intentos: no
+  cambia tras un timeout, un reinicio, un `5xx` ni un replay. Una clave nueva con
+  el mismo cuerpo **no** es un reenvío —para la API es una operación nueva y
+  crearía otra sesión—, y evitar exactamente eso es la razón de que la identidad
+  se cree una vez y se guarde antes del primer intento.
+
+- **Serialización durable: `model_dump_json()` del contrato aprobado.** Se validó
+  con `SesionMonitoreoEntrada` —el mismo modelo que valida la API— y se guarda su
+  propio volcado, que es también lo que se envía como cuerpo, byte por byte. Se
+  comprobó experimentalmente lo que hacía falta comprobar: la ida y vuelta por
+  SQLite **conserva la huella del servidor**, y el texto recuperado vuelve a
+  validar contra el contrato, incluido su `extra="forbid"`. Sin esa propiedad, un
+  reenvío legítimo llegaría como contenido distinto bajo la misma clave y sería
+  un `409`. No se escribió un segundo esquema local: dos definiciones del mismo
+  contrato acabarían separándose.
+
+- **`fecha_hora_sincronizacion` se congela, no se prohíbe.** Ese campo forma
+  parte de la huella del servidor, y por eso el riesgo es concreto: un instante
+  estampado en el primer envío y refrescado en un reintento convertiría un
+  reenvío legítimo en `409`, justo después de una pérdida de respuesta, que es
+  cuando más falta hace que funcione. Lo que elimina ese riesgo es que el valor
+  **no cambie entre intentos**, y guardar el paquete validado una sola vez ya lo
+  garantiza. De ahí dos comportamientos, ninguno de los cuales necesita una
+  regla propia:
+
+  1. **El nodo nunca lo estampa.** Una captura sin conexión no se ha
+     sincronizado, así que el campo queda en `null` —es lo que produce el
+     simulador y lo que muestran los ejemplos—. El instante de la entrega
+     confirmada se registra en `outbox.enviado_en`, que es donde ese hecho
+     ocurre.
+  2. **Un archivo de entrada puede traerlo ya informado**, y si el contrato lo
+     acepta, la captura lo acepta: se guarda sin alterarlo y se reenvía idéntico
+     en cada intento.
+
+  Se evaluó rechazar todo paquete con ese campo informado y **se descartó**: el
+  edge habría aplicado un contrato más estricto que el de la API a la que
+  alimenta, negando paquetes que el endpoint sí acepta, y ese segundo juego de
+  reglas habría quedado libre de separarse del primero. Lo que se rechaza lo
+  rechaza `SesionMonitoreoEntrada` —una sincronización anterior a su captura, o
+  sin offset—, y este módulo no lo reescribe.
+
+- **Tres estados y ni uno más: `PENDIENTE`, `ENVIADO`, `FALLIDO`.** Declarados
+  una sola vez en `app.edge.estados`, y el `CHECK` que limita la columna se
+  genera de ese enum, así que no pueden separarse. No se importa ni se deriva de
+  `EstadoSesion`: que ambos tengan un `PENDIENTE` es una coincidencia de nombre
+  entre un estado clínico y uno de entrega.
+
+- **`FALLIDO` lleva un indicador `reintentable`**, obligatorio en ese estado y
+  prohibido en los otros. Es lo que separa «otra pasada puede intentarlo» —fallo
+  de transporte, `5xx`— de «hace falta que alguien lo mire» —`409`, `404`,
+  `422`, una respuesta que no cumple el contrato—. Sin esa distinción, o se
+  reintenta para siempre algo que siempre será rechazado, o se abandona algo que
+  solo necesitaba otra oportunidad.
+
+- **`ENVIADO` es terminal, y lo garantiza el `UPDATE`, no una convención.** La
+  guarda viaja en el `WHERE`:
+
+  ```sql
+  UPDATE outbox SET ... WHERE id_outbox = ? AND estado <> 'ENVIADO'
+  ```
+
+  Esto cierra una carrera concreta y fácil de pasar por alto: el emisor A recibe
+  su `201` y marca `ENVIADO`; el emisor B, que llevaba rato esperando en un
+  socket que acabó en timeout, escribe `FALLIDO` sobre la misma fila. El paquete
+  *sí* se entregó, PostgreSQL lo tiene una vez, y el estado local diría que no.
+  Ningún `busy_timeout` lo evita: no hay contención de bloqueo, hay dos
+  escritores y uno trabaja con información vieja. Con la guarda, `rowcount = 0`
+  significa «otro ya lo entregó», que no es un error y se reporta como tal. Por
+  la misma razón `intentos` se incrementa en SQL (`intentos = intentos + 1`) y no
+  leyendo y reescribiendo desde Python, que es como se pierden los contadores.
+
+- **Sin `EN_PROCESO`, sin lease y sin lock.** Serían maquinaria para un problema
+  que dos palabras en un `WHERE` ya resuelven, y añadirían un cuarto estado que
+  el ticket no pide. `busy_timeout` se conserva, pero solo para lo suyo: que un
+  segundo emisor invocado por error falle con un mensaje legible en vez de
+  quedarse esperando.
+
+- **Versionado con `PRAGMA user_version`, sin un segundo framework de
+  migraciones.** Un entero basta para un esquema con una versión, y Alembic
+  gobierna PostgreSQL, que es otra responsabilidad. Se comprobó que el pragma
+  **participa de la transacción**: crear las dos tablas y estampar la versión
+  ocurre en un solo `BEGIN IMMEDIATE`…`COMMIT`, así que no puede quedar un
+  archivo que se declare versión 1 con medio esquema dentro.
+
+- **La inicialización rechaza en lugar de reparar.** Solo hay un camino que
+  escribe —archivo sin estrenar y sin tablas—; los demás se niegan con un
+  mensaje legible: tablas propias sin versión (esquema anterior al versionado o
+  parcial), tablas ajenas (el archivo es de otra base), versión desconocida, o
+  versión correcta con un esquema que no coincide. No existe ningún `DROP`,
+  `TRUNCATE` ni `DELETE`, y hay una prueba que lo verifica sobre el árbol
+  sintáctico del módulo.
+
+- **La verificación del esquema comprueba garantías, no nombres.** Columnas con
+  su tipo y su `NOT NULL`, llaves primarias, los `UNIQUE` que SQLite realmente
+  está aplicando —leídos de sus propios índices, no del texto—, las llaves
+  foráneas y su destino, y por último la definición almacenada, que es el único
+  lugar donde un `CHECK` puede inspeccionarse porque ningún `PRAGMA` los expone.
+  Las expectativas están escritas a mano y no derivadas del DDL: derivadas
+  coincidirían por construcción y no probarían nada. Se verificó que detecta un
+  `UNIQUE` retirado, un `NOT NULL` retirado, una llave foránea retirada, un
+  `CHECK` borrado, un cuarto estado colado en el `CHECK` y una columna de más.
+
+- **Un `201` no basta por sí solo.** Se exigen cinco condiciones juntas: el
+  código es exactamente `201`; `Idempotency-Replayed` está presente y vale
+  `false` o `true`; el cuerpo valida como `SesionMonitoreoCreada`;
+  `lecturas_creadas` coincide con la cantidad de `ids_lectura`; y
+  `lecturas_creadas` coincide con **las lecturas del paquete que se envió**. La
+  quinta es la que impide aceptar como confirmación una respuesta impecable que
+  describe otro paquete. Se deriva del payload guardado en el momento de usarla,
+  no de una columna con el conteo: es la misma razón por la que
+  `lecturas_creadas` tampoco es columna en `idempotencia_solicitud`, porque una
+  segunda copia de un número solo puede acabar discrepando de la primera.
+
+- **`201` con `Idempotency-Replayed: true` es una entrega, y un `409` nunca lo
+  es.** El replay significa que el paquete está en PostgreSQL exactamente una vez
+  y que esos son sus identificadores.
+
+- **Un `409` no se diagnostica más allá.** El endpoint lo usa para dos
+  situaciones distintas —colisión de idempotencia y una referencia que
+  desapareció en una carrera— y no publica un código de error que las separe: lo
+  único que difiere es prosa en español. Analizarla haría que el cliente se
+  rompiera el día que alguien mejore una frase. Las dos se tratan igual y de
+  forma conservadora: no se confirma, no se reintenta sola, se conservan clave y
+  payload, y queda para revisión.
+
+- **Un `5xx` es reintentable pero no se rotula «temporal».** El endpoint también
+  responde `500` ante una reclamación idempotente incompleta, que no tiene nada
+  de transitorio. Queda elegible para otra pasada explícita, y nada más.
+
+- **Un fallo de transporte deja el resultado remoto en «desconocido».** Es la
+  ventana que da sentido al ticket: la petición pudo confirmarse y perderse solo
+  la respuesta. Se conservan la misma clave y el mismo cuerpo, y la siguiente
+  pasada obtiene un replay con los mismos identificadores.
+
+- **Una sola pasada, finita y explícita.** `enviar` intenta una cantidad acotada
+  de eventos elegibles, en orden FIFO determinista (`ORDER BY id_outbox`), y
+  termina. No hay bucle, ni temporizador, ni sondeo de conectividad, ni
+  *backoff*. La pasada **sí** se detiene ante un fallo de transporte —la API no
+  está accesible y los demás eventos chocarían con la misma pared, con un timeout
+  cada uno—, pero no ante un `409` o un `5xx`, que son propiedades de un paquete
+  y no deben ocultar la cola que viene detrás.
+
+- **Ningún bloqueo de SQLite se mantiene durante la red.** Los elegibles se leen
+  en una sentencia que termina antes de la primera petición, y cada resultado se
+  escribe en su propia transacción corta. Hay una prueba en la que otra conexión
+  escribe en la base mientras el emisor está «en la red».
+
+- **Cliente HTTP síncrono, con `httpx`**, que ya era dependencia directa del
+  backend. No se añadió ninguna dependencia: `MockTransport` para guionar
+  respuestas y fallos, y `TestClient` —que *es* un `httpx.Client`— para conducir
+  la aplicación real. El cliente se **inyecta**, así que no existe una sola línea
+  de código de producción escrita para las pruebas. Se descartó `ASGITransport`
+  por ser asíncrono, y con él la opción de un cliente `async`, que no aportaría
+  nada a un comando finito sobre una base SQLite síncrona.
+
+- **El edge nunca abre una conexión a PostgreSQL.** No importa `sqlalchemy` ni
+  `psycopg` en ninguno de sus módulos ni en su CLI, y hay una prueba que lo
+  comprueba sobre el árbol de importaciones. Todo lo que llega al servidor pasa
+  por la API.
+
+- **Errores saneados, con dos cuidados propios de este ticket.** El texto de una
+  `ValidationError` de Pydantic incluye `input_value`, y para este contrato ese
+  valor es el dato clínico; por eso el mensaje se reconstruye con solo la
+  ubicación del campo y el tipo de error. Y un `detail` que llega como **lista**
+  —el `422` automático de FastAPI— no se guarda en absoluto, porque sus entradas
+  repiten el valor rechazado; se registra su forma, no su contenido. Un `detail`
+  de texto sí se conserva, truncado: son mensajes que este proyecto escribió.
+
+- **La base local es configurable y no se versiona.** `EDGE_SQLITE_PATH`,
+  `EDGE_API_BASE_URL` y `EDGE_HTTP_TIMEOUT`, en una clase de configuración
+  propia con prefijo `EDGE_`, separada de la del backend para que el edge no
+  pueda heredar ni filtrar `database_url`. `.gitignore` gana una sola regla
+  estrecha, `data/edge/`, que cubre la base y sus auxiliares `-wal`/`-shm` sin
+  ampliar patrones globales; sigue el precedente de `data/generated/`.
+
+- **Sin WAL.** No aporta nada a un prototipo de un solo escritor y añadiría dos
+  archivos auxiliares más que gestionar. Se dejó el journal por omisión.
+
+### Lo que se reserva para la sincronización automática
+
+No se implementó, y no debe darse por implementado: servicio permanente o
+demonio, detección o sondeo de conectividad, *scheduler*, reintentos automáticos
+programados, *backoff* exponencial, *jitter*, `next_attempt_at`, política de
+límite de intentos, reconciliación periódica, trazabilidad de extremo a extremo,
+métricas operativas y orquestación de varios nodos.
+
+La columna `intentos` se **cuenta** pero no decide nada: convertirla en política
+es exactamente el trabajo siguiente. La estructura queda preparada para ello sin
+anticiparlo.
+
+### Validación
+
+Cinco archivos de pruebas nuevos: cuatro que no necesitan servidor
+—almacenamiento y esquema, captura, emisor y clasificación, y el comando— y uno
+que ejerce el ciclo real contra PostgreSQL 16.
+
+Las pruebas de persistencia usan **archivos SQLite reales** bajo `tmp_path`,
+nunca `:memory:`: lo que hay que demostrar es que un evento sobrevive a que el
+proceso se cierre, y una base en memoria desaparece con la conexión, así que
+probaría lo contrario de lo que se afirma. Cada prueba tiene su propio archivo.
+
+La suite integrada declara su propia `SCRUM64_TEST_DATABASE_URL` y su propio
+`engine_de_pruebas`, y reutiliza sin cambiarlas las fixtures de SCRUM-62
+—`conexion_revertida`, `sesion_de_pruebas`, `referencias` y los constructores de
+paquetes—. Como esas fixtures piden el engine **por nombre**, hay una prueba que
+deja explícita esa atadura: si alguien retirara el engine de este módulo, las
+fixtures caerían en silencio sobre el de SCRUM-62 y la suite seguiría en verde.
+
+La ventana de confirmación perdida se reproduce con una subclase de
+`TestClient` que deja pasar la petición —el endpoint procesa y PostgreSQL
+confirma— y después lanza `ReadTimeout` en lugar de devolver la respuesta. La
+prueba comprueba las dos mitades: que la respuesta interna **fue un `201` real**
+y que, pese a ello, el evento local no quedó marcado como enviado. La pasada
+siguiente obtiene el replay, con los mismos identificadores y una sola sesión en
+PostgreSQL.
+
+La guarda de `ENVIADO` se validó además con un **control negativo**: retirada del
+`UPDATE`, las dos pruebas de secuencia concurrente fallan; restaurada, pasan.
+
+### Integración continua
+
+El workflow gana un sexto paso, `Pruebas del nodo edge contra PostgreSQL
+(SCRUM-64)`, con su propia `SCRUM64_TEST_DATABASE_URL` construida de la misma
+fuente única que las anteriores, y su reporte `pytest-scrum64.xml` incorporado al
+guardián que pone el job en rojo si alguna prueba de PostgreSQL queda omitida. El
+archivo se añade además a la lista de ignorados del bloque offline, donde sí
+corren las cuatro suites locales del edge.
+
+Va después de SCRUM-63 por la misma razón por la que aquel iba el último:
+aquella capa ejecuta DDL real y toma candados exclusivos, y compartir la base con
+otra suite corriendo a la vez no sería seguro. SQLite no necesita ningún servicio
+adicional en el runner: cada prueba crea su archivo dentro del `tmp_path` que le
+da pytest.
