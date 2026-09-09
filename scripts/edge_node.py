@@ -7,10 +7,10 @@ Uso desde la raiz del repositorio::
     python scripts/edge_node.py estado                      # resumen de la outbox
     python scripts/edge_node.py enviar                      # una sola pasada de envio
 
-La ruta del archivo SQLite, la URL de la API y el timeout salen de la
-configuracion del entorno (``EDGE_SQLITE_PATH``, ``EDGE_API_BASE_URL``,
-``EDGE_HTTP_TIMEOUT``). ``--base`` permite apuntar a otro archivo para una
-demostracion, sin tocar la configuracion.
+La ruta del archivo SQLite, la URL de la API, el timeout HTTP y el timeout de
+bloqueo de SQLite salen de la configuracion del entorno (``EDGE_SQLITE_PATH``,
+``EDGE_API_BASE_URL``, ``EDGE_HTTP_TIMEOUT``, ``EDGE_BUSY_TIMEOUT_MS``). ``--base``
+permite apuntar a otro archivo para una demostracion, sin tocar la configuracion.
 
 Este comando no abre ninguna conexion a PostgreSQL y no escribe ninguna fila
 clinica: todo lo que llega al servidor pasa por la API. Tampoco imprime nunca el
