@@ -1,8 +1,8 @@
 """Configuration of the simulated edge node (SCRUM-64).
 
-Three settings and nothing else: where the local SQLite file lives, which API
-the sender talks to, and how long it waits for an answer. They are read with the
-same mechanism the backend already uses -- ``pydantic-settings`` over the
+Four settings and nothing else: where the local SQLite file lives, which API
+the sender talks to, how long it waits for an answer, and how long SQLite waits
+for a lock before failing fast. They are read with the same mechanism the backend already uses -- ``pydantic-settings`` over the
 repository's ``.env`` -- but under their own ``EDGE_`` prefix and in a class of
 their own, so the edge cannot accidentally inherit, override or leak the
 backend's ``database_url``.
