@@ -31,6 +31,14 @@ column, on the same reasoning that kept ``lecturas_creadas`` out of the server's
 ``idempotencia_solicitud``: a second copy of a number can only ever end up
 disagreeing with the first. Derived at the moment of use, it cannot drift.
 
+**The retryable family is exactly 5xx (SCRUM-65).** ``408`` and ``429`` are
+**not** retried: this endpoint implements neither request timeouts nor rate
+limiting, so treating them as recoverable would add a path no test could
+exercise against the real server, and would raise the question of honouring
+``Retry-After``, which is not implemented. It is a decision, recorded in the
+decision log, not an omission. A code at or below 499 is refused, a code at or
+above 600 is not a member of any documented family and is refused too.
+
 **A replay is a success, and a 409 never is.** ``201`` with
 ``Idempotency-Replayed: true`` means the package is in PostgreSQL exactly once
 and these are the identifiers it got; that is delivery. ``409`` means the key
@@ -56,7 +64,6 @@ All data handled here is fictitious and simulated.
 
 from __future__ import annotations
 
-import enum
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -64,6 +71,7 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
+from app.edge.estados import ResultadoEntrega
 from app.schemas.monitoreo import SesionMonitoreoCreada
 
 # Route and headers of the contract merged in SCRUM-63. They are written here
@@ -85,12 +93,23 @@ CODIGO_CREADO = 201
 LONGITUD_MAXIMA_DE_DETALLE = 160
 
 
-class ResultadoEntrega(enum.Enum):
-    """What one attempt achieved, from the edge's point of view."""
-
-    ENTREGADO = "ENTREGADO"
-    REINTENTABLE = "REINTENTABLE"
-    RECHAZADO = "RECHAZADO"
+# ``ResultadoEntrega`` is declared in :mod:`app.edge.estados` and re-exported
+# here, where every caller already looks for it. The declaration had to move so
+# that the storage module -- which renders a CHECK constraint from this
+# vocabulary -- could read it without importing httpx and the Pydantic
+# contracts. One declaration, two readers.
+__all__ = [
+    "CABECERA_IDEMPOTENCIA",
+    "CABECERA_REPLAY",
+    "CODIGO_CREADO",
+    "ClienteEdge",
+    "Entrega",
+    "ResultadoEntrega",
+    "RUTA_SESIONES",
+    "clasificar",
+    "contar_lecturas",
+    "es_resultado_desconocido",
+]
 
 
 @dataclass(frozen=True)
@@ -107,6 +126,26 @@ class Entrega:
     @property
     def entregado(self) -> bool:
         return self.resultado is ResultadoEntrega.ENTREGADO
+
+
+def es_resultado_desconocido(entrega: "Entrega") -> bool:
+    """Whether this attempt ended without any answer from the server at all.
+
+    A transport failure carries no status code, and that absence is the only
+    thing that separates «the API answered badly» from «the API was never
+    reached». Both are ``REINTENTABLE``, and they must stay one member: the edge
+    does not know whether the request was committed, and a fourth member would
+    claim it did.
+
+    The distinction is given a name here because three callers need it -- the
+    round, which ends early when the API is unreachable; the pause that keeps
+    the rest of the queue from hitting the same wall; and the trace -- and three
+    copies of ``codigo_http is None`` is how one of them ends up drifting.
+    """
+    return (
+        entrega.resultado is ResultadoEntrega.REINTENTABLE
+        and entrega.codigo_http is None
+    )
 
 
 def contar_lecturas(payload_json: str) -> int:
@@ -172,10 +211,15 @@ def clasificar(respuesta: httpx.Response, *, lecturas_enviadas: int) -> Entrega:
             error=f"conflicto 409: {_detalle_seguro(respuesta)}",
         )
 
-    if 500 <= codigo:
+    if 500 <= codigo < 600:
         # A server-side failure. Kept eligible for another explicit pass, with
         # the same key -- never labelled "temporary", because the endpoint also
         # answers 500 for an incomplete claim, which is not transient at all.
+        #
+        # The upper bound is not decoration. The contract promises retries for
+        # the **5xx family**, and a non-standard 600 or 999 is not a member of
+        # it: nothing about such a code promises that trying again would help,
+        # so it falls through to the catch-all below and is refused.
         return Entrega(
             resultado=ResultadoEntrega.REINTENTABLE,
             codigo_http=codigo,
@@ -189,8 +233,10 @@ def clasificar(respuesta: httpx.Response, *, lecturas_enviadas: int) -> Entrega:
             error=f"rechazo {codigo}: {_detalle_seguro(respuesta)}",
         )
 
-    # Any other 2xx or a 3xx. The only documented success is 201, so an
-    # unexpected code is never taken as one.
+    # Any other 2xx, a 3xx, or a non-standard code at or above 600. The only
+    # documented success is 201, so an unexpected code is never taken as one,
+    # and nothing about a code outside the standard families promises that
+    # trying again would produce a different answer.
     return Entrega(
         resultado=ResultadoEntrega.RECHAZADO,
         codigo_http=codigo,

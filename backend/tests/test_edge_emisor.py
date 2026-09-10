@@ -33,7 +33,7 @@ from app.edge.cliente import (
     ResultadoEntrega,
 )
 from app.edge.emisor import ejecutar_pasada
-from app.edge.estados import EstadoEntrega
+from app.edge.estados import EstadoEntrega, MotivoRevision
 from tests.test_edge_captura import (
     PAQUETE_DE_UNA_LECTURA,
     paquete_con_sincronizacion,
@@ -218,6 +218,83 @@ def test_un_rechazo_de_validacion_no_es_exito_ni_reintentable(conexion, codigo):
     fila = outbox.leer_evento(conexion, registro.id_outbox)
     assert fila["estado"] == EstadoEntrega.FALLIDO.value
     assert fila["reintentable"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Los limites de la familia reintentable
+#
+# El contrato promete reintentos para la **familia 5xx**, ni un codigo menos ni
+# uno mas. Estas pruebas fijan los dos bordes y la decision sobre 408 y 429, que
+# son los casos que una lectura descuidada movería de lado.
+# ---------------------------------------------------------------------------
+
+
+def test_un_599_sigue_siendo_reintentable(conexion):
+    """El borde superior de la familia, con su desenlace completo.
+
+    ``599`` es 5xx y por tanto se reintenta: queda ``FALLIDO`` reintentable, sin
+    motivo de revision --no requiere una persona-- y con su proxima fecha ya
+    programada.
+    """
+    registro = capturar_uno(conexion)
+    resumen = ejecutar_pasada(conexion, cliente_con(respuesta_fija(599, {"detail": "x"})))
+
+    assert resumen.reintentables == 1
+    assert resumen.rechazados == 0
+    fila = outbox.leer_evento(conexion, registro.id_outbox)
+    assert fila["estado"] == EstadoEntrega.FALLIDO.value
+    assert fila["reintentable"] == 1
+    assert fila["motivo_revision"] is None
+    assert fila["proximo_intento_en"] is not None
+    assert fila["ultimo_http"] == 599
+
+
+@pytest.mark.parametrize("codigo", [600, 699, 999])
+def test_un_codigo_por_encima_de_la_familia_5xx_no_se_reintenta(conexion, codigo):
+    """La cota superior de ``5xx`` no es decoracion.
+
+    Escrita como ``500 <= codigo``, la condicion se traga cualquier codigo no
+    estandar por arriba y el nodo insistiria contra una respuesta que no
+    pertenece a ninguna familia documentada y que nada promete que vaya a
+    mejorar. Aqui se comprueba lo contrario: cae en «respuesta inesperada»,
+    gasta un solo intento y se cierra para revision.
+    """
+    registro = capturar_uno(conexion)
+    resumen = ejecutar_pasada(conexion, cliente_con(respuesta_fija(codigo, {"detail": "x"})))
+
+    assert resumen.rechazados == 1
+    assert resumen.reintentables == 0
+    fila = outbox.leer_evento(conexion, registro.id_outbox)
+    assert fila["estado"] == EstadoEntrega.FALLIDO.value
+    assert fila["reintentable"] == 0
+    assert fila["motivo_revision"] == MotivoRevision.RECHAZO_PERMANENTE.value
+    assert fila["proximo_intento_en"] is None
+    assert fila["ultimo_http"] == codigo
+
+
+@pytest.mark.parametrize("codigo", [408, 429])
+def test_408_y_429_siguen_siendo_permanentes(conexion, codigo):
+    """Una decision consciente, no un olvido.
+
+    Los dos codigos *suenan* transitorios --tiempo agotado y demasiadas
+    peticiones-- y en otro servicio lo serian. En este no: el endpoint no
+    implementa ni timeouts de peticion ni limitacion de tasa, asi que tratarlos
+    como recuperables anadiria un camino que ninguna prueba podria ejercer
+    contra el servidor real y abriria la cuestion de honrar ``Retry-After``, que
+    **no se implementa**. Si algun dia el servidor los emitiera, esta prueba es
+    el sitio donde la decision tendria que revisarse a proposito.
+    """
+    registro = capturar_uno(conexion)
+    resumen = ejecutar_pasada(conexion, cliente_con(respuesta_fija(codigo, {"detail": "x"})))
+
+    assert resumen.rechazados == 1
+    assert resumen.reintentables == 0
+    fila = outbox.leer_evento(conexion, registro.id_outbox)
+    assert fila["estado"] == EstadoEntrega.FALLIDO.value
+    assert fila["reintentable"] == 0
+    assert fila["motivo_revision"] == MotivoRevision.RECHAZO_PERMANENTE.value
+    assert fila["proximo_intento_en"] is None
+    assert fila["ultimo_http"] == codigo
 
 
 @pytest.mark.parametrize(
