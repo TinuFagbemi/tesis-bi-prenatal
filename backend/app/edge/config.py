@@ -1,17 +1,21 @@
-"""Configuration of the simulated edge node (SCRUM-64).
+"""Configuration of the simulated edge node (SCRUM-64, extended in SCRUM-65).
 
-Four settings and nothing else: where the local SQLite file lives, which API
-the sender talks to, how long it waits for an answer, and how long SQLite waits
-for a lock before failing fast. They are read with the same mechanism the backend already uses -- ``pydantic-settings`` over the
-repository's ``.env`` -- but under their own ``EDGE_`` prefix and in a class of
-their own, so the edge cannot accidentally inherit, override or leak the
-backend's ``database_url``.
+Eight settings and nothing else. Four describe the node itself: where the local
+SQLite file lives, which API the sender talks to, how long it waits for an
+answer, and how long SQLite waits for a lock before failing fast. Four more
+describe the retry policy: how many attempts an event gets in total, the base and
+the ceiling of the incremental wait, and how many events one round takes at a
+time. They are read with the same mechanism the backend already uses --
+``pydantic-settings`` over the repository's ``.env`` -- but under their own
+``EDGE_`` prefix and in a class of their own, so the edge cannot accidentally
+inherit, override or leak the backend's ``database_url``.
 
 **No credentials, ever.** The edge talks HTTP to a public endpoint and writes to
 a local file; neither needs a secret. There is deliberately no field for one, so
-a password cannot be introduced by configuration alone. Authentication is
-SCRUM-65 and beyond, and adding a token here before there is an endpoint to send
-it to would be speculation.
+a password cannot be introduced by configuration alone. Authentication, JWT and
+RBAC are **not** part of SCRUM-65 either -- that ticket is deferred
+synchronisation, retries and traceability -- and adding a token here before there
+is an endpoint to send it to would be speculation.
 
 **Why a separate class instead of extending ``app.config.Settings``.** The
 backend's settings carry ``database_url``, and the edge must never open a
@@ -31,6 +35,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.edge.politica import (
+    BASE_DELAY_POR_OMISION,
+    BATCH_LIMIT_POR_OMISION,
+    MAX_ATTEMPTS_POR_OMISION,
+    MAX_DELAY_POR_OMISION,
+    PoliticaDeReintentos,
+)
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 ENV_FILE = REPOSITORY_ROOT / ".env"
@@ -56,7 +68,14 @@ ESPERA_DE_BLOQUEO_POR_OMISION = 5000
 
 
 class EdgeSettings(BaseSettings):
-    """Settings of the edge node, read from ``EDGE_*`` variables."""
+    """Settings of the edge node, read from ``EDGE_*`` variables.
+
+    The four policy fields are only defaults: the value that governs a given
+    event is the one it **adopted** when it claimed its first attempt, stored in
+    ``outbox.max_intentos_aplicado``. Changing the environment therefore reaches
+    events that have not started synchronising yet, and cannot rewrite the
+    contract an event is already living under.
+    """
 
     model_config = SettingsConfigDict(
         env_file=ENV_FILE,
@@ -69,6 +88,30 @@ class EdgeSettings(BaseSettings):
     api_base_url: str = URL_API_POR_OMISION
     http_timeout: float = TIMEOUT_HTTP_POR_OMISION
     busy_timeout_ms: int = ESPERA_DE_BLOQUEO_POR_OMISION
+
+    # Total attempts per event, **the first one included**.
+    max_attempts: int = MAX_ATTEMPTS_POR_OMISION
+    base_delay_seconds: float = BASE_DELAY_POR_OMISION
+    max_delay_seconds: float = MAX_DELAY_POR_OMISION
+    # Events one **round** takes. Not the maximum number of attempts, and not
+    # the total a run processes -- that is bounded by the watermark.
+    batch_limit: int = BATCH_LIMIT_POR_OMISION
+
+    def politica(self) -> PoliticaDeReintentos:
+        """The configured policy, validated.
+
+        Raises :class:`app.edge.politica.ConfiguracionInvalida` for anything the
+        policy refuses -- a non-finite wait, a ceiling below the base, a limit
+        below one. Built here rather than at import time so a bad ``.env`` fails
+        with a sentence when a command runs, instead of breaking every import.
+        """
+        return PoliticaDeReintentos(
+            max_attempts=self.max_attempts,
+            base_delay_seconds=self.base_delay_seconds,
+            max_delay_seconds=self.max_delay_seconds,
+            batch_limit=self.batch_limit,
+            http_timeout=self.http_timeout,
+        )
 
 
 settings_edge = EdgeSettings()
