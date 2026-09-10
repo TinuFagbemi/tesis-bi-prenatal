@@ -6,6 +6,13 @@ asi que lo unico que queda por comprobar aqui es la capa de comando --que los
 argumentos se interpretan, que los errores se convierten en un codigo de salida
 y que nada sensible llega a la pantalla--.
 
+Las seis ordenes entran por ``main``. Las dos que trae SCRUM-65 --``sincronizar``
+y ``traza``-- son ademas las unicas con frontera propia: ``sincronizar`` traduce
+cuatro argumentos a una ``PoliticaDeReintentos`` y traduce un ``ResumenSincronizacion``
+a un codigo de salida, y ``traza`` es la unica orden que imprime el historial de
+un evento, de modo que es tambien la que mas puede filtrar. Nada de eso se veia
+llamando a ``app.edge`` directamente.
+
 Ninguna prueba de este archivo abre un subproceso ni toca la base configurada en
 el entorno: todas usan ``--base`` sobre ``tmp_path``.
 
@@ -31,8 +38,12 @@ from app.edge.config import (
     URL_API_POR_OMISION,
     cargar_settings_edge,
 )
-from app.edge.politica import ConfiguracionInvalida
-from app.edge.estados import EstadoEntrega
+from app.edge.politica import (
+    LIMITE_OPERACIONAL_SEGUNDOS,
+    RESOLUCION_MINIMA_SEGUNDOS,
+    ConfiguracionInvalida,
+)
+from app.edge.estados import EstadoEntrega, MotivoRevision
 from tests.test_edge_captura import PAQUETE_DE_UNA_LECTURA
 
 RAIZ = Path(__file__).resolve().parents[2]
@@ -274,6 +285,522 @@ def test_enviar_sobre_un_nodo_vacio_no_falla(cli, base, capsys, monkeypatch):
     _con_transporte(monkeypatch, cli, lambda peticion: httpx.Response(500))
     assert ejecutar(cli, base, "enviar") == 0
     assert "seleccionados             : 0" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# sincronizar
+#
+# Es la orden con mas frontera propia: traduce cuatro argumentos a una
+# ``PoliticaDeReintentos`` y traduce un ``ResumenSincronizacion`` a un codigo de
+# salida. Ninguna de las dos traducciones se ve llamando a ``app.edge``
+# directamente, y las dos pueden equivocarse en silencio --un argumento que no
+# se propaga, un codigo 2 que sale como 0--.
+# ---------------------------------------------------------------------------
+
+
+def _espiar_politica(monkeypatch, cli):
+    """Observa la politica que el CLI construye, sin cambiar lo que hace.
+
+    El espia delega en la funcion real: lo unico que anade es la lista de
+    politicas recibidas, de modo que la prueba puede afirmar sobre la traduccion
+    de los argumentos sin dejar de ejercer la sincronizacion de verdad.
+    """
+    politicas = []
+    real = cli.sincronizar
+
+    def espia(conexion, cliente, **resto):
+        politicas.append(resto.get("politica"))
+        return real(conexion, cliente, **resto)
+
+    monkeypatch.setattr(cli, "sincronizar", espia)
+    return politicas
+
+
+def _respuesta_creada(reproducido: bool = False):
+    return lambda peticion: httpx.Response(
+        201,
+        json={"id_sesion": 832, "lecturas_creadas": 1, "ids_lectura": [1280]},
+        headers={CABECERA_REPLAY: "true" if reproducido else "false"},
+    )
+
+
+def _clave_de(base) -> str:
+    with alm.conectar(base) as conexion:
+        fila = conexion.execute(
+            "SELECT clave_idempotencia FROM outbox ORDER BY id_outbox LIMIT 1"
+        ).fetchone()
+    return fila["clave_idempotencia"]
+
+
+# --- El parser y la construccion de la politica ----------------------------
+
+
+def test_sincronizar_traduce_sus_cuatro_argumentos_a_la_politica(
+    cli, base, capsys, monkeypatch
+):
+    """Cada bandera llega a su campo, y ninguna se queda por el camino.
+
+    Sobre un nodo vacio a proposito: lo que se comprueba es la traduccion de
+    argumentos, no la sincronizacion, y asi no hay una sola espera real.
+    """
+    politicas = _espiar_politica(monkeypatch, cli)
+    _con_transporte(monkeypatch, cli, _respuesta_creada())
+
+    codigo = ejecutar(
+        cli,
+        base,
+        "sincronizar",
+        "--limite", "7",
+        "--max-intentos", "4",
+        "--espera-base", "0.5",
+        "--espera-maxima", "9.5",
+    )
+    capsys.readouterr()
+
+    assert codigo == 0
+    assert len(politicas) == 1
+    politica = politicas[0]
+    assert politica.batch_limit == 7
+    assert politica.max_attempts == 4
+    assert politica.base_delay_seconds == 0.5
+    assert politica.max_delay_seconds == 9.5
+    # El timeout no es un argumento: sale de la configuracion, y de el sale el
+    # lease.
+    assert politica.http_timeout == TIMEOUT_HTTP_POR_OMISION
+    assert politica.duracion_del_lease == 4 * TIMEOUT_HTTP_POR_OMISION + 30.0
+
+
+def test_sincronizar_sin_argumentos_usa_los_valores_de_la_configuracion(
+    cli, base, capsys, monkeypatch
+):
+    """Los valores por omision de ``--help`` y los de la politica son los mismos."""
+    politicas = _espiar_politica(monkeypatch, cli)
+    _con_transporte(monkeypatch, cli, _respuesta_creada())
+
+    assert ejecutar(cli, base, "sincronizar") == 0
+    capsys.readouterr()
+
+    assert politicas[0] == cargar_settings_edge().politica()
+
+
+@pytest.mark.parametrize(
+    "argumento, valor",
+    [
+        ("--espera-base", "5e-324"),
+        ("--espera-base", "0.0000001"),
+        ("--espera-base", "86401"),
+        ("--espera-maxima", "1e308"),
+        ("--espera-maxima", "86400.000000001"),
+    ],
+)
+def test_sincronizar_rechaza_una_duracion_no_programable_con_codigo_uno(
+    cli, base, capsys, monkeypatch, argumento, valor
+):
+    """``numero_positivo`` los admite; la politica no, y eso llega hasta aqui.
+
+    Argparse solo exige finito y mayor que 0, asi que ``5e-324`` y ``1e308``
+    atraviesan el parser. Los para ``PoliticaDeReintentos``, y como se construye
+    dentro del ``try`` de ``main`` el resultado es una frase y un codigo 1, no un
+    traceback. La base **no llega a crearse**: la politica se construye antes de
+    abrirla.
+    """
+    _con_transporte(monkeypatch, cli, _respuesta_creada())
+
+    assert ejecutar(cli, base, "sincronizar", argumento, valor) == 1
+
+    capturado = capsys.readouterr()
+    assert capturado.out == ""
+    assert capturado.err.startswith("Error: ")
+    assert "Traceback" not in capturado.err
+    assert not base.exists()
+
+
+def test_sincronizar_rechaza_un_timeout_cuyo_lease_no_cabe(
+    cli, base, capsys, monkeypatch
+):
+    """El timeout no es un argumento, asi que este caso entra por el entorno."""
+    monkeypatch.setenv("EDGE_HTTP_TIMEOUT", "30000")
+    _con_transporte(monkeypatch, cli, _respuesta_creada())
+
+    assert ejecutar(cli, base, "sincronizar") == 1
+
+    error = capsys.readouterr().err
+    assert "duracion_del_lease" in error
+    assert "http_timeout" in error
+    assert not base.exists()
+
+
+def test_sincronizar_acepta_los_dos_bordes_del_intervalo(
+    cli, base, capsys, monkeypatch
+):
+    """Y los bordes inclusivos si pasan, hasta construir la politica."""
+    politicas = _espiar_politica(monkeypatch, cli)
+    _con_transporte(monkeypatch, cli, _respuesta_creada())
+
+    assert (
+        ejecutar(
+            cli,
+            base,
+            "sincronizar",
+            "--espera-base", repr(RESOLUCION_MINIMA_SEGUNDOS),
+            "--espera-maxima", repr(LIMITE_OPERACIONAL_SEGUNDOS),
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    assert politicas[0].base_delay_seconds == RESOLUCION_MINIMA_SEGUNDOS
+    assert politicas[0].max_delay_seconds == LIMITE_OPERACIONAL_SEGUNDOS
+
+
+@pytest.mark.parametrize(
+    "argumento, valor",
+    [
+        ("--limite", "0"),
+        ("--limite", "-1"),
+        ("--limite", "dos"),
+        ("--max-intentos", "0"),
+        ("--espera-base", "0"),
+        ("--espera-base", "-1"),
+        ("--espera-base", "nan"),
+        ("--espera-maxima", "inf"),
+    ],
+)
+def test_sincronizar_conserva_el_comportamiento_de_argparse(
+    cli, base, argumento, valor
+):
+    """Lo que rechaza el parser sigue saliendo por ``SystemExit`` y codigo 2.
+
+    Son dos fronteras distintas y conviene que se noten distintas: un argumento
+    mal formado es un error de uso --argparse, codigo 2, ayuda por stderr-- y una
+    duracion imposible es un error de configuracion --codigo 1, una frase--.
+    """
+    with pytest.raises(SystemExit) as salida:
+        ejecutar(cli, base, "sincronizar", argumento, valor)
+    assert salida.value.code == 2
+
+
+# --- El despacho, los codigos de salida y el informe ------------------------
+
+
+def test_sincronizar_entrega_y_devuelve_cero(cli, base, paquete, capsys, monkeypatch):
+    ejecutar(cli, base, "capturar", str(paquete))
+    capsys.readouterr()
+    _con_transporte(monkeypatch, cli, _respuesta_creada())
+
+    assert ejecutar(cli, base, "sincronizar") == 0
+
+    salida = capsys.readouterr().out
+    assert "Sincronizacion terminada." in salida
+    assert "entregados                : 1" in salida
+    assert "ENVIADO                   : 1" in salida
+
+    with alm.conectar(base) as conexion:
+        assert outbox.resumen(conexion).enviados == 1
+
+
+def test_sincronizar_imprime_el_informe_completo(cli, base, capsys, monkeypatch):
+    """Las quince lineas del informe, sobre un nodo vacio.
+
+    Se comprueban aqui, sin eventos, porque lo que se afirma es la **forma** del
+    informe: que ninguna linea desaparezca al cambiar el resumen.
+    """
+    _con_transporte(monkeypatch, cli, _respuesta_creada())
+    assert ejecutar(cli, base, "sincronizar") == 0
+
+    salida = capsys.readouterr().out
+    for etiqueta in (
+        "eventos de esta ejecucion",
+        "rondas",
+        "esperas",
+        "pausas por transporte",
+        "intentos reconciliados",
+        "entregados",
+        "reintentables",
+        "rechazados",
+        "agotados",
+        "resultados tardios",
+        "Estado final de la cola:",
+        "ENVIADO",
+        "requieren revision",
+        "bloqueados",
+        "elegibles ahora",
+        "programados",
+    ):
+        assert etiqueta in salida, etiqueta
+
+
+def test_sincronizar_agota_los_intentos_y_devuelve_codigo_dos(
+    cli, base, paquete, capsys, monkeypatch
+):
+    """Un 500 constante: se reintenta, se agota, y el codigo pide una persona.
+
+    Las esperas se dejan en un milisegundo para que la prueba las gaste de
+    verdad en lugar de simularlas: lo que se esta comprobando es que el CLI
+    espera, no cuanto.
+    """
+    ejecutar(cli, base, "capturar", str(paquete))
+    capsys.readouterr()
+    _con_transporte(monkeypatch, cli, lambda peticion: httpx.Response(500))
+
+    codigo = ejecutar(
+        cli,
+        base,
+        "sincronizar",
+        "--max-intentos", "3",
+        "--espera-base", "0.001",
+        "--espera-maxima", "0.001",
+    )
+
+    assert codigo == 2
+    salida = capsys.readouterr().out
+    assert "agotados                  : 1" in salida
+    assert "requieren revision        : 1" in salida
+    assert "revision humana" in salida
+    assert "traza <clave>" in salida
+
+    with alm.conectar(base) as conexion:
+        evento = outbox.leer_evento(conexion, 1)
+    assert evento["estado"] == EstadoEntrega.FALLIDO.value
+    assert evento["motivo_revision"] == MotivoRevision.AGOTAMIENTO.value
+    assert evento["intentos"] == 3
+
+
+def test_sincronizar_con_un_rechazo_permanente_no_gasta_reintentos(
+    cli, base, paquete, capsys, monkeypatch
+):
+    """Un 422 se cierra en el primer intento, y aun asi el codigo es 2."""
+    ejecutar(cli, base, "capturar", str(paquete))
+    capsys.readouterr()
+    _con_transporte(monkeypatch, cli, lambda peticion: httpx.Response(422, json={}))
+
+    assert ejecutar(cli, base, "sincronizar") == 2
+
+    salida = capsys.readouterr().out
+    assert "rechazados                : 1" in salida
+    assert "esperas                   : 0" in salida
+
+    with alm.conectar(base) as conexion:
+        evento = outbox.leer_evento(conexion, 1)
+    assert evento["intentos"] == 1
+    assert evento["motivo_revision"] == MotivoRevision.RECHAZO_PERMANENTE.value
+
+
+def test_sincronizar_sobre_un_nodo_vacio_devuelve_cero(
+    cli, base, capsys, monkeypatch
+):
+    _con_transporte(monkeypatch, cli, lambda peticion: httpx.Response(500))
+
+    assert ejecutar(cli, base, "sincronizar") == 0
+    salida = capsys.readouterr().out
+    assert "rondas                    : 0" in salida
+    assert "elegibles ahora           : 0" in salida
+
+
+def test_sincronizar_inicializa_el_almacenamiento_si_hace_falta(
+    cli, base, capsys, monkeypatch
+):
+    _con_transporte(monkeypatch, cli, _respuesta_creada())
+    assert not base.exists()
+
+    assert ejecutar(cli, base, "sincronizar") == 0
+    capsys.readouterr()
+    assert base.exists()
+
+
+def test_sincronizar_nunca_imprime_el_paquete(
+    cli, base, paquete, capsys, monkeypatch
+):
+    """Ni al entregar, ni al fallar: el informe es de conteos, no de contenido."""
+    ejecutar(cli, base, "capturar", str(paquete))
+    capsys.readouterr()
+    _con_transporte(monkeypatch, cli, lambda peticion: httpx.Response(422, json={}))
+
+    ejecutar(cli, base, "sincronizar")
+    capturado = capsys.readouterr()
+
+    for valor in (
+        "hr_valor",
+        "spo2_valor",
+        "id_embarazo",
+        "id_tiempo_gest",
+        "fecha_hora_captura",
+        "SIGNOS_MATERNOS",
+    ):
+        assert valor not in capturado.out
+        assert valor not in capturado.err
+    assert "{" not in capturado.out
+
+
+# ---------------------------------------------------------------------------
+# traza
+#
+# La orden que mas puede filtrar: es la unica que imprime el historial completo
+# de un evento --cada intento, cada error, cada instante--. Lo que sigue
+# comprueba las dos formas de seleccionarlo, los tres desenlaces del comando y
+# que ni el paquete ni el detalle remoto llegan a la pantalla.
+# ---------------------------------------------------------------------------
+
+
+def test_traza_por_clave_recorre_el_evento(cli, base, paquete, capsys, monkeypatch):
+    ejecutar(cli, base, "capturar", str(paquete))
+    _con_transporte(monkeypatch, cli, _respuesta_creada())
+    ejecutar(cli, base, "sincronizar")
+    clave = _clave_de(base)
+    capsys.readouterr()
+
+    assert ejecutar(cli, base, "traza", clave) == 0
+
+    salida = capsys.readouterr().out
+    assert f"correlation_id      : {clave}" in salida
+    assert "estado              : ENVIADO" in salida
+    assert "situacion           : confirmado en su primera aceptacion" in salida
+    assert "secuencia de intentos:" in salida
+    assert "ENTREGADO" in salida
+    assert "aplico la transicion local" in salida
+
+
+def test_traza_por_id_outbox_da_el_mismo_recorrido(
+    cli, base, paquete, capsys, monkeypatch
+):
+    """Las dos formas de nombrar un evento devuelven exactamente lo mismo."""
+    ejecutar(cli, base, "capturar", str(paquete))
+    _con_transporte(monkeypatch, cli, _respuesta_creada())
+    ejecutar(cli, base, "sincronizar")
+    clave = _clave_de(base)
+    capsys.readouterr()
+
+    assert ejecutar(cli, base, "traza", clave) == 0
+    por_clave = capsys.readouterr().out
+
+    assert ejecutar(cli, base, "traza", "--id-outbox", "1") == 0
+    por_id = capsys.readouterr().out
+
+    assert por_clave == por_id
+
+
+def test_traza_de_un_evento_recien_capturado_lo_dice(
+    cli, base, paquete, capsys
+):
+    ejecutar(cli, base, "capturar", str(paquete))
+    clave = _clave_de(base)
+    capsys.readouterr()
+
+    assert ejecutar(cli, base, "traza", clave) == 0
+
+    salida = capsys.readouterr().out
+    assert "estado              : PENDIENTE" in salida
+    assert "situacion           : pendiente, todavia no intentado" in salida
+    assert "(sin politica adoptada)" in salida
+    assert "(todavia no se ha intentado ningun envio)" in salida
+    assert "confirmado_en       : no medido" in salida
+
+
+def test_traza_muestra_la_espera_programada_de_un_reintento(
+    cli, base, paquete, capsys, monkeypatch
+):
+    """El historial dice cuanto se espero, que es la mitad de la trazabilidad."""
+    ejecutar(cli, base, "capturar", str(paquete))
+    _con_transporte(monkeypatch, cli, lambda peticion: httpx.Response(500))
+    ejecutar(
+        cli, base, "sincronizar",
+        "--max-intentos", "2", "--espera-base", "0.001", "--espera-maxima", "0.001",
+    )
+    clave = _clave_de(base)
+    capsys.readouterr()
+
+    assert ejecutar(cli, base, "traza", clave) == 0
+
+    salida = capsys.readouterr().out
+    assert "estado              : FALLIDO" in salida
+    assert "situacion           : agotado: consumio todos sus intentos" in salida
+    assert "intentos            : 2 de 2" in salida
+    assert "espera 0.001 s" in salida
+    assert "http 500" in salida
+
+
+@pytest.mark.parametrize("identificador", ["no-existe", "--id-outbox 99"])
+def test_traza_de_un_evento_inexistente_devuelve_codigo_uno(
+    cli, base, capsys, identificador
+):
+    assert ejecutar(cli, base, "traza", *identificador.split()) == 1
+
+    capturado = capsys.readouterr()
+    assert capturado.out == ""
+    assert "No hay ningun evento con ese identificador." in capturado.err
+
+
+def test_traza_exige_exactamente_un_identificador(cli, base):
+    """Ni ninguno ni los dos: el grupo es excluyente y obligatorio."""
+    with pytest.raises(SystemExit) as sin_ninguno:
+        ejecutar(cli, base, "traza")
+    assert sin_ninguno.value.code == 2
+
+    with pytest.raises(SystemExit) as con_los_dos:
+        ejecutar(cli, base, "traza", "alguna-clave", "--id-outbox", "1")
+    assert con_los_dos.value.code == 2
+
+
+def test_traza_nunca_imprime_el_paquete_ni_el_detalle_remoto(
+    cli, base, paquete, capsys, monkeypatch
+):
+    """La orden que mas historial imprime es la que mas tiene que callar.
+
+    El servidor devuelve un ``detail`` que menciona el paquete; la traza tiene
+    que poder contar que hubo un 422 sin repetir una palabra de el. Se buscan
+    los nombres de los campos y el vocabulario del paquete, no digitos sueltos:
+    la salida lleva un UUID y varios instantes, y una cifra corta aparece dentro
+    de ellos por azar en una parte apreciable de las ejecuciones.
+    """
+    ejecutar(cli, base, "capturar", str(paquete))
+    _con_transporte(
+        monkeypatch,
+        cli,
+        lambda peticion: httpx.Response(
+            422,
+            json={
+                "detail": (
+                    "No existe un embarazo con id_embarazo=999999. "
+                    "hr_valor fuera de rango en SIGNOS_MATERNOS; "
+                    "SELECT * FROM operacional.embarazo"
+                )
+            },
+        ),
+    )
+    ejecutar(cli, base, "sincronizar")
+    clave = _clave_de(base)
+    capsys.readouterr()
+
+    assert ejecutar(cli, base, "traza", clave) == 0
+    capturado = capsys.readouterr()
+
+    for valor in (
+        "id_embarazo",
+        "hr_valor",
+        "spo2_valor",
+        "id_tiempo_gest",
+        "fecha_hora_captura",
+        "SIGNOS_MATERNOS",
+        "SELECT",
+        "operacional.embarazo",
+        "999999",
+    ):
+        assert valor not in capturado.out, valor
+        assert valor not in capturado.err, valor
+
+    # Y lo util si esta: el codigo, la clasificacion y la forma del detalle.
+    assert "http 422" in capturado.out
+    assert "RECHAZADO" in capturado.out
+    assert "rechazado permanentemente por la API" in capturado.out
+
+
+def test_traza_inicializa_el_almacenamiento_si_hace_falta(cli, base, capsys):
+    """Sobre un nodo que no existe: crea el archivo y responde que no hay nada."""
+    assert not base.exists()
+
+    assert ejecutar(cli, base, "traza", "cualquier-clave") == 1
+    capsys.readouterr()
+    assert base.exists()
 
 
 # ---------------------------------------------------------------------------
