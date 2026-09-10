@@ -319,14 +319,79 @@ def test_la_ruta_por_omision_esta_ignorada_por_git():
     assert relativa.startswith("data/edge/")
 
 
-def test_el_repositorio_no_contiene_bases_sqlite(cli, base, paquete):
-    """Ni siquiera despues de ejercer el comando: todo vive bajo tmp_path."""
-    ejecutar(cli, base, "capturar", str(paquete))
+PATRONES_SQLITE = ("*.sqlite3", "*.sqlite", "*.db")
 
-    for patron in ("*.sqlite3", "*.sqlite", "*.db"):
-        encontrados = [
+
+def _bases_en_el_repositorio() -> set:
+    """Archivos SQLite que hay ahora mismo bajo la raiz del repositorio."""
+    encontradas = set()
+    for patron in PATRONES_SQLITE:
+        encontradas.update(
             ruta
             for ruta in RAIZ.rglob(patron)
             if ".venv" not in ruta.parts and ".git" not in ruta.parts
-        ]
-        assert encontrados == [], f"archivos {patron} dentro del repositorio"
+        )
+    return encontradas
+
+
+def test_el_cli_no_crea_bases_sqlite_en_el_repositorio(cli, base, paquete):
+    """Ejercer el comando no crea ninguna base dentro del repositorio.
+
+    **Corrige un defecto de aislamiento heredado de SCRUM-64.** La version
+    anterior exigia que no existiera *ningun* archivo SQLite bajo la raiz, y eso
+    contradice lo que el propio proyecto documenta: ``data/edge/`` esta en
+    ``.gitignore`` precisamente porque ahi viven las bases locales de
+    demostracion. La prueba fallaba en cuanto alguien ejecutaba la demostracion
+    manual del README --con `data/edge/demo_scrum64.sqlite3`, por ejemplo-- y
+    pasaba solo sobre un checkout recien clonado. Es decir, castigaba usar el
+    proyecto como esta documentado.
+
+    Lo que de verdad importa son dos cosas, y las dos se comprueban aqui y en la
+    prueba siguiente --``test_ninguna_base_sqlite_esta_versionada``--: que el
+    comando escriba **donde se le dice** y no siembre bases por el
+    repositorio, y que ninguna base acabe versionada.
+
+    Se compara el conjunto **antes y despues**, en vez de exigir el conjunto
+    vacio, asi que un artefacto local preexistente y correctamente ignorado no
+    afecta al resultado, pero uno nuevo creado por el comando si.
+    """
+    antes = _bases_en_el_repositorio()
+
+    ejecutar(cli, base, "capturar", str(paquete))
+
+    # El comando escribio de verdad, pero fuera del repositorio.
+    assert base.exists(), "la base indicada con --base deberia haberse creado"
+    assert RAIZ not in base.parents
+
+    nuevas = _bases_en_el_repositorio() - antes
+    assert nuevas == set(), f"el comando creo bases dentro del repositorio: {nuevas}"
+
+
+def test_ninguna_base_sqlite_esta_versionada(cli, base, paquete):
+    """La otra mitad: lo que Git sigue. Aqui el conjunto vacio si es exigible.
+
+    Un archivo local ignorado es un artefacto; uno *versionado* seria contenido
+    del repositorio, y una base SQLite nunca lo es. Se le pregunta a Git en vez
+    de reimplementar las reglas de ``.gitignore``, que es donde una comprobacion
+    casera se equivocaria.
+    """
+    import subprocess
+
+    ejecutar(cli, base, "capturar", str(paquete))
+
+    seguidos = subprocess.run(
+        ["git", "ls-files", "--", *PATRONES_SQLITE],
+        cwd=RAIZ,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    assert seguidos == [], f"hay bases SQLite versionadas: {seguidos}"
+
+    # Y todo lo que exista localmente esta efectivamente ignorado.
+    for ruta in _bases_en_el_repositorio():
+        relativa = ruta.relative_to(RAIZ).as_posix()
+        ignorado = subprocess.run(
+            ["git", "check-ignore", "-q", relativa], cwd=RAIZ
+        ).returncode
+        assert ignorado == 0, f"{relativa} no esta ignorado por Git"
