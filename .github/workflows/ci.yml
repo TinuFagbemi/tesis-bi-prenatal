@@ -73,7 +73,8 @@ jobs:
 
       # Primera capa: todo lo que no necesita un servidor PostgreSQL
       # (API, modelos, migración renderizada offline, dataset simulado,
-      # validación del cargador, contratos Pydantic y capa HTTP del endpoint).
+      # validación del cargador, contratos Pydantic, capa HTTP del endpoint y
+      # el nodo edge simulado, que usa archivos SQLite temporales propios).
       - name: Pruebas sin servidor PostgreSQL
         working-directory: backend
         run: |
@@ -81,7 +82,8 @@ jobs:
             --ignore=tests/test_migration_postgresql.py \
             --ignore=tests/test_load_mock_data_postgresql.py \
             --ignore=tests/test_ingestion_api_postgresql.py \
-            --ignore=tests/test_ingestion_idempotency_postgresql.py
+            --ignore=tests/test_ingestion_idempotency_postgresql.py \
+            --ignore=tests/test_edge_postgresql.py
 
       # Segunda capa: ciclo real upgrade -> downgrade -> upgrade -> alembic check
       # contra el servicio PostgreSQL de arriba. Corre antes que las pruebas del
@@ -133,10 +135,29 @@ jobs:
           SCRUM63_TEST_DATABASE_URL: postgresql+psycopg://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
         run: python -m pytest -q -rs tests/test_ingestion_idempotency_postgresql.py --junitxml=pytest-scrum63.xml
 
+      # Sexta capa: el ciclo real del nodo edge simulado -- SQLite temporal ->
+      # cliente HTTP -> endpoint de FastAPI -> PostgreSQL --, sobre la misma base
+      # efímera. Usa el mismo aislamiento por transacción revertida que SCRUM-62
+      # y SCRUM-63, no ejecuta DDL y no borra nada, así que la base queda como
+      # estaba.
+      #
+      # Va después de SCRUM-63 a propósito: aquella capa baja y vuelve a subir su
+      # revisión y toma candados exclusivos, y compartir la base con otra suite
+      # corriendo a la vez no sería seguro. En serie sí lo es.
+      #
+      # SQLite no necesita ningún servicio adicional: cada prueba crea su archivo
+      # dentro del ``tmp_path`` que le da pytest, y el runner lo descarta al
+      # terminar.
+      - name: Pruebas del nodo edge contra PostgreSQL (SCRUM-64)
+        working-directory: backend
+        env:
+          SCRUM64_TEST_DATABASE_URL: postgresql+psycopg://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
+        run: python -m pytest -q -rs tests/test_edge_postgresql.py --junitxml=pytest-scrum64.xml
+
       # La variable de entorno de cada capa es lo único que evita que su archivo
       # quede omitido, y pytest devuelve 0 aunque se salte todo. Por eso los
       # reportes JUnit se revisan después: un solo <skipped> en cualquiera de
-      # los cuatro tumba el job.
+      # los cinco tumba el job.
       - name: Verificar que ninguna prueba de PostgreSQL quedó omitida
         working-directory: backend
         run: |
@@ -150,6 +171,7 @@ jobs:
               "pytest-scrum61.xml": "SCRUM61_TEST_DATABASE_URL",
               "pytest-scrum62.xml": "SCRUM62_TEST_DATABASE_URL",
               "pytest-scrum63.xml": "SCRUM63_TEST_DATABASE_URL",
+              "pytest-scrum64.xml": "SCRUM64_TEST_DATABASE_URL",
           }
 
           fallo = False

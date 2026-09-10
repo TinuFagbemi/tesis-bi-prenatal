@@ -210,3 +210,7 @@ __marimo__/
 
 # Dataset simulado generado localmente
 data/generated/
+
+# Nodo edge simulado: base SQLite local de demostracion y sus archivos
+# auxiliares (-wal, -shm). Es un artefacto local, nunca contenido versionado.
+data/edge/

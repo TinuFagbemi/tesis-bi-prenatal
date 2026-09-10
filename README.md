@@ -124,7 +124,7 @@ tesis-bi-prenatal/
 
 ## Estado actual del proyecto
 
-El repositorio se encuentra en una etapa temprana. Lo que ya existe y funciona es el esquema operacional en PostgreSQL con sus migraciones, el generador del dataset simulado, su carga idempotente y la primera entrada de la API: el endpoint que recibe una sesión de monitoreo con sus lecturas biométricas. **Aún no existen la simulación del nodo edge, el ETL, el modelo dimensional, la autenticación y autorización, ni los dashboards**, y el endpoint disponible todavía no tiene control de acceso. El desarrollo activo se encuentra actualmente en el Sprint 4, y todo el trabajo se desarrolla y prueba en un entorno controlado/local, no en comunidades rurales reales.
+El repositorio se encuentra en una etapa temprana. Lo que ya existe y funciona es el esquema operacional en PostgreSQL con sus migraciones, el generador del dataset simulado, su carga idempotente, el endpoint que recibe una sesión de monitoreo con sus lecturas biométricas —con su contrato de idempotencia— y el nodo edge simulado, que captura paquetes sin conexión y los entrega después sin duplicarlos. **Aún no existen la sincronización automática (servicio permanente, detección de conectividad y reintentos programados), el ETL, el modelo dimensional, la autenticación y autorización, ni los dashboards**, y el endpoint disponible todavía no tiene control de acceso. El desarrollo activo se encuentra actualmente en el Sprint 4, y todo el trabajo se desarrolla y prueba en un entorno controlado/local, no en comunidades rurales reales.
 
 ## Roadmap general
 
@@ -514,9 +514,167 @@ que estar en el `head` de Alembic —el mismo `alembic upgrade head` del §1—.
 de siempre: **solo datos simulados**, y solo en el entorno local o de pruebas.
 Este endpoint no tiene autenticación y no es apto para producción.
 
+## Nodo edge simulado: captura sin conexión
+
+En una zona rural la conexión puede desaparecer justo mientras se está midiendo.
+El nodo edge simulado es la pieza que hace que eso no importe: **acepta una
+sesión de monitoreo aunque la API esté apagada**, la conserva aunque el proceso
+se cierre, y la entrega más tarde sin que se registre dos veces.
+
+Es un componente de software, no un dispositivo: sustituye al wearable para
+poder estudiar el comportamiento del sistema ante conectividad intermitente sin
+depender de hardware. Todos los datos que maneja son simulados y ficticios.
+
+### Cómo funciona
+
+```
+captura simulada
+  → transacción SQLite: el paquete y su registro de envío, juntos o ninguno
+  → cierre o reinicio del proceso, sin pérdida
+  → recuperación de conectividad
+  → envío a la API con la misma Idempotency-Key
+  → confirmación remota
+  → estado local ENVIADO
+```
+
+Tres piezas sostienen la garantía:
+
+1. **SQLite** guarda el paquete validado y su clave antes de que exista ningún
+   intento de red.
+2. **Una outbox** lleva el estado de entrega, separado del paquete —que ya no
+   vuelve a cambiar—.
+3. **La idempotencia de la API** (`Idempotency-Key`, §7 anterior) hace que
+   repetir un envío no cree una segunda sesión.
+
+Lo que se puede afirmar con precisión no es «entrega exactamente una vez» —eso
+no lo puede prometer ningún cliente sobre una red donde una respuesta se puede
+perder—, sino: **el paquete sobrevive localmente hasta confirmarse, un reintento
+repite exactamente la misma clave y el mismo cuerpo, y por eso el efecto en
+PostgreSQL ocurre una sola vez**.
+
+### Comandos
+
+Desde la raíz del repositorio:
+
+```powershell
+python scripts/edge_node.py init                          # crea o verifica el almacenamiento local
+python scripts/edge_node.py capturar paquete.json         # guarda un paquete, sin usar la red
+python scripts/edge_node.py estado                        # resumen de la outbox
+python scripts/edge_node.py enviar                        # una sola pasada de envío
+```
+
+El archivo del paquete tiene **exactamente** el mismo formato que el cuerpo de
+la solicitud documentado en el §3: el nodo valida con el mismo contrato y no
+añade ninguna regla propia. Todo lo que el endpoint acepta, la captura lo
+acepta. Lo normal es que `fecha_hora_sincronizacion` vaya en `null` —una captura
+sin conexión no se ha sincronizado todavía—, pero si el archivo ya trae un
+instante válido, se guarda tal cual. La razón está más abajo.
+
+`--base` apunta a otro archivo SQLite sin tocar la configuración, que es lo
+recomendable para una demostración:
+
+```powershell
+python scripts/edge_node.py --base data/edge/demo.sqlite3 init
+```
+
+### Configuración
+
+| Variable | Por omisión | Qué controla |
+| --- | --- | --- |
+| `EDGE_SQLITE_PATH` | `data/edge/nodo_edge.sqlite3` | archivo local del nodo |
+| `EDGE_API_BASE_URL` | `http://127.0.0.1:8000` | API a la que se entrega |
+| `EDGE_HTTP_TIMEOUT` | `10.0` | segundos de espera por respuesta |
+| `EDGE_BUSY_TIMEOUT_MS` | `5000` | milisegundos de espera por bloqueo de SQLite |
+`data/edge/` está en `.gitignore`: la base del nodo es un artefacto local y
+**nunca** se versiona. No hay ninguna variable para credenciales, porque el nodo
+no las necesita: escribe en un archivo local y habla HTTP con un endpoint que
+todavía no tiene autenticación.
+
+### Estados de la outbox
+
+| Estado | Significado |
+| --- | --- |
+| `PENDIENTE` | capturado localmente, nunca confirmado. Se intentará en la próxima pasada. |
+| `ENVIADO` | la API confirmó el paquete, como creación o como reenvío equivalente. **Terminal.** |
+| `FALLIDO` | el último intento no pudo confirmarse. Se conserva todo; `reintentable` dice si otra pasada puede volver a intentarlo o si hace falta revisarlo. |
+
+Un `FALLIDO` **reintentable** (error de transporte, `5xx`) vuelve a la cola. Un
+`FALLIDO` **en revisión** (`409`, `404`, `422`) no: repetir la misma operación
+esperando otra respuesta no es una política, es una espera.
+
+`ENVIADO` no se degrada nunca. Si dos envíos coincidieran, el que llegue después
+con un fallo tardío no puede sobrescribir una entrega ya confirmada.
+
+### La misma clave en cada intento
+
+Cada paquete recibe **un UUID4, generado una sola vez**, guardado en la misma
+transacción que el paquete. Esa cadena es la `Idempotency-Key` de todos sus
+intentos. No cambia tras un timeout, ni tras un reinicio, ni tras un `5xx`, ni
+cuando la API responde que es un reenvío.
+
+Eso es justamente lo que convierte un segundo intento en un *replay* en vez de
+una operación nueva: **una clave distinta con el mismo cuerpo crearía otra
+sesión**, que es el duplicado que este diseño existe para evitar.
+
+Por la misma razón el cuerpo tampoco se vuelve a construir: se guarda una vez y
+se reenvía tal cual, byte por byte.
+
+Eso es también lo que resuelve el caso de `fecha_hora_sincronizacion`. Ese campo
+forma parte de la huella con la que el servidor reconoce un reenvío, así que lo
+peligroso no es que traiga un valor sino que el valor **cambie entre intentos**:
+un instante refrescado en el segundo envío convertiría un reenvío legítimo en un
+`409`, justo después de una respuesta perdida, que es cuando más falta hace que
+funcione. Guardar el paquete una sola vez lo congela, y con eso el peligro
+desaparece sin necesidad de prohibir nada:
+
+- **El nodo nunca lo estampa.** Un paquete capturado sin conexión no se ha
+  sincronizado, así que el campo queda en `null`. El instante en que la entrega
+  se confirmó se registra en `enviado_en` de la outbox, que es donde ese hecho
+  realmente ocurre.
+- **Si el archivo de entrada ya lo trae**, y el contrato lo acepta, el nodo lo
+  acepta: lo guarda sin modificarlo y lo reenvía idéntico en cada intento.
+  Rechazarlo habría significado que el nodo aplicara un contrato más estricto
+  que el de la API a la que alimenta —dos juegos de reglas, libres de
+  separarse—.
+
+### Demostración de reinicio y recuperación
+
+Con la API **apagada**:
+
+```powershell
+python scripts/edge_node.py --base data/edge/demo.sqlite3 init
+python scripts/edge_node.py --base data/edge/demo.sqlite3 capturar paquete.json
+python scripts/edge_node.py --base data/edge/demo.sqlite3 estado
+```
+
+La captura funciona y el resumen muestra un `PENDIENTE`. El comando termina: no
+hay proceso residente. Volver a ejecutar `estado` —con el proceso anterior ya
+cerrado— muestra el mismo evento, con la misma clave.
+
+Con la API **encendida** (`uvicorn app.main:app` desde `backend/`, contra una
+base en `head`):
+
+```powershell
+python scripts/edge_node.py --base data/edge/demo.sqlite3 enviar
+python scripts/edge_node.py --base data/edge/demo.sqlite3 estado
+```
+
+El evento pasa a `ENVIADO`. Ejecutar `enviar` otra vez selecciona cero eventos:
+lo confirmado no se reenvía. Y si la confirmación se hubiera perdido, el
+siguiente intento sería un *replay* con los mismos identificadores —una sola
+sesión en PostgreSQL—.
+
+### Lo que este nodo todavía no hace
+
+`enviar` ejecuta **una** pasada finita y termina. No hay servicio permanente, ni
+detección automática de conectividad, ni reintentos programados, ni *backoff*.
+Lo que este componente demuestra es que **una pasada siempre se puede volver a
+ejecutar sin riesgo**; el mecanismo que la ejecute sola es trabajo posterior y
+no debe darse por implementado.
+
 ## Calidad del proyecto
 
-- **Integración continua:** el workflow [`CI`](.github/workflows/ci.yml) se ejecuta en cada Pull Request hacia `main`, instala el backend con Python 3.12 y corre las pruebas automatizadas. Contra un servicio PostgreSQL 16 efímero se validan las migraciones, la carga idempotente del dataset, el endpoint de ingesta y la idempotencia de reenvíos —concurrencia real incluida—; el job queda en rojo si alguna de esas pruebas se omite en lugar de ejecutarse.
+- **Integración continua:** el workflow [`CI`](.github/workflows/ci.yml) se ejecuta en cada Pull Request hacia `main`, instala el backend con Python 3.12 y corre las pruebas automatizadas. Contra un servicio PostgreSQL 16 efímero se validan las migraciones, la carga idempotente del dataset, el endpoint de ingesta, la idempotencia de reenvíos —concurrencia real incluida— y el ciclo completo del nodo edge simulado hasta PostgreSQL; el job queda en rojo si alguna de esas pruebas se omite en lugar de ejecutarse.
 - **Criterios de cierre de un ticket:** [Definition of Done](docs/definition_of_done.md).
 
 ## Estrategia de ramas
