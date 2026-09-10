@@ -71,20 +71,21 @@ la ejecución remota de CI ni la revisión de la otra autora.**
 
   | Bloque | Resultado |
   | --- | --- |
-  | Offline (sin servidor PostgreSQL) | 904 passed, 0 failed, 0 skipped |
+  | Offline (sin servidor PostgreSQL) | 925 passed, 0 failed, 0 skipped |
   | Migraciones — SCRUM-52 | 79 passed |
   | Cargador — SCRUM-61 | 25 passed |
   | Endpoint — SCRUM-62 | 46 passed |
   | Idempotencia — SCRUM-63 | 64 passed |
   | Nodo edge — SCRUM-64 | 20 passed |
   | Sincronización — SCRUM-65 | 16 passed |
-  | **Total** | **1154 passed, 0 failed, 0 skipped** |
+  | **Total** | **1175 passed, 0 failed, 0 skipped** |
 
-  El bloque offline pasa de 760 a 904 con 144 pruebas nuevas: 49 de la política
-  de reintentos, 22 de la migración local v1 → v2, 50 de la sincronización
-  —lease, reconciliación, resultados tardíos, pausa por transporte y códigos de
-  salida—, 15 de la traza, 6 de los límites de la familia HTTP reintentable, más
-  1 del CLI y 1 de almacenamiento añadidas al corregir dos pruebas heredadas.
+  El bloque offline pasa de 760 a 925 con 165 pruebas nuevas: 64 de la política
+  de reintentos, 22 de la migración local v1 → v2, 56 de la sincronización
+  —lease, censo, reconciliación, resultados tardíos, pausa por transporte y
+  códigos de salida—, 15 de la traza, 6 de los límites de la familia HTTP
+  reintentable, más 1 del CLI y 1 de almacenamiento añadidas al corregir dos
+  pruebas heredadas.
   Las 16 de SCRUM-65 con PostgreSQL son una suite **separada**, excluida del
   bloque offline y ejecutada en su propio paso del workflow. Ningún conteo
   anterior disminuyó.
@@ -99,7 +100,7 @@ la ejecución remota de CI ni la revisión de la otra autora.**
   reloj falso, de modo que un lease de 70 s con techo de 1 s se recorre entero
   sin gastar un segundo real. Las suites sensibles a tiempo y concurrencia
   —política, sincronización, traza, migración y emisor— se repitieron **tres
-  veces**: 196 passed en las tres, sin variación.
+  veces**: 217 passed en las tres, sin variación.
 
 - **La fórmula de espera, con su desfase acechante.** Se comprobó
   `delay(k) = min(base × 2^(k-1), techo)` para k de 1 a 6, la aplicación del
@@ -120,6 +121,25 @@ la ejecución remota de CI ni la revisión de la otra autora.**
   implementa—. Cada caso comprueba el desenlace completo: clasificación, estado,
   `reintentable`, `motivo_revision` y presencia o ausencia de
   `proximo_intento_en`.
+
+- **La fórmula del backoff, comprobada contra aritmética exacta.** No hay tope
+  fijo del exponente: la saturación se deriva de la base y del techo, de modo que
+  `delay(k) = min(base × 2^(k-1), techo)` se cumple para cualquier configuración
+  válida. Se comparó contra una referencia calculada con fracciones en siete
+  configuraciones —incluidas una base subnormal y un techo de `1e308`— sin una
+  sola divergencia. Un tope constante parecía equivalente y no lo era: con base
+  `2**-100` y techo `1.0`, el intento 101 devolvía `9.09e-13` en lugar de `1.0`,
+  un factor de `2**40`. Un ordinal enorme satura en el techo sin `OverflowError`.
+
+- **El censo, en una sola instantánea.** Se toma con **una** sentencia de solo
+  lectura, sin transacción de escritura y sin dejar nada abierto. Con dos
+  consultas existía una intercalación reproducible que hacía terminar al
+  sincronizador dejando un reintento programado atrás: la primera veía un evento
+  cuyo único intento estaba abierto, otro proceso lo cerraba y programaba el
+  reintento, la segunda ya no encontraba intentos abiertos, y el censo combinado
+  informaba de cero elegibles, cero programados y cero abiertos. Hay pruebas con
+  dos conexiones SQLite y un proxy instrumentado que afirman que el censo nunca
+  describe una cola sin trabajo mientras el evento real está programado.
 
 - **La terminalidad de «requiere revisión», con control negativo.** Retirada la
   guarda `NOT (estado = 'FALLIDO' AND reintentable = 0)` del `UPDATE`, la prueba
@@ -172,9 +192,10 @@ la ejecución remota de CI ni la revisión de la otra autora.**
   ignorado.
 
 - **Sin artefactos nuevos en el repositorio.** Tras la validación no quedan
-  bases SQLite creadas por las pruebas, ni reportes JUnit, ni ningún archivo sin
-  seguimiento aparte de los siete de la implementación. El único `*.sqlite3`
-  bajo la raíz es la evidencia manual, y `git ls-files` no sigue ninguna base.
+  bases SQLite creadas por las pruebas ni reportes JUnit, y el árbol de trabajo
+  queda **limpio**: no hay archivos de la implementación sin seguimiento, porque
+  todos están confirmados. El único `*.sqlite3` bajo la raíz es la evidencia
+  manual, y `git ls-files` no sigue ninguna base.
 
 - **PostgreSQL no cambió.** El ticket no añadió columnas, migraciones de Alembic
   ni modelos: la correlación se apoya en `operacional.idempotencia_solicitud`
@@ -188,19 +209,27 @@ la ejecución remota de CI ni la revisión de la otra autora.**
 ### Verificaciones externas requeridas para cerrar SCRUM-65
 
 El estado de estas verificaciones cambia fuera del contenido versionado y debe
-comprobarse directamente en GitHub y Jira antes de cerrar el ticket. **Ninguna
-está hecha todavía:**
+comprobarse directamente en GitHub y Jira antes de cerrar el ticket.
 
-- los cambios de SCRUM-65 siguen sin confirmar: no hay commits, ni rama
-  publicada, ni Pull Request;
-- GitHub Actions no se ha ejecutado para este trabajo;
+Ya hecho:
+
+- el trabajo está confirmado en commits y el árbol local está limpio;
+- la rama `feature/scrum-65-sincronizacion-reintentos-trazabilidad` está
+  **publicada** en GitHub, con sus commits en el remoto.
+
+Todavía **pendiente**:
+
+- **el Pull Request no existe** —y por tanto GitHub Actions no se ha ejecutado
+  para SCRUM-65: el workflow se dispara con `pull_request` hacia `main`, no con
+  un push a una rama de trabajo—;
 - la otra autora no lo ha revisado ni aprobado;
 - no está integrado en `main`;
 - no hay CI posterior al merge.
 
-La rama local ya está sincronizada con el `main` que integró SCRUM-64, así que
-el Pull Request tendrá `main` como base y
-`feature/scrum-65-sincronizacion-reintentos-trazabilidad` como head.
+La rama parte del `main` que integró SCRUM-64, así que el Pull Request tendrá
+`main` como base y
+`feature/scrum-65-sincronizacion-reintentos-trazabilidad` como head, y el CI se
+disparará solo al abrirlo.
 
 ## Estado verificado localmente de SCRUM-64
 
