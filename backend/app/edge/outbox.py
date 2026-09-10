@@ -106,11 +106,21 @@ def _sumar(momento: datetime, segundos: float) -> datetime:
 # ``i.id_outbox = i.id_outbox``, which is always true, and ``NOT EXISTS`` then
 # answers «is there any open attempt at all, anywhere» instead of «does *this*
 # event have one». Both callers therefore pass the outer table or its alias.
-_SIN_INTENTO_ABIERTO = (
-    "NOT EXISTS (SELECT 1 FROM intento_sincronizacion i"
-    "             WHERE i.id_outbox = {p}id_outbox"
-    "               AND i.finalizado_en IS NULL"
-    "               AND i.reconciliado_en IS NULL)"
+_INTENTOS_ABIERTOS_DEL_EVENTO = (
+    " FROM intento_sincronizacion i"
+    "  WHERE i.id_outbox = {p}id_outbox"
+    "    AND i.finalizado_en IS NULL"
+    "    AND i.reconciliado_en IS NULL"
+)
+
+_SIN_INTENTO_ABIERTO = "NOT EXISTS (SELECT 1" + _INTENTOS_ABIERTOS_DEL_EVENTO + ")"
+_CON_INTENTO_ABIERTO = "EXISTS (SELECT 1" + _INTENTOS_ABIERTOS_DEL_EVENTO + ")"
+
+# Vencimiento del lease mas proximo entre los intentos abiertos de un evento, o
+# NULL si no tiene ninguno. Correlacionada como las anteriores, para que el censo
+# pueda obtenerla en la misma sentencia que todo lo demas.
+_PROXIMO_RECONCILIABLE = (
+    "(SELECT MIN(i.reconciliable_en)" + _INTENTOS_ABIERTOS_DEL_EVENTO + ")"
 )
 
 # Qualifier used by the statements that do **not** declare an alias for the
@@ -871,9 +881,26 @@ def censar(
     for the future, the round selects nothing, and a run that should have waited
     would exit instead. So the loop asks the queue, not the round.
 
-    The two reads are separate statements because the second one lives in the
-    attempt table. A change between them can at worst cost one extra iteration,
-    which the loop handles.
+    **One statement, one snapshot.** This used to be two reads -- one over the
+    outbox, one over the attempt table -- and the claim that a change between
+    them «at worst costs one extra iteration» was wrong. The interleaving that
+    breaks it is short and reachable: the first read sees an event whose only
+    attempt is open, so it counts it as neither eligible nor scheduled; another
+    process then closes that attempt and leaves the event ``FALLIDO`` with a
+    future ``proximo_intento_en``; the second read finds no open attempts. The
+    combined census reports **zero** of everything, ``_proximo_despertar``
+    answers ``None``, and the run exits leaving a scheduled retry behind. Asking
+    for everything in a single ``SELECT`` removes the window: SQLite evaluates
+    one statement against one snapshot, so the two halves can no longer describe
+    different instants.
+
+    The counts over the attempt table therefore travel as correlated subqueries
+    rather than as a second read. ``con_intento_abierto`` counts **events** with
+    an open attempt, which is what the loop needs; the partial unique index bounds
+    those to one per event, so it also equals the number of open attempts.
+
+    Read-only: no ``BEGIN IMMEDIATE``, no write transaction, and nothing left
+    open when it returns.
     """
     instante = _texto(momento)
     parametros = {
@@ -889,12 +916,22 @@ def censar(
     )
     no_terminal = "NOT " + _TERMINAL.format(p="o.")
 
+    con_abierto = _CON_INTENTO_ABIERTO.format(p="o.")
+    proximo_reconciliable = _PROXIMO_RECONCILIABLE.format(p="o.")
+
     fila = conexion.execute(
         "SELECT"
         f"  SUM(CASE WHEN {elegible} THEN 1 ELSE 0 END) AS elegibles_ahora,"
         f"  SUM(CASE WHEN {programado} THEN 1 ELSE 0 END) AS programados,"
         f"  MIN(CASE WHEN {programado} THEN o.proximo_intento_en END)"
         "       AS proximo_programado,"
+        # Un intento abierto solo es trabajo pendiente mientras su evento sigue
+        # vivo: uno olvidado sobre un paquete ya entregado no debe mantener viva
+        # una ejecucion.
+        f"  SUM(CASE WHEN {no_terminal} AND {con_abierto} THEN 1 ELSE 0 END)"
+        "       AS con_intento_abierto,"
+        f"  MIN(CASE WHEN {no_terminal} THEN {proximo_reconciliable} END)"
+        "       AS proximo_reconciliable,"
         "  SUM(CASE WHEN o.estado = 'ENVIADO' THEN 1 ELSE 0 END) AS enviados,"
         "  SUM(CASE WHEN o.estado = 'FALLIDO' AND o.reintentable = 0"
         "           THEN 1 ELSE 0 END) AS requieren_revision,"
@@ -907,23 +944,12 @@ def censar(
         parametros,
     ).fetchone()
 
-    # Open attempts only count as pending work when their event is still live.
-    # One left behind on an already delivered package must not keep a run alive.
-    abiertos = conexion.execute(
-        "SELECT COUNT(*) AS abiertos, MIN(i.reconciliable_en) AS proximo "
-        "  FROM intento_sincronizacion i "
-        "  JOIN outbox o ON o.id_outbox = i.id_outbox "
-        " WHERE i.finalizado_en IS NULL AND i.reconciliado_en IS NULL"
-        "   AND i.id_outbox <= :id_maximo AND " + no_terminal,
-        parametros,
-    ).fetchone()
-
     return Censo(
         elegibles_ahora=int(fila["elegibles_ahora"] or 0),
         programados=int(fila["programados"] or 0),
         proximo_programado=fila["proximo_programado"],
-        con_intento_abierto=int(abiertos["abiertos"] or 0),
-        proximo_reconciliable=abiertos["proximo"],
+        con_intento_abierto=int(fila["con_intento_abierto"] or 0),
+        proximo_reconciliable=fila["proximo_reconciliable"],
         enviados=int(fila["enviados"] or 0),
         requieren_revision=int(fila["requieren_revision"] or 0),
         bloqueados_por_configuracion=int(fila["bloqueados"] or 0),

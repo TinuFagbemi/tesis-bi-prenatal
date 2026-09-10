@@ -1163,6 +1163,232 @@ def test_un_evento_con_herencia_compatible_no_se_resuelve(conexion):
 
 
 # ---------------------------------------------------------------------------
+# 7 ter. El censo es una sola instantanea
+#
+# Regresion de un defecto real. El censo se tomaba en **dos** sentencias -- una
+# sobre la outbox y otra sobre el historial-- y el docstring afirmaba que un
+# cambio entre ambas costaba, como mucho, una iteracion de mas. No era cierto:
+#
+#   1. la primera consulta ve un evento cuyo unico intento esta abierto, asi que
+#      no lo cuenta ni como elegible ni como programado;
+#   2. otro proceso cierra ese intento y deja el evento FALLIDO/reintentable con
+#      proximo_intento_en en el futuro;
+#   3. la segunda consulta ya no encuentra ningun intento abierto;
+#   4. el censo combinado devuelve cero de todo, _proximo_despertar responde
+#      None y el sincronizador termina dejando un reintento programado atras.
+# ---------------------------------------------------------------------------
+
+
+class ConexionEspia:
+    """Proxy que cuenta consultas y puede intercalar una escritura entre ellas.
+
+    ``antes_de`` es el numero de consulta antes de la cual se ejecuta la accion,
+    desde **otra conexion**. Con la implementacion de dos consultas, ``antes_de=2``
+    reproduce la intercalacion; con la de una sola, esa segunda consulta no
+    existe y la accion no llega a dispararse -- que es exactamente la propiedad
+    que se quiere afirmar.
+    """
+
+    def __init__(self, real, *, antes_de=None, accion=None):
+        self._real = real
+        self._antes_de = antes_de
+        self._accion = accion
+        self.llamadas = 0
+
+    def __getattr__(self, nombre):
+        return getattr(self._real, nombre)
+
+    def execute(self, *argumentos, **claves):
+        self.llamadas += 1
+        if self._accion is not None and self.llamadas == self._antes_de:
+            self._accion()
+        return self._real.execute(*argumentos, **claves)
+
+
+def _evento_con_intento_abierto(conexion, reloj, p):
+    """Un evento cuyo unico intento sigue abierto."""
+    (registro,) = capturar(conexion, 1, reloj=reloj)
+    reclamacion = reclamar(conexion, registro.id_outbox, p=p, momento=reloj())
+    return registro, reclamacion
+
+
+def _cerrar_y_programar(ruta, registro, reclamacion, momento, demora=30.0):
+    """Lo que hace el otro proceso: cierra el intento y programa el reintento."""
+
+    def accion():
+        with alm.conectar(ruta) as otra:
+            with alm.transaccion(otra):
+                outbox.finalizar_intento(
+                    otra, reclamacion.id_intento,
+                    resultado=ResultadoEntrega.REINTENTABLE, codigo_http=503,
+                    reproducido=None, error="error del servidor 503",
+                    demora=demora, momento=momento,
+                )
+                outbox.marcar_fallido(
+                    otra, registro.id_outbox, reintentable=True, codigo_http=503,
+                    error="error del servidor 503", momento=momento,
+                    proximo_intento_en=momento + timedelta(seconds=demora),
+                )
+
+    return accion
+
+
+def _es_coherente(censo) -> bool:
+    """El censo describe trabajo, o describe una cola sin trabajo. Nunca ambas."""
+    return censo.elegibles_ahora > 0 or censo.hay_trabajo_futuro
+
+
+def test_censar_usa_una_sola_consulta(tmp_path):
+    """Una sentencia, una instantanea. Es la forma la que da la garantia."""
+    ruta = tmp_path / "nodo_edge.sqlite3"
+    reloj = RelojFalso()
+    with alm.conectar(ruta) as conexion:
+        alm.inicializar(conexion)
+        _evento_con_intento_abierto(conexion, reloj, politica())
+
+        espia = ConexionEspia(conexion)
+        outbox.censar(espia, max_attempts=3, momento=reloj())
+        assert espia.llamadas == 1
+
+
+def test_censar_no_deja_una_transaccion_abierta(tmp_path):
+    """Es una lectura: sin BEGIN IMMEDIATE y sin nada abierto al volver."""
+    ruta = tmp_path / "nodo_edge.sqlite3"
+    reloj = RelojFalso()
+    with alm.conectar(ruta) as conexion:
+        alm.inicializar(conexion)
+        capturar(conexion, 2, reloj=reloj)
+        assert conexion.in_transaction is False
+        outbox.censar(conexion, max_attempts=3, momento=reloj())
+        assert conexion.in_transaction is False
+
+
+def test_una_escritura_intercalada_no_produce_un_censo_incoherente(tmp_path):
+    """La intercalacion exacta del defecto, con dos conexiones SQLite.
+
+    La escritura se dispara justo antes de la segunda consulta del censo. Con
+    una sola sentencia esa consulta no existe, la escritura no llega a
+    intercalarse y el censo describe integramente el estado anterior: un intento
+    abierto con su ``proximo_reconciliable``. Lo que no puede ocurrir --y es lo
+    que se afirma-- es que informe de una cola sin trabajo mientras el evento
+    real esta programado.
+    """
+    ruta = tmp_path / "nodo_edge.sqlite3"
+    reloj = RelojFalso()
+    p = politica()
+
+    with alm.conectar(ruta) as conexion:
+        alm.inicializar(conexion)
+        registro, reclamacion = _evento_con_intento_abierto(conexion, reloj, p)
+
+        espia = ConexionEspia(
+            conexion,
+            antes_de=2,
+            accion=_cerrar_y_programar(ruta, registro, reclamacion, reloj()),
+        )
+        censo = outbox.censar(espia, max_attempts=p.max_attempts, momento=reloj())
+
+        assert espia.llamadas == 1, "una sola consulta: no hay hueco donde colar nada"
+        assert _es_coherente(censo)
+        # Estado anterior, integro: el intento sigue abierto y con su vencimiento.
+        assert censo.con_intento_abierto == 1
+        assert censo.proximo_reconciliable is not None
+        assert censo.programados == 0
+
+
+def test_el_censo_posterior_ve_el_evento_programado(tmp_path):
+    """El otro lado de la moneda: censado despues, el estado posterior tambien
+    es coherente. Ambos son estados reales; el que no existe es la mezcla."""
+    ruta = tmp_path / "nodo_edge.sqlite3"
+    reloj = RelojFalso()
+    p = politica()
+
+    with alm.conectar(ruta) as conexion:
+        alm.inicializar(conexion)
+        registro, reclamacion = _evento_con_intento_abierto(conexion, reloj, p)
+        _cerrar_y_programar(ruta, registro, reclamacion, reloj())()
+
+        censo = outbox.censar(conexion, max_attempts=p.max_attempts, momento=reloj())
+
+        assert _es_coherente(censo)
+        assert censo.con_intento_abierto == 0
+        assert censo.programados == 1
+        assert censo.proximo_reconciliable is None
+        assert censo.proximo_programado is not None
+
+
+def test_el_sincronizador_no_termina_dejando_un_reintento_programado(tmp_path):
+    """La consecuencia que el defecto tenia sobre el bucle.
+
+    Con el censo incoherente, ``_proximo_despertar`` respondia ``None`` y la
+    ejecucion terminaba con trabajo pendiente. Aqui se comprueba el resultado
+    observable: el evento acaba entregado, no abandonado.
+    """
+    ruta = tmp_path / "nodo_edge.sqlite3"
+    reloj = RelojFalso()
+    dormir = Sleeper(reloj)
+    p = politica(max_attempts=4, base_delay_seconds=30.0, max_delay_seconds=30.0)
+
+    with alm.conectar(ruta) as conexion:
+        alm.inicializar(conexion)
+        registro, reclamacion = _evento_con_intento_abierto(conexion, reloj, p)
+        _cerrar_y_programar(ruta, registro, reclamacion, reloj())()
+
+        informe = sincro.sincronizar(
+            conexion,
+            cliente(Transporte(lambda peticion, n: creada(reproducido=True))),
+            politica=p, reloj=reloj, dormir=dormir,
+        )
+
+        assert dormir.esperas == [30.0], "espero el reintento programado"
+        assert informe.entregados == 1
+        assert informe.codigo_de_salida == sincro.CODIGO_EXITO
+        assert outbox.leer_evento(conexion, registro.id_outbox)["estado"] == (
+            EstadoEntrega.ENVIADO.value
+        )
+
+
+def test_los_dos_proximos_instantes_salen_de_la_misma_instantanea(tmp_path):
+    """Programado y reconciliable conviven, y ambos vienen de la misma lectura."""
+    ruta = tmp_path / "nodo_edge.sqlite3"
+    reloj = RelojFalso()
+    p = politica()
+
+    with alm.conectar(ruta) as conexion:
+        alm.inicializar(conexion)
+        # Uno con intento abierto; otro programado al futuro.
+        abierto, _ = _evento_con_intento_abierto(conexion, reloj, p)
+        (programado,) = capturar(conexion, 1, reloj=reloj)
+        with alm.transaccion(conexion):
+            outbox.reclamar_intento(
+                conexion, programado.id_outbox, max_attempts=p.max_attempts,
+                duracion_lease=p.duracion_del_lease, momento=reloj(),
+            )
+        historial_programado = historial(conexion, programado.id_outbox)[0]
+        with alm.transaccion(conexion):
+            outbox.finalizar_intento(
+                conexion, historial_programado["id_intento"],
+                resultado=ResultadoEntrega.REINTENTABLE, codigo_http=503,
+                reproducido=None, error="x", demora=45.0, momento=reloj(),
+            )
+            outbox.marcar_fallido(
+                conexion, programado.id_outbox, reintentable=True, codigo_http=503,
+                error="x", momento=reloj(),
+                proximo_intento_en=reloj() + timedelta(seconds=45),
+            )
+
+        espia = ConexionEspia(conexion)
+        censo = outbox.censar(espia, max_attempts=p.max_attempts, momento=reloj())
+
+        assert espia.llamadas == 1
+        assert censo.con_intento_abierto == 1
+        assert censo.programados == 1
+        assert censo.proximo_reconciliable is not None
+        assert censo.proximo_programado is not None
+        assert abierto.id_outbox != programado.id_outbox
+
+
+# ---------------------------------------------------------------------------
 # 8. Coherencia del par ultimo_http / ultimo_error (E3)
 # ---------------------------------------------------------------------------
 
