@@ -543,7 +543,19 @@ def test_escenario_5_el_nodo_se_reinicia_entre_el_fallo_y_la_entrega(
     # El nodo se apaga y vuelve. La clave y el payload siguen ahi.
     with alm.conectar(ruta_nodo) as conexion:
         alm.inicializar(conexion)
-        elegibles = outbox.seleccionar_elegibles(conexion, limite=10)
+
+        # Desde SCRUM-65 el fallo recuperable programa su proximo intento, asi
+        # que el evento no se perdio: esta esperando. La seleccion que respeta esa
+        # fecha todavia no lo devuelve; la que la ignora --la del envio manual, y
+        # la que ``ejecutar_pasada`` usa por omision-- si.
+        assert outbox.seleccionar_elegibles(conexion, limite=10) == ()
+        fila = outbox.leer_evento(conexion, registro.id_outbox)
+        assert fila["proximo_intento_en"] is not None
+        assert fila["intentos"] == 1
+
+        elegibles = outbox.seleccionar_elegibles(
+            conexion, limite=10, respetar_programacion=False
+        )
         assert len(elegibles) == 1
         assert elegibles[0].clave == registro.clave
 

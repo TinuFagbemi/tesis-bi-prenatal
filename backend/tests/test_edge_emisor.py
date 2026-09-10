@@ -508,9 +508,28 @@ def test_un_fallido_en_revision_no_vuelve_a_seleccionarse(conexion):
 
 
 def test_un_fallido_reintentable_si_vuelve_a_seleccionarse(conexion):
+    """Sigue en la cola, y desde SCRUM-65 tambien se sabe *cuando*.
+
+    Un fallo recuperable programa su proximo intento, asi que la seleccion que
+    respeta esa fecha no lo devuelve todavia; la que la ignora --la del comando
+    manual ``enviar``-- si. Las dos mitades se afirman aqui para que la politica
+    no pueda desaparecer sin que una de ellas falle.
+    """
     capturar_uno(conexion)
     ejecutar_pasada(conexion, cliente_con(respuesta_fija(503, {"detail": "x"})))
-    assert len(outbox.seleccionar_elegibles(conexion, limite=10)) == 1
+
+    assert outbox.seleccionar_elegibles(conexion, limite=10) == ()
+    assert (
+        len(
+            outbox.seleccionar_elegibles(
+                conexion, limite=10, respetar_programacion=False
+            )
+        )
+        == 1
+    )
+
+    despues = outbox.ahora_utc() + timedelta(hours=1)
+    assert len(outbox.seleccionar_elegibles(conexion, limite=10, ahora=despues)) == 1
 
 
 def test_el_limite_acota_la_pasada(conexion):
@@ -683,13 +702,16 @@ def test_una_pasada_sobre_un_evento_ya_entregado_lo_reporta_sin_degradarlo(conex
     original = emisor_modulo.outbox.seleccionar_elegibles
     try:
         emisor_modulo.outbox.seleccionar_elegibles = (
-            lambda conexion_bd, *, limite: seleccion_vieja
+            lambda conexion_bd, **argumentos: seleccion_vieja
         )
         resumen = ejecutar_pasada(conexion, cliente_con(transporte_caido(httpx.ReadTimeout)))
     finally:
         emisor_modulo.outbox.seleccionar_elegibles = original
 
+    # Desde SCRUM-65 ni siquiera se llega a la red: la reclamacion vuelve a
+    # comprobar el predicado completo y no encuentra nada que reclamar.
     assert resumen.ya_entregados == 1
+    assert resumen.reclamados == 0
     assert resumen.reintentables == 0
     assert estado_de(conexion, registro.id_outbox) == EstadoEntrega.ENVIADO.value
 
