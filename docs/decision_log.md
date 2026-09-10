@@ -1053,6 +1053,58 @@ también, así que una comprobación de signo escrita primero aceptaría un `NaN
 silencio. `math.isfinite` va delante de todo, y hay una prueba por cada campo y
 por cada uno de los tres valores no finitos.
 
+**Un `float` finito y positivo no basta: la duración tiene que ser
+*programable*.** Rechazar `<= 0` y no finito dejaba pasar dos bordes que sólo se
+ven cuando el número entra en un `timedelta`, que es exactamente donde acaban las
+tres duraciones configurables:
+
+- `timedelta(seconds=5e-324).total_seconds()` vale `0.0`. Una espera positiva se
+  convertía en ninguna espera. Y no es sólo el subnormal: `timedelta` **redondea**
+  al microsegundo más cercano en vez de truncar, así que toda la franja por debajo
+  de 1 µs programa algo distinto de lo configurado —cero de medio microsegundo
+  hacia abajo, y 1 µs entre medio microsegundo y uno—.
+- `timedelta(seconds=1e308)` lanza `OverflowError`. Ocurría **a mitad de una
+  pasada**, con el evento ya reclamado y el intento ya contado.
+
+De ahí sale un intervalo cerrado, y las dos cotas se eligen por motivos
+distintos. El mínimo, `timedelta.resolution` = **1 µs**, no es una decisión: es
+lo que la biblioteca sabe representar. El máximo, **86 400 s (24 h)**, sí lo es.
+No se usó el máximo de `float` ni `timedelta.max` porque serían cotas falsas —una
+espera de mil años es representable y no la programa nadie—; `sincronizar` es un
+comando finito que una persona lanza y espera, y una sola espera de más de un día
+sobrevive a cualquier sesión manual plausible y a la marca de agua de la propia
+ejecución. Con la base mínima, 24 horas siguen dejando sitio a 36 duplicaciones,
+muchas más de las que consume cualquier `max_attempts` sensato.
+
+**El lease es derivado, y también tiene que caber.** `duracion_del_lease` es
+`4 × http_timeout + 30`, y desborda mucho antes que el campo del que sale:
+`4 * 1e308` ya es `inf`. Se valida como una duración más, con lo que aparece un
+límite implícito —`http_timeout ≤ 21592.5 s`— que el mensaje de error explica en
+lugar de dejar al lector adivinar por qué un valor admisible falla.
+
+**Todo se comprueba en `__post_init__`, y esa es la decisión de fondo.** La
+alternativa era capturar `OverflowError` en cada punto que suma una duración a un
+instante —el emisor, el sincronizador, `outbox.reclamar_intento`—, y eso son tres
+sitios que pueden divergir y un fallo que llega cuando el evento ya está
+reclamado. Validando al construir, el rechazo ocurre antes de que exista una
+petición HTTP, antes de incrementar `intentos`, antes de insertar una fila en
+`intento_sincronizacion` y antes de mover ningún estado: la política que existe
+es utilizable, y no hay un solo `except OverflowError` en el paquete. Hay una
+prueba que lo afirma comparando la base entera —`captura_local`, `outbox` e
+`intento_sincronizacion`— antes y después de intentar sincronizar con seis
+configuraciones inválidas distintas.
+
+**Consecuencia sobre la regresión del tope fijo.** El caso que la demostraba
+—base `2**-100`, techo `1.0`— ya no es configurable, porque esa base está
+veinticinco órdenes de magnitud por debajo del mínimo. El peor caso que queda
+dentro del contrato es el intervalo entero, base 1 µs contra techo 24 h, donde
+caben 36.33 duplicaciones; es decir que **hoy** un `EXPONENTE_MAXIMO = 60` no se
+notaría. Se conserva igualmente el cálculo derivado con `math.frexp`, por dos
+razones: sigue siendo lo que hace `demora(k)` exacta y libre de desbordamiento
+para *cualquier* ordinal, y no depende de que esas dos constantes se queden donde
+están. Las pruebas se reescribieron para fijar eso —que la saturación cae donde
+la base dice— y no el número 60.
+
 **El límite se persiste por evento, en `max_intentos_aplicado`.** Se fija al
 reclamar el primer intento y no vuelve a cambiar. Así, editar `EDGE_MAX_ATTEMPTS`
 alcanza a los eventos que aún no han empezado y no reescribe retroactivamente el

@@ -113,6 +113,19 @@ la ejecución remota de CI ni la revisión de la otra autora.**
   `base_delay_seconds <= 0`, un techo por debajo de la base, `http_timeout <= 0`
   y booleanos colados como enteros.
 
+- **Duraciones no programables rechazadas, y en el sitio correcto.** Las tres
+  esperas configurables viven en un intervalo cerrado —`1 µs`, la resolución de
+  `timedelta`, hasta `86400 s`— porque un `float` finito y positivo no basta:
+  `5e-324` se convertía en cero al programarse y `1e308` hacía estallar
+  `timedelta` con un `OverflowError` a mitad de una pasada. Se comprobaron los
+  dos bordes inclusivos, toda la franja por debajo del microsegundo, un *ulp* por
+  encima del máximo, y el `http_timeout` cuyo **lease derivado** —`4 × timeout +
+  30`— se sale de la cota aunque el campo quepa. El rechazo ocurre al construir
+  la política: hay una prueba que fotografía `captura_local`, `outbox` e
+  `intento_sincronizacion` y verifica que seis configuraciones inválidas no
+  cambian una sola fila ni envían una sola petición HTTP. No queda ningún
+  `except OverflowError` en el paquete.
+
 - **Los límites de la familia HTTP reintentable, ejercidos.** `599` se reintenta;
   `600`, `699` y `999` no, porque no pertenecen a ninguna familia documentada y
   la condición `500 <= codigo` sin cota superior se los tragaba; y `408` y `429`
@@ -125,11 +138,18 @@ la ejecución remota de CI ni la revisión de la otra autora.**
 - **La fórmula del backoff, comprobada contra aritmética exacta.** No hay tope
   fijo del exponente: la saturación se deriva de la base y del techo, de modo que
   `delay(k) = min(base × 2^(k-1), techo)` se cumple para cualquier configuración
-  válida. Se comparó contra una referencia calculada con fracciones en siete
-  configuraciones —incluidas una base subnormal y un techo de `1e308`— sin una
-  sola divergencia. Un tope constante parecía equivalente y no lo era: con base
-  `2**-100` y techo `1.0`, el intento 101 devolvía `9.09e-13` en lugar de `1.0`,
-  un factor de `2**40`. Un ordinal enorme satura en el techo sin `OverflowError`.
+  válida. Se comparó contra una referencia calculada con fracciones en seis
+  configuraciones que recorren el dominio admisible de punta a punta —el caso por
+  omisión, un techo que no es potencia de dos, base igual a techo, el intervalo
+  entero y sus dos extremos degenerados— sin una sola divergencia. Un tope
+  constante parecía equivalente y no lo era: con base `2**-100` y techo `1.0`, el
+  intento 101 devolvía `9.09e-13` en lugar de `1.0`, un factor de `2**40`. Ese
+  par ya no es configurable —la base queda por debajo del mínimo programable—,
+  así que las pruebas se reescribieron sobre el rango más ancho que sí se admite,
+  base `1 µs` contra techo `24 h`, donde la saturación cae entre `demora(37)` y
+  `demora(38)`. Lo que fijan no es un número de duplicaciones, sino que ese punto
+  lo decide la base y no una constante. Un ordinal enorme —hasta `2**62`— satura
+  en el techo sin `OverflowError`.
 
 - **El censo, en una sola instantánea.** Se toma con **una** sentencia de solo
   lectura, sin transacción de escritura y sin dejar nada abierto. Con dos

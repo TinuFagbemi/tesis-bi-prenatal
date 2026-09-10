@@ -25,6 +25,22 @@ intentos de v1 hace su intento numero 4; si falla, le corresponde ``delay(4)``.
 No hay *jitter*. Un solo nodo no tiene manada que dispersar, y anadirlo
 complicaria las pruebas sin aportar nada demostrable.
 
+**Que duraciones se admiten.** No todo float finito y positivo es una espera que
+este comando pueda programar, asi que las tres duraciones configurables
+--``base_delay_seconds``, ``max_delay_seconds`` y ``http_timeout``-- y el lease
+derivado de la ultima viven en un intervalo cerrado:
+
+    1e-06 s (``timedelta.resolution``)  <=  duracion  <=  86400 s (24 horas)
+
+El minimo es la resolucion real de ``timedelta``, que redondea al microsegundo
+mas cercano: por debajo de el, lo que se programa deja de ser lo que se
+configuro --y por debajo de medio microsegundo se programa cero, es decir
+ninguna espera--. El maximo es una decision operacional
+--este es un comando finito que una persona lanza y espera-- y de paso mantiene
+lejos el ``OverflowError`` de ``timedelta``. Todo se comprueba **al construir la
+politica**, de modo que ningun punto de uso tenga que capturar ``OverflowError``
+por su cuenta ni descubrir el problema a mitad de una pasada.
+
 **El lease es una heuristica, no una garantia.** ``duracion_del_lease`` acota
 cuando un intento sin resultado *puede* darse por abandonado. No demuestra que
 la peticion original haya terminado: httpx no impone una fecha limite total, y
@@ -41,13 +57,15 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import timedelta
 
 # Total de intentos por evento, primer intento incluido.
 MAX_ATTEMPTS_POR_OMISION = 5
 
-# Espera base, en segundos. Debe ser estrictamente positiva: con 0 todas las
-# demoras valdrian 0 y no existiria espera incremental, que es justo lo que el
-# ticket promete. Las pruebas no necesitan el 0 porque el sleeper se inyecta.
+# Espera base, en segundos. Tiene que ser una duracion programable --al menos
+# ``RESOLUCION_MINIMA_SEGUNDOS``, mas abajo--: con 0 todas las demoras valdrian 0
+# y no existiria espera incremental, que es justo lo que el ticket promete. Las
+# pruebas no necesitan el 0 porque el sleeper se inyecta.
 BASE_DELAY_POR_OMISION = 1.0
 
 # Techo de la espera. Con la base por omision la progresion es 1, 2, 4, 8, 16,
@@ -64,6 +82,55 @@ BATCH_LIMIT_POR_OMISION = 50
 # una eleccion conservadora, no una cota demostrada.
 FACTOR_DE_FASES = 4
 MARGEN_DEL_LEASE_SEGUNDOS = 30.0
+
+# --- Que significa aqui una duracion "programable" -------------------------
+#
+# Un float finito y positivo no basta. Estas duraciones acaban dentro de un
+# ``timedelta`` --``momento + timedelta(seconds=demora)``-- y ahi hay dos bordes
+# que un ``> 0`` no ve:
+#
+#   timedelta(seconds=5e-324).total_seconds()  ==  0.0
+#   timedelta(seconds=1e308)                   ->  OverflowError
+#
+# El primero convierte una espera positiva en ninguna espera; el segundo revienta
+# al programarla. Y el lease derivado, ``4 * http_timeout + 30``, desborda a
+# ``inf`` mucho antes: ``4 * 1e308`` ya no es un numero.
+#
+# Asi que la politica distingue entre un float valido y una duracion que este
+# CLI puede realmente programar, y lo hace **al construirse**: cualquier
+# instancia que exista es utilizable, y ni el emisor, ni el sincronizador, ni la
+# outbox necesitan capturar ``OverflowError`` por su cuenta.
+
+# Resolucion efectiva de ``timedelta``: un microsegundo.
+#
+# ``timedelta`` no trunca, redondea al microsegundo mas cercano, asi que por
+# debajo de esta cota la espera que se programa deja de ser la que se configuro:
+#
+#   timedelta(seconds=5.1e-7).total_seconds()  ==  1e-06   (redondea hacia arriba)
+#   timedelta(seconds=5e-7).total_seconds()    ==  0.0     (y de aqui hacia abajo,
+#   timedelta(seconds=5e-324).total_seconds()  ==  0.0      ninguna espera)
+#
+# Admitir esa franja seria admitir una configuracion que el programa contradice
+# en silencio, de modo que el minimo es la resolucion misma.
+RESOLUCION_MINIMA_SEGUNDOS = timedelta.resolution.total_seconds()
+
+# Cota superior operacional: 24 horas.
+#
+# No es el maximo de ``float`` ni ``timedelta.max``, que serian cotas falsas: una
+# espera de mil anos es representable y no es programable por nadie. Este es un
+# comando **finito** que una persona lanza y espera; una sola espera mas larga
+# que un dia sobrevive a cualquier sesion manual plausible y a la marca de agua
+# de la propia ejecucion, que acota el trabajo a lo que existia al empezar. Con
+# la base minima, 24 horas siguen dejando sitio a 36 duplicaciones, muchas mas de
+# las que cualquier ``max_attempts`` sensato consume.
+#
+# La misma cota alcanza al lease, que es derivado, y por tanto acota tambien a
+# ``http_timeout``: de ``4 * http_timeout + 30 <= 86400`` sale
+# ``http_timeout <= 21592.5`` s. No hace falta escribir ese numero en ninguna
+# parte --lo comprueba la validacion explicita del lease-- pero el mensaje de
+# error dice de donde viene, para que quien lo lea sepa que campo bajar.
+LIMITE_OPERACIONAL_SEGUNDOS = 86_400.0
+
 
 def _exponente_de_saturacion(base: float, techo: float) -> int:
     """Primer exponente a partir del cual ``base * 2^e`` ya no baja del techo.
@@ -83,6 +150,15 @@ def _exponente_de_saturacion(base: float, techo: float) -> int:
     ``9.09e-13`` en lugar de ``1.0``, un factor de ``2**40``. La formula no
     admite un maximo constante, porque cuantas duplicaciones caben hasta el techo
     depende de la base.
+
+    Con las cotas de duracion programable ese par ya no es configurable, y el
+    peor caso del dominio actual es ``base = 1e-06`` con ``techo = 86400``: caben
+    36.33 duplicaciones, esta funcion devuelve 37, y la saturacion cae entre
+    ``demora(37)`` y ``demora(38)``. Es decir que hoy un tope de 60 no se
+    notaria. Se conserva el calculo derivado igualmente, por dos razones: sigue
+    siendo lo que hace ``demora`` exacta y libre de desbordamiento para
+    **cualquier** ordinal, y no depende de que esas dos constantes se queden
+    donde estan.
     """
     _, exponente_base = math.frexp(base)
     _, exponente_techo = math.frexp(techo)
@@ -121,6 +197,41 @@ def _numero_finito(valor: object) -> bool:
     return math.isfinite(float(valor))
 
 
+def _exigir_duracion_programable(valor: float, nombre: str, *, sufijo: str = "") -> None:
+    """Rechaza una duracion que este CLI no podria llegar a programar.
+
+    Tres rechazos, y cada uno nombra un fallo real y no un gusto:
+
+    * por debajo de un microsegundo ``timedelta`` la redondea a otra cosa --y a
+      cero por debajo de medio microsegundo--, de modo que la "espera
+      incremental" que promete el ticket deja de ser la configurada en silencio;
+    * por encima de la cota operacional la espera sobrevive a cualquier
+      ejecucion plausible de un comando finito;
+    * y cualquier valor que haria estallar ``timedelta(seconds=...)`` queda
+      descartado por esa misma cota mucho antes de tener la ocasion.
+
+    Se llama **al construir la politica**, nunca en mitad de una pasada: cuando
+    ``ConfiguracionInvalida`` sale de aqui todavia no hubo peticion HTTP, ni
+    incremento de ``outbox.intentos``, ni intento insertado, ni estado tocado.
+    """
+    if not _numero_finito(valor):
+        raise ConfiguracionInvalida(
+            f"'{nombre}' debe ser un numero finito: no se admiten NaN, infinito "
+            "ni valores no numericos." + sufijo
+        )
+    if valor < RESOLUCION_MINIMA_SEGUNDOS:
+        raise ConfiguracionInvalida(
+            f"'{nombre}' debe ser al menos {RESOLUCION_MINIMA_SEGUNDOS:g} s, la "
+            "resolucion de timedelta. Por debajo, la espera programada ya no es "
+            "la configurada, y por debajo de medio microsegundo es cero." + sufijo
+        )
+    if valor > LIMITE_OPERACIONAL_SEGUNDOS:
+        raise ConfiguracionInvalida(
+            f"'{nombre}' no puede superar {LIMITE_OPERACIONAL_SEGUNDOS:g} s "
+            "(24 horas), el limite operacional de este comando finito." + sufijo
+        )
+
+
 @dataclass(frozen=True)
 class PoliticaDeReintentos:
     """Cuantos intentos, cuanto se espera y cuantos eventos por ronda.
@@ -136,14 +247,6 @@ class PoliticaDeReintentos:
     http_timeout: float = 10.0
 
     def __post_init__(self) -> None:
-        # Finitud primero, siempre. Ver ``_numero_finito``.
-        for nombre in ("base_delay_seconds", "max_delay_seconds", "http_timeout"):
-            if not _numero_finito(getattr(self, nombre)):
-                raise ConfiguracionInvalida(
-                    f"'{nombre}' debe ser un numero finito: no se admiten NaN, "
-                    "infinito ni valores no numericos."
-                )
-
         if not _entero_valido(self.max_attempts) or self.max_attempts < 1:
             raise ConfiguracionInvalida(
                 "'max_attempts' debe ser un entero mayor o igual que 1. Incluye "
@@ -157,11 +260,11 @@ class PoliticaDeReintentos:
                 "maximo de eventos por ronda, no el maximo de intentos."
             )
 
-        if self.base_delay_seconds <= 0:
-            raise ConfiguracionInvalida(
-                "'base_delay_seconds' debe ser mayor que 0. Con 0 todas las "
-                "demoras valdrian 0 y no existiria espera incremental."
-            )
+        # Finitud primero, siempre --``_exigir_duracion_programable`` empieza
+        # por ahi-- y antes de la comparacion de abajo: con un ``NaN`` de por
+        # medio ``max_delay < base_delay`` es ``False`` y la politica pasaria.
+        for nombre in ("base_delay_seconds", "max_delay_seconds", "http_timeout"):
+            _exigir_duracion_programable(getattr(self, nombre), nombre)
 
         if self.max_delay_seconds < self.base_delay_seconds:
             raise ConfiguracionInvalida(
@@ -170,8 +273,18 @@ class PoliticaDeReintentos:
                 "primera espera."
             )
 
-        if self.http_timeout <= 0:
-            raise ConfiguracionInvalida("'http_timeout' debe ser mayor que 0.")
+        # El lease se deriva del timeout, asi que un timeout admisible puede
+        # producir un lease que no lo es. Se comprueba aqui, antes de que nadie
+        # reclame un intento con el.
+        _exigir_duracion_programable(
+            FACTOR_DE_FASES * self.http_timeout + MARGEN_DEL_LEASE_SEGUNDOS,
+            "duracion_del_lease",
+            sufijo=(
+                " Se deriva de 'http_timeout' como "
+                f"{FACTOR_DE_FASES} * http_timeout + {MARGEN_DEL_LEASE_SEGUNDOS:g}, "
+                "asi que reduce 'http_timeout' para que quepa."
+            ),
+        )
 
     # ------------------------------------------------------------------
     # Limite
@@ -235,5 +348,9 @@ class PoliticaDeReintentos:
         Heuristica conservadora de recuperacion, **no** un maximo real de la
         peticion ni una propiedad garantizada de httpx. Ver el docstring del
         modulo.
+
+        Siempre finita y programable: el constructor ya comprobo esta misma
+        expresion contra la resolucion minima y el limite operacional, asi que
+        quien la use puede pasarla a ``timedelta`` sin defenderse.
         """
         return FACTOR_DE_FASES * self.http_timeout + MARGEN_DEL_LEASE_SEGUNDOS

@@ -616,6 +616,42 @@ concreto es el que **adoptó** al reclamar su primer intento, guardado en
 han empezado a sincronizarse, y no reescribe el contrato de los que ya están en
 curso.
 
+#### Qué duraciones se admiten
+
+`EDGE_BASE_DELAY_SECONDS`, `EDGE_MAX_DELAY_SECONDS` y `EDGE_HTTP_TIMEOUT` no
+aceptan cualquier número positivo: tienen que ser duraciones que este comando
+pueda **programar de verdad**, porque las tres acaban dentro de un `timedelta`.
+
+```
+0.000001 s (1 µs)  ≤  duración  ≤  86400 s (24 h)
+```
+
+- **El mínimo es la resolución de `timedelta`.** No es un número elegido a ojo:
+  `timedelta` redondea al microsegundo más cercano, así que por debajo del
+  microsegundo la espera que se programa deja de ser la que se configuró, y por
+  debajo de medio microsegundo se programa **cero** —es decir, ninguna espera—.
+  `EDGE_BASE_DELAY_SECONDS=5e-324` pasaba el antiguo `> 0` y hacía desaparecer en
+  silencio la espera incremental que el ticket promete.
+- **El máximo es una decisión operacional.** No es el máximo de `float` ni
+  `timedelta.max`, que serían cotas falsas: una espera de mil años es
+  representable y no la programa nadie. `sincronizar` es un comando finito que
+  una persona lanza y espera, y una sola espera de más de un día sobrevive a
+  cualquier sesión manual. De paso deja fuera `1e308`, que hacía estallar
+  `timedelta` con un `OverflowError` a mitad de una pasada.
+
+El **lease** —`4 × EDGE_HTTP_TIMEOUT + 30 s`— se deriva de una de ellas, y tiene
+que caber en el mismo intervalo. De ahí sale un límite implícito:
+
+```
+EDGE_HTTP_TIMEOUT ≤ 21592.5 s
+```
+
+Todo esto se comprueba **al construir la política**, antes de que exista una
+petición HTTP, antes de incrementar `intentos`, antes de insertar una fila en
+`intento_sincronizacion` y antes de mover el estado de ningún evento. Una
+configuración fuera de rango termina en `Error: ...` por `stderr` y **código 1**,
+con la base local intacta.
+
 `data/edge/` está en `.gitignore`: la base del nodo es un artefacto local y
 **nunca** se versiona. No hay ninguna variable para credenciales, porque el nodo
 no las necesita: escribe en un archivo local y habla HTTP con un endpoint que
@@ -743,6 +779,12 @@ delay(k) = min(EDGE_BASE_DELAY_SECONDS × 2^(k-1), EDGE_MAX_DELAY_SECONDS)
 previos»: esa lectura produce un desfase de uno, y con intentos heredados de
 SCRUM-64 se nota enseguida. Un evento que trae tres intentos de la versión
 anterior hace el número 4; si falla, le toca `delay(4)`.
+
+Cuántas duplicaciones caben hasta el techo **depende de la base**, así que no hay
+ningún tope fijo del exponente: el punto de saturación se deriva de los dos
+valores configurados. Con las omisiones la séptima espera ya está en el techo;
+en el extremo del rango admisible —base 1 µs, techo 24 h— hacen falta 38. Un
+ordinal enorme devuelve el techo, sin desbordarse.
 
 > **`EDGE_MAX_ATTEMPTS` incluye el primer intento.** Con 3 hay un intento
 > inmediato y dos reintentos, y **no existe un cuarto intento automático**.
