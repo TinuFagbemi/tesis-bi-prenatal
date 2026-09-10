@@ -52,12 +52,33 @@ the only thing that differs is Spanish prose. Parsing that prose would make this
 client break the day somebody improves a sentence, so both are treated the same
 conservative way: keep everything, confirm nothing, ask for a human.
 
-**What is stored about a failure.** Never the request body, never a URL, never a
-raw server payload. A ``detail`` written by the API is safe text this project
-wrote and is kept truncated; a ``detail`` that is a *list* -- what FastAPI
-produces for an automatic 422 -- is deliberately **not** stored at all, because
-its entries carry an ``input`` field that echoes the value that was rejected,
-and for this contract that value is clinical data.
+**What is stored about a failure: nothing the server said.** Never the request
+body, never a URL, never a raw server payload -- and, since SCRUM-65, **not the
+server's ``detail`` either, not even when it is a plain string**.
+
+Keeping a textual ``detail`` because «this project wrote it» was a mistake, and a
+concrete one. The endpoint composes messages from the package it was given::
+
+    No existe un embarazo con id_embarazo=999999.
+
+Written by us, yes; derived from the payload, also yes. Truncating it bounds its
+length and does nothing about its content, so the value travelled into SQLite and
+came back out through ``traza``. The same applies to a ``detail`` that is a list:
+FastAPI's automatic 422 entries carry an ``input`` field echoing the rejected
+value, which for this contract is clinical data.
+
+So the remote text is replaced by a **local, static** message. What is kept is
+everything that does not depend on the payload and is enough to act on:
+
+* the HTTP status code;
+* the local classification -- ``ENTREGADO`` / ``REINTENTABLE`` / ``RECHAZADO``;
+* the general kind of answer -- conflict, refusal, server error, unexpected;
+* the *shape* of the remote ``detail`` -- absent, textual, structured with N
+  entries -- which is a fact about the response, not about the package;
+* the correlation id, which the trace already carries.
+
+Nothing here parses or matches the server's Spanish prose. That was never a
+diagnosis and would break the day somebody improved a sentence.
 
 All data handled here is fictitious and simulated.
 """
@@ -86,11 +107,6 @@ REPLAY_SI = "true"
 REPLAY_NO = "false"
 
 CODIGO_CREADO = 201
-
-# Truncation of any server-provided text before it is stored. The endpoint's own
-# messages are shorter than this; the bound exists so that nothing unexpected
-# can arrive and be kept whole.
-LONGITUD_MAXIMA_DE_DETALLE = 160
 
 
 # ``ResultadoEntrega`` is declared in :mod:`app.edge.estados` and re-exported
@@ -166,13 +182,18 @@ def contar_lecturas(payload_json: str) -> int:
     return len(lecturas)
 
 
-def _detalle_seguro(respuesta: httpx.Response) -> str:
-    """A short, safe summary of an error answer.
+def _forma_del_detalle(respuesta: httpx.Response) -> str:
+    """The *shape* of the remote ``detail``, never a character of its content.
 
-    A string ``detail`` is text the API authored for a caller to read, and it is
-    kept truncated. Anything else -- notably the list FastAPI builds for an
-    automatic 422, whose entries echo the rejected input -- is reduced to its
-    shape, never its content.
+    Every branch returns a literal written here. Nothing that came over the wire
+    is interpolated, so no value of the package can travel into the outbox
+    through this function -- which is precisely what the previous version, which
+    kept a textual ``detail`` truncated, allowed.
+
+    The shape is still worth recording: «structured with 3 entries» tells whoever
+    reads a trace that the server refused the body field by field, and
+    «respuesta sin cuerpo JSON» tells them something answered that is not this
+    API at all. Both are facts about the response, not about the patient.
     """
     try:
         cuerpo: Any = respuesta.json()
@@ -184,7 +205,7 @@ def _detalle_seguro(respuesta: httpx.Response) -> str:
 
     detalle = cuerpo["detail"]
     if isinstance(detalle, str):
-        return detalle[:LONGITUD_MAXIMA_DE_DETALLE]
+        return "detalle textual (no se registra)"
     if isinstance(detalle, list):
         return f"detalle estructurado con {len(detalle)} entrada(s) (no se registra)"
     return "detalle no textual (no se registra)"
@@ -208,7 +229,7 @@ def clasificar(respuesta: httpx.Response, *, lecturas_enviadas: int) -> Entrega:
         return Entrega(
             resultado=ResultadoEntrega.RECHAZADO,
             codigo_http=codigo,
-            error=f"conflicto 409: {_detalle_seguro(respuesta)}",
+            error=f"conflicto 409: {_forma_del_detalle(respuesta)}",
         )
 
     if 500 <= codigo < 600:
@@ -223,14 +244,14 @@ def clasificar(respuesta: httpx.Response, *, lecturas_enviadas: int) -> Entrega:
         return Entrega(
             resultado=ResultadoEntrega.REINTENTABLE,
             codigo_http=codigo,
-            error=f"error del servidor {codigo}: {_detalle_seguro(respuesta)}",
+            error=f"error del servidor {codigo}: {_forma_del_detalle(respuesta)}",
         )
 
     if 400 <= codigo < 500:
         return Entrega(
             resultado=ResultadoEntrega.RECHAZADO,
             codigo_http=codigo,
-            error=f"rechazo {codigo}: {_detalle_seguro(respuesta)}",
+            error=f"rechazo {codigo}: {_forma_del_detalle(respuesta)}",
         )
 
     # Any other 2xx, a 3xx, or a non-standard code at or above 600. The only
