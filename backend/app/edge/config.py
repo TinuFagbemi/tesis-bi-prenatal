@@ -22,10 +22,19 @@ backend's settings carry ``database_url``, and the edge must never open a
 PostgreSQL connection -- everything it sends goes through the API. Keeping the
 two apart means that rule is enforced by what is reachable, not by discipline.
 
-``settings_edge`` is built at import time, like the backend's, for the CLI to
-use. The library functions in this package never read it: they take their
-arguments explicitly, so a test can point them at a temporary file without
-touching the environment.
+**Nothing is built at import time (SCRUM-65).** There used to be a
+``settings_edge = EdgeSettings()`` at module level, and it made a whole class of
+misconfiguration unreportable: ``EDGE_MAX_ATTEMPTS=abc`` raised Pydantic's
+``ValidationError`` while the module was still being imported, so the failure
+happened *before* ``main()`` existed, before its ``try``, and before anything
+could turn it into a sentence and an exit code. What the user got was a
+traceback.
+
+So the settings are loaded by :func:`cargar_settings_edge`, explicitly, from
+inside the CLI's controlled boundary. The library functions in this package never
+read a global: they take their arguments explicitly, so a test can point them at a
+temporary file without touching the environment, and importing this module --
+or ``app.edge``, or the CLI script -- reads nothing and can fail at nothing.
 
 All data handled by this node is fictitious and simulated.
 """
@@ -34,6 +43,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pydantic import ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.edge.politica import (
@@ -41,6 +51,7 @@ from app.edge.politica import (
     BATCH_LIMIT_POR_OMISION,
     MAX_ATTEMPTS_POR_OMISION,
     MAX_DELAY_POR_OMISION,
+    ConfiguracionInvalida,
     PoliticaDeReintentos,
 )
 
@@ -114,4 +125,41 @@ class EdgeSettings(BaseSettings):
         )
 
 
-settings_edge = EdgeSettings()
+def _detalle_de_validacion(error: ValidationError) -> str:
+    """Which ``EDGE_*`` variables are wrong and why, without echoing a value.
+
+    Pydantic's own rendering of a ``ValidationError`` embeds ``input_value``,
+    and an environment variable can carry anything -- a path with somebody's
+    name, a token pasted by mistake. So the message is rebuilt from the two
+    parts of each error that are schema and not data: the field and the
+    machine-readable error type. Same rule ``app.edge.captura`` follows for a
+    rejected package: pick the safe fields one by one, never format the
+    exception.
+    """
+    partes = []
+    for detalle in error.errors():
+        campo = ".".join(str(tramo) for tramo in detalle.get("loc", ()))
+        variable = f"EDGE_{campo.upper()}" if campo else "EDGE_*"
+        partes.append(f"{variable}: {detalle.get('type', 'invalido')}")
+    return "; ".join(partes)
+
+
+def cargar_settings_edge() -> EdgeSettings:
+    """Read the ``EDGE_*`` settings, turning a bad environment into a sentence.
+
+    The only place this package builds an :class:`EdgeSettings`. It is called
+    from inside the CLI's ``try``, so a malformed variable becomes exit code 1
+    and one line on stderr instead of a traceback.
+
+    Only :class:`pydantic.ValidationError` is caught -- not ``Exception``: a
+    missing file or a permission error is not a configuration problem and must
+    not be disguised as one.
+    """
+    try:
+        return EdgeSettings()
+    except ValidationError as error:
+        raise ConfiguracionInvalida(
+            "La configuracion del nodo edge no es valida "
+            f"({_detalle_de_validacion(error)}). Revisa las variables EDGE_* "
+            "del entorno o del archivo .env."
+        ) from error

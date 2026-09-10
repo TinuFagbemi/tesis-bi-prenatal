@@ -67,8 +67,11 @@ from app.edge import (  # noqa: E402
     leer_version,
     preparar_directorio,
     resumen,
-    settings_edge,
     sincronizar,
+)
+from app.edge.config import (  # noqa: E402
+    EdgeSettings,
+    cargar_settings_edge,
 )
 from app.edge.almacenamiento import VERSION_ANTERIOR  # noqa: E402
 
@@ -113,8 +116,13 @@ def numero_positivo(texto: str) -> float:
     return valor
 
 
-def construir_parser() -> argparse.ArgumentParser:
-    """Argumentos del comando.
+def construir_parser(settings: EdgeSettings) -> argparse.ArgumentParser:
+    """Argumentos del comando, con los valores por omision de la configuracion.
+
+    Recibe la configuracion en lugar de leer un global: los valores por omision
+    que publica ``--help`` salen del entorno, asi que construir el parser puede
+    fallar si el entorno esta mal, y eso tiene que ocurrir dentro del limite
+    controlado de ``main()``.
 
     No existe una opcion para pasar credenciales ni una URL de base de datos: el
     nodo edge no las necesita y no debe poder recibirlas.
@@ -129,7 +137,7 @@ def construir_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--base",
         type=Path,
-        default=settings_edge.sqlite_path,
+        default=settings.sqlite_path,
         help=(
             "Archivo SQLite del nodo. Por omision, el de EDGE_SQLITE_PATH. "
             "No debe versionarse."
@@ -170,10 +178,10 @@ def construir_parser() -> argparse.ArgumentParser:
     enviar_parser.add_argument(
         "--limite",
         type=entero_positivo,
-        default=settings_edge.batch_limit,
+        default=settings.batch_limit,
         help=(
             "Maximo de eventos que esta ronda intenta (por omision "
-            f"{settings_edge.batch_limit}). No es el maximo de intentos."
+            f"{settings.batch_limit}). No es el maximo de intentos."
         ),
     )
 
@@ -187,23 +195,23 @@ def construir_parser() -> argparse.ArgumentParser:
     sincronizar_parser.add_argument(
         "--limite",
         type=entero_positivo,
-        default=settings_edge.batch_limit,
+        default=settings.batch_limit,
         help="Maximo de eventos por ronda. No es el maximo de intentos.",
     )
     sincronizar_parser.add_argument(
         "--max-intentos",
         type=entero_positivo,
-        default=settings_edge.max_attempts,
+        default=settings.max_attempts,
         help=(
             "Total de intentos por evento, **incluido el primero** (por omision "
-            f"{settings_edge.max_attempts}). Solo se aplica a eventos que "
+            f"{settings.max_attempts}). Solo se aplica a eventos que "
             "todavia no adoptaron una politica."
         ),
     )
     sincronizar_parser.add_argument(
         "--espera-base",
         type=numero_positivo,
-        default=settings_edge.base_delay_seconds,
+        default=settings.base_delay_seconds,
         help=(
             "Segundos de la primera espera. Las siguientes se duplican hasta el "
             "techo."
@@ -212,7 +220,7 @@ def construir_parser() -> argparse.ArgumentParser:
     sincronizar_parser.add_argument(
         "--espera-maxima",
         type=numero_positivo,
-        default=settings_edge.max_delay_seconds,
+        default=settings.max_delay_seconds,
         help="Techo de la espera, en segundos.",
     )
 
@@ -236,14 +244,14 @@ def construir_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _abrir(ruta: Path):
+def _abrir(ruta: Path, settings: EdgeSettings):
     """Conexion al archivo indicado, creando solo su carpeta."""
     preparar_directorio(ruta)
-    return conectar(ruta, espera_de_bloqueo_ms=settings_edge.busy_timeout_ms)
+    return conectar(ruta, espera_de_bloqueo_ms=settings.busy_timeout_ms)
 
 
-def orden_init(ruta: Path) -> int:
-    with _abrir(ruta) as conexion:
+def orden_init(ruta: Path, settings: EdgeSettings) -> int:
+    with _abrir(ruta, settings) as conexion:
         anterior = leer_version(conexion)
         escrito = inicializar(conexion)
     if not escrito:
@@ -259,7 +267,7 @@ def orden_init(ruta: Path) -> int:
     return CODIGO_DE_EXITO
 
 
-def orden_capturar(ruta_base: Path, ruta_paquete: Path) -> int:
+def orden_capturar(ruta_base: Path, ruta_paquete: Path, settings: EdgeSettings) -> int:
     try:
         paquete = json.loads(ruta_paquete.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -273,7 +281,7 @@ def orden_capturar(ruta_base: Path, ruta_paquete: Path) -> int:
         )
         return CODIGO_DE_ERROR
 
-    with _abrir(ruta_base) as conexion:
+    with _abrir(ruta_base, settings) as conexion:
         inicializar(conexion)
         registro = capturar(conexion, paquete)
 
@@ -285,8 +293,8 @@ def orden_capturar(ruta_base: Path, ruta_paquete: Path) -> int:
     return CODIGO_DE_EXITO
 
 
-def orden_estado(ruta: Path) -> int:
-    with _abrir(ruta) as conexion:
+def orden_estado(ruta: Path, settings: EdgeSettings) -> int:
+    with _abrir(ruta, settings) as conexion:
         inicializar(conexion)
         actual = resumen(conexion)
     print("Outbox del nodo edge:")
@@ -298,17 +306,17 @@ def orden_estado(ruta: Path) -> int:
     return CODIGO_DE_EXITO
 
 
-def _cliente_http():
+def _cliente_http(settings: EdgeSettings):
     return httpx.Client(
-        base_url=settings_edge.api_base_url, timeout=settings_edge.http_timeout
+        base_url=settings.api_base_url, timeout=settings.http_timeout
     )
 
 
-def orden_enviar(ruta: Path, limite: int) -> int:
-    politica = settings_edge.politica()
-    with _abrir(ruta) as conexion:
+def orden_enviar(ruta: Path, limite: int, settings: EdgeSettings) -> int:
+    politica = settings.politica()
+    with _abrir(ruta, settings) as conexion:
         inicializar(conexion)
-        with _cliente_http() as http:
+        with _cliente_http(settings) as http:
             pasada = ejecutar_pasada(
                 conexion, ClienteEdge(http), limite=limite, politica=politica
             )
@@ -330,19 +338,24 @@ def orden_enviar(ruta: Path, limite: int) -> int:
 
 
 def orden_sincronizar(
-    ruta: Path, limite: int, max_intentos: int, espera_base: float, espera_maxima: float
+    ruta: Path,
+    limite: int,
+    max_intentos: int,
+    espera_base: float,
+    espera_maxima: float,
+    settings: EdgeSettings,
 ) -> int:
     politica = PoliticaDeReintentos(
         max_attempts=max_intentos,
         base_delay_seconds=espera_base,
         max_delay_seconds=espera_maxima,
         batch_limit=limite,
-        http_timeout=settings_edge.http_timeout,
+        http_timeout=settings.http_timeout,
     )
 
-    with _abrir(ruta) as conexion:
+    with _abrir(ruta, settings) as conexion:
         inicializar(conexion)
-        with _cliente_http() as http:
+        with _cliente_http(settings) as http:
             informe = sincronizar(conexion, ClienteEdge(http), politica=politica)
 
     censo = informe.censo
@@ -407,8 +420,10 @@ def _situacion(traza) -> str:
     return "pendiente de un nuevo intento"
 
 
-def orden_traza(ruta: Path, clave: str | None, id_outbox: int | None) -> int:
-    with _abrir(ruta) as conexion:
+def orden_traza(
+    ruta: Path, clave: str | None, id_outbox: int | None, settings: EdgeSettings
+) -> int:
+    with _abrir(ruta, settings) as conexion:
         inicializar(conexion)
         traza = leer_traza(conexion, clave=clave, id_outbox=id_outbox)
 
@@ -486,17 +501,34 @@ def orden_traza(ruta: Path, clave: str | None, id_outbox: int | None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    argumentos = construir_parser().parse_args(argv)
+    """El limite controlado del comando.
 
+    **La configuracion se carga aqui dentro, y el parser se construye aqui
+    dentro.** Antes, ``EdgeSettings`` se instanciaba al importar el modulo y el
+    parser se construia antes del ``try``, asi que un ``EDGE_MAX_ATTEMPTS=abc``
+    reventaba con un ``ValidationError`` de Pydantic --con su traceback-- en un
+    punto donde nadie podia convertirlo en un mensaje y un codigo de salida. Los
+    valores por omision que publica ``--help`` salen de esa configuracion, de
+    modo que construir el parser tambien puede fallar por el entorno y tambien
+    tiene que estar cubierto.
+
+    Solo se capturan las tres excepciones propias del proyecto; nunca
+    ``Exception``. Y ``SystemExit`` --lo que argparse lanza ante un argumento mal
+    escrito-- no deriva de ``Exception``, asi que atraviesa este bloque intacto y
+    argparse conserva su comportamiento y su codigo 2 de siempre.
+    """
     try:
+        settings = cargar_settings_edge()
+        argumentos = construir_parser(settings).parse_args(argv)
+
         if argumentos.orden == "init":
-            return orden_init(argumentos.base)
+            return orden_init(argumentos.base, settings)
         if argumentos.orden == "capturar":
-            return orden_capturar(argumentos.base, argumentos.ruta)
+            return orden_capturar(argumentos.base, argumentos.ruta, settings)
         if argumentos.orden == "estado":
-            return orden_estado(argumentos.base)
+            return orden_estado(argumentos.base, settings)
         if argumentos.orden == "enviar":
-            return orden_enviar(argumentos.base, argumentos.limite)
+            return orden_enviar(argumentos.base, argumentos.limite, settings)
         if argumentos.orden == "sincronizar":
             return orden_sincronizar(
                 argumentos.base,
@@ -504,12 +536,16 @@ def main(argv: list[str] | None = None) -> int:
                 argumentos.max_intentos,
                 argumentos.espera_base,
                 argumentos.espera_maxima,
+                settings,
             )
-        return orden_traza(argumentos.base, argumentos.clave, argumentos.id_outbox)
+        return orden_traza(
+            argumentos.base, argumentos.clave, argumentos.id_outbox, settings
+        )
 
     except (ErrorDeAlmacenamiento, ErrorDeCaptura, ConfiguracionInvalida) as error:
         # ``detalle`` es texto escrito por este proyecto: no lleva valores del
-        # paquete, ni rutas ajenas, ni mensajes del driver.
+        # paquete, ni rutas ajenas, ni mensajes del driver, ni el diagnostico
+        # completo de Pydantic.
         print(f"Error: {error.detalle}", file=sys.stderr)
         return CODIGO_DE_ERROR
 

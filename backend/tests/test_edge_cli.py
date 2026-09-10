@@ -24,6 +24,14 @@ import pytest
 from app.edge import almacenamiento as alm
 from app.edge import outbox
 from app.edge.cliente import CABECERA_REPLAY
+from app.edge.config import (
+    ESPERA_DE_BLOQUEO_POR_OMISION,
+    RUTA_SQLITE_POR_OMISION,
+    TIMEOUT_HTTP_POR_OMISION,
+    URL_API_POR_OMISION,
+    cargar_settings_edge,
+)
+from app.edge.politica import ConfiguracionInvalida
 from app.edge.estados import EstadoEntrega
 from tests.test_edge_captura import PAQUETE_DE_UNA_LECTURA
 
@@ -278,8 +286,127 @@ def test_el_comando_exige_una_orden(cli):
         cli.main([])
 
 
+# ---------------------------------------------------------------------------
+# La configuracion se carga dentro del limite controlado
+#
+# Habia un ``settings_edge = EdgeSettings()`` a nivel de modulo. Con
+# ``EDGE_MAX_ATTEMPTS=abc``, Pydantic lanzaba ValidationError **durante el
+# import**: antes de que ``main()`` existiera, antes de su ``try``, y por tanto
+# antes de que nada pudiera convertirlo en un mensaje y un codigo de salida. Lo
+# que veia la usuaria era un traceback.
+# ---------------------------------------------------------------------------
+
+VARIABLES_INVALIDAS = [
+    "EDGE_MAX_ATTEMPTS",
+    "EDGE_BASE_DELAY_SECONDS",
+    "EDGE_BUSY_TIMEOUT_MS",
+    "EDGE_HTTP_TIMEOUT",
+]
+
+
+@pytest.mark.parametrize("variable", VARIABLES_INVALIDAS)
+def test_una_variable_de_entorno_mal_tipada_devuelve_codigo_1(
+    cli, base, variable, monkeypatch, capsys
+):
+    monkeypatch.setenv(variable, "abc")
+
+    assert ejecutar(cli, base, "estado") == 1
+
+    error = capsys.readouterr().err
+    assert error.startswith("Error: ")
+    assert variable in error
+    assert "EDGE_*" in error
+
+
+@pytest.mark.parametrize("variable", VARIABLES_INVALIDAS)
+def test_una_configuracion_invalida_no_filtra_el_diagnostico_de_pydantic(
+    cli, base, variable, monkeypatch, capsys
+):
+    """Ni traceback, ni el valor rechazado, ni el informe completo de Pydantic.
+
+    El mensaje se reconstruye con el campo y el tipo de error --lo unico que es
+    esquema y no dato--, porque una variable de entorno puede llevar cualquier
+    cosa: una ruta con el nombre de alguien, un token pegado por error.
+    """
+    monkeypatch.setenv(variable, "valor-secreto-que-no-debe-verse")
+
+    assert ejecutar(cli, base, "estado") == 1
+
+    error = capsys.readouterr().err
+    assert "valor-secreto-que-no-debe-verse" not in error
+    for prohibido in (
+        "Traceback",
+        "validation error",
+        "input_value",
+        "input_type",
+        "For further information",
+        "pydantic",
+    ):
+        assert prohibido not in error
+    # Una sola linea: nada de volcados.
+    assert len(error.strip().splitlines()) == 1
+
+
+def test_importar_el_paquete_no_construye_la_configuracion(monkeypatch):
+    """Con el entorno roto, importar sigue siendo seguro.
+
+    Se recargan los modulos a proposito: si alguno volviera a construir un
+    ``EdgeSettings`` al importarse, esto fallaria aqui y no en mitad de un
+    comando.
+    """
+    import importlib
+
+    import app.edge
+    import app.edge.config
+
+    monkeypatch.setenv("EDGE_MAX_ATTEMPTS", "abc")
+    importlib.reload(app.edge.config)
+    importlib.reload(app.edge)
+
+    assert not hasattr(app.edge.config, "settings_edge")
+    assert not hasattr(app.edge, "settings_edge")
+    assert "cargar_settings_edge" in app.edge.__all__
+
+    # Y la carga explicita si falla, de forma controlada.
+    with pytest.raises(ConfiguracionInvalida):
+        app.edge.config.cargar_settings_edge()
+
+    monkeypatch.delenv("EDGE_MAX_ATTEMPTS")
+    importlib.reload(app.edge.config)
+    importlib.reload(app.edge)
+
+
+def test_una_configuracion_valida_conserva_los_valores_por_omision():
+    """El comportamiento normal no cambia al mover la carga."""
+    from app.edge.politica import (
+        BASE_DELAY_POR_OMISION,
+        BATCH_LIMIT_POR_OMISION,
+        MAX_ATTEMPTS_POR_OMISION,
+        MAX_DELAY_POR_OMISION,
+    )
+
+    settings = cargar_settings_edge()
+    assert settings.max_attempts == MAX_ATTEMPTS_POR_OMISION
+    assert settings.base_delay_seconds == BASE_DELAY_POR_OMISION
+    assert settings.max_delay_seconds == MAX_DELAY_POR_OMISION
+    assert settings.batch_limit == BATCH_LIMIT_POR_OMISION
+    assert settings.http_timeout == TIMEOUT_HTTP_POR_OMISION
+    assert settings.busy_timeout_ms == ESPERA_DE_BLOQUEO_POR_OMISION
+    assert settings.sqlite_path == RUTA_SQLITE_POR_OMISION
+    assert settings.api_base_url == URL_API_POR_OMISION
+    # Y produce una politica utilizable.
+    assert settings.politica().max_attempts == MAX_ATTEMPTS_POR_OMISION
+
+
+def test_un_argumento_mal_escrito_conserva_el_comportamiento_de_argparse(cli, base):
+    """``SystemExit`` no deriva de ``Exception``: atraviesa el try intacto."""
+    with pytest.raises(SystemExit) as salida:
+        ejecutar(cli, base, "orden-que-no-existe")
+    assert salida.value.code == 2
+
+
 def test_el_comando_no_acepta_credenciales_ni_url_de_base_de_datos(cli):
-    ayuda = cli.construir_parser().format_help().lower()
+    ayuda = cli.construir_parser(cargar_settings_edge()).format_help().lower()
     for prohibido in ("password", "contrasena", "database_url", "--url", "token"):
         assert prohibido not in ayuda
 

@@ -75,7 +75,7 @@ from app.edge.cliente import (
     contar_lecturas,
     es_resultado_desconocido,
 )
-from app.edge.config import EdgeSettings, settings_edge
+from app.edge.config import EdgeSettings, cargar_settings_edge
 from app.edge.emisor import LIMITE_POR_OMISION, ResumenPasada, ejecutar_pasada
 from app.edge.estados import (
     VALORES_DE_ESTADO,
@@ -174,6 +174,7 @@ __all__ = [
     "ahora_utc",
     "anotar_demora",
     "capturar",
+    "cargar_settings_edge",
     "censar",
     "clasificar",
     "conectar",
@@ -202,7 +203,6 @@ __all__ = [
     "resolver_herencia_incompatible",
     "resumen",
     "seleccionar_elegibles",
-    "settings_edge",
     "sincronizar",
     "tablas_presentes",
     "transaccion",
