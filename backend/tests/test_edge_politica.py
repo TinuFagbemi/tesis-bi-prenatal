@@ -10,12 +10,12 @@ Todos los datos son simulados y completamente ficticios.
 from __future__ import annotations
 
 import math
+from fractions import Fraction
 
 import pytest
 
 from app.edge.politica import (
     BASE_DELAY_POR_OMISION,
-    EXPONENTE_MAXIMO,
     FACTOR_DE_FASES,
     MARGEN_DEL_LEASE_SEGUNDOS,
     MAX_ATTEMPTS_POR_OMISION,
@@ -105,12 +105,78 @@ def test_un_exponente_enorme_no_desborda():
     """Con un limite absurdo, la demora satura en el techo en vez de reventar.
 
     ``2 ** 2000`` como entero es representable en Python y como float no lo es;
-    sin el tope del exponente, convertirlo lanzaria ``OverflowError`` en mitad de
-    una sincronizacion.
+    evaluar la potencia sin cuidado lanzaria ``OverflowError`` en mitad de una
+    sincronizacion.
     """
     p = politica(max_attempts=5000)
     assert p.demora(4999) == p.max_delay_seconds
-    assert math.isfinite(p.demora(EXPONENTE_MAXIMO + 100))
+    assert math.isfinite(p.demora(10**6))
+
+
+@pytest.mark.parametrize("k", [10**6, 10**12, 2**62])
+def test_un_ordinal_enorme_devuelve_el_techo_sin_desbordar(k):
+    """No hay tope fijo del exponente: hay saturacion, y satura en el techo."""
+    p = politica()
+    assert p.demora(k) == p.max_delay_seconds
+
+
+# --- La regresion del tope fijo -------------------------------------------
+#
+# Habia un ``EXPONENTE_MAXIMO = 60`` que evitaba el desbordamiento y de paso
+# rompia la formula: cuantas duplicaciones caben hasta el techo depende de la
+# base, y con una base muy pequena sesenta no bastan. Con base 2**-100 y techo
+# 1.0, el intento 101 devolvia 9.09e-13 en lugar de 1.0 -- un factor de 2**40.
+
+BASE_DIMINUTA = 2.0**-100
+
+
+def politica_de_base_diminuta() -> PoliticaDeReintentos:
+    return politica(
+        max_attempts=500, base_delay_seconds=BASE_DIMINUTA, max_delay_seconds=1.0
+    )
+
+
+def test_una_base_diminuta_sigue_duplicando_mas_alla_del_antiguo_tope():
+    """Justo antes de saturar: 2**-100 duplicada 99 veces es exactamente 0.5."""
+    assert politica_de_base_diminuta().demora(100) == 0.5
+
+
+def test_una_base_diminuta_satura_exactamente_en_el_techo():
+    """Y una duplicacion mas alcanza el techo, en vez de quedarse en 2**-40."""
+    assert politica_de_base_diminuta().demora(101) == 1.0
+
+
+@pytest.mark.parametrize("k", [102, 500, 10**6, 2**62])
+def test_una_base_diminuta_no_baja_del_techo_despues_de_saturar(k):
+    assert politica_de_base_diminuta().demora(k) == 1.0
+
+
+@pytest.mark.parametrize(
+    "base, techo",
+    [
+        (1.0, 60.0),
+        (0.001, 0.5),
+        (2.0**-100, 1.0),
+        (0.25, 0.25),
+        (1e-300, 1e300),
+        (5e-324, 1e308),
+    ],
+)
+def test_la_demora_coincide_con_la_formula_en_aritmetica_exacta(base, techo):
+    """Comparada contra ``min(base * 2^(k-1), techo)`` calculado con fracciones.
+
+    La referencia se evalua con ``Fraction`` y no con ``base * 2.0 ** (k - 1)``
+    porque esa segunda forma desborda al calcular la potencia por separado, y
+    entonces la prueba acusaria a la implementacion de un error que es suyo.
+    """
+    p = politica(
+        max_attempts=5, base_delay_seconds=base, max_delay_seconds=techo,
+        batch_limit=1, http_timeout=1.0,
+    )
+    for k in range(1, 1200):
+        valor = Fraction(base) * Fraction(2) ** (k - 1)
+        esperado = techo if valor >= Fraction(techo) else float(valor)
+        assert p.demora(k) == esperado, k
 
 
 @pytest.mark.parametrize("k", [0, -1, -100])

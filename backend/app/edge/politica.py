@@ -65,11 +65,28 @@ BATCH_LIMIT_POR_OMISION = 50
 FACTOR_DE_FASES = 4
 MARGEN_DEL_LEASE_SEGUNDOS = 30.0
 
-# Tope del exponente antes de calcular la potencia. Sin el, un ``max_attempts``
-# absurdamente grande produciria ``2 ** 2000`` como entero y el paso a float
-# lanzaria OverflowError. Con el, el resultado satura en el techo, que es lo que
-# la formula haria de todos modos.
-EXPONENTE_MAXIMO = 60
+def _exponente_de_saturacion(base: float, techo: float) -> int:
+    """Primer exponente a partir del cual ``base * 2^e`` ya no baja del techo.
+
+    Existe para no evaluar nunca una potencia que pueda desbordarse, y se calcula
+    **sin dividir** ``techo / base``: con una base subnormal y un techo enorme esa
+    division daria infinito y el logaritmo despues fallaria.
+
+    ``math.frexp`` descompone cada numero en mantisa y exponente binario, con la
+    mantisa siempre en ``[0.5, 1)``. La diferencia de exponentes acota cuando el
+    producto alcanza el techo, y el ``+ 1`` la vuelve una cota superior segura:
+    puede sobrar por uno, y sobrar no cambia el resultado porque por debajo del
+    umbral se sigue aplicando ``min`` contra el techo.
+
+    Un tope fijo --habia uno de 60-- parecia equivalente y no lo era: con
+    ``base = 2**-100`` y ``techo = 1.0``, el intento 101 devolvia
+    ``9.09e-13`` en lugar de ``1.0``, un factor de ``2**40``. La formula no
+    admite un maximo constante, porque cuantas duplicaciones caben hasta el techo
+    depende de la base.
+    """
+    _, exponente_base = math.frexp(base)
+    _, exponente_techo = math.frexp(techo)
+    return exponente_techo - exponente_base + 1
 
 
 class ConfiguracionInvalida(Exception):
@@ -192,9 +209,19 @@ class PoliticaDeReintentos:
                 "El ordinal de un intento empieza en 1: no hay espera antes del "
                 "primero."
             )
-        exponente = min(k - 1, EXPONENTE_MAXIMO)
+
+        exponente = k - 1
+        if exponente >= _exponente_de_saturacion(
+            self.base_delay_seconds, self.max_delay_seconds
+        ):
+            # Ya saturo: devolver el techo es exacto y evita evaluar una potencia
+            # que con un ordinal enorme desbordaria.
+            return self.max_delay_seconds
+
+        # ``ldexp`` es un ajuste del exponente binario, no una multiplicacion:
+        # exacto, y sin construir ``2 ** exponente`` como entero primero.
         return min(
-            self.base_delay_seconds * (2.0**exponente), self.max_delay_seconds
+            math.ldexp(self.base_delay_seconds, exponente), self.max_delay_seconds
         )
 
     # ------------------------------------------------------------------
