@@ -236,7 +236,7 @@ def test_enviar_con_la_api_caida_avisa_y_conserva_el_evento(
 
     assert ejecutar(cli, base, "enviar") == 0
     salida = capsys.readouterr().out
-    assert "La pasada se detuvo" in salida
+    assert "La ronda se detuvo" in salida
     assert "conservan su clave" in salida
 
     with alm.conectar(base) as conexion:
