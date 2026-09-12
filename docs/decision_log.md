@@ -1001,3 +1001,384 @@ aquella capa ejecuta DDL real y toma candados exclusivos, y compartir la base co
 otra suite corriendo a la vez no sería seguro. SQLite no necesita ningún servicio
 adicional en el runner: cada prueba crea su archivo dentro del `tmp_path` que le
 da pytest.
+
+
+## SCRUM-65 — Sincronización diferida, reintentos y trazabilidad extremo a extremo
+
+SCRUM-64 dejó un nodo que conserva un paquete y sabe entregarlo cuando alguien se
+lo pide. Lo que faltaba es la política: **qué hacer cuando la API no responde**,
+cuántas veces insistir, cuánto esperar entre intentos, cuándo dejar de insistir, y
+cómo saber después qué ocurrió con cada evento. Eso es este ticket.
+
+La garantía que se puede afirmar no cambió, y conviene repetirla porque es fácil
+prometer de más:
+
+```
+entrega al menos una vez desde el edge
++ efecto de negocio una sola vez en PostgreSQL
++ evidencia correlacionada de cada etapa
+```
+
+No se promete «exactamente una llamada HTTP». Una petición puede llegar al
+servidor aunque el edge nunca vea la respuesta.
+
+### Decisiones aprobadas
+
+**La política de reintentos vive en un solo módulo.** `app/edge/politica.py`
+decide si queda otro intento y cuánto se espera; el emisor, el sincronizador, la
+reconciliación, el CLI y las pruebas preguntan ahí. Dos fórmulas equivalentes en
+dos módulos es exactamente como una acaba divergiendo de la otra.
+
+**`max_attempts` incluye el primer intento**, y se dice explícitamente en el
+README, en la ayuda del CLI y en el docstring del módulo, porque es la clase de
+detalle que cada lector supone al revés.
+
+**La fórmula es `delay(k) = min(base × 2^(k-1), techo)`, con `k` = ordinal del
+intento que acaba de fallar.** La definición alternativa —«los intentos ya
+consumidos»— produce un desfase de uno que sólo se nota con eventos migrados: uno
+con tres intentos heredados hace el número 4, y le corresponde `delay(4)`, no
+`delay(3)`. Hay cuatro pruebas dedicadas exclusivamente a ese desfase.
+
+**Sin *jitter*.** Un solo nodo no tiene manada que dispersar, y añadirlo
+complicaría las pruebas sin aportar nada demostrable.
+
+**`base_delay_seconds = 0` se rechaza.** Con 0 todas las demoras valen 0 y no hay
+espera incremental, que es un criterio de aceptación del ticket; una configuración
+capaz de contradecir lo que el ticket promete no debería poder construirse. No se
+admite «sólo para pruebas» porque el sleeper se inyecta: ninguna prueba necesita
+ese valor para no dormir.
+
+**La finitud se valida antes que el signo.** `NaN < 0` es falso y `NaN >= 0`
+también, así que una comprobación de signo escrita primero aceptaría un `NaN` en
+silencio. `math.isfinite` va delante de todo, y hay una prueba por cada campo y
+por cada uno de los tres valores no finitos.
+
+**Un `float` finito y positivo no basta: la duración tiene que ser
+*programable*.** Rechazar `<= 0` y no finito dejaba pasar dos bordes que sólo se
+ven cuando el número entra en un `timedelta`, que es exactamente donde acaban las
+tres duraciones configurables:
+
+- `timedelta(seconds=5e-324).total_seconds()` vale `0.0`. Una espera positiva se
+  convertía en ninguna espera. Y no es sólo el subnormal: `timedelta` **redondea**
+  al microsegundo más cercano en vez de truncar, así que toda la franja por debajo
+  de 1 µs programa algo distinto de lo configurado —cero de medio microsegundo
+  hacia abajo, y 1 µs entre medio microsegundo y uno—.
+- `timedelta(seconds=1e308)` lanza `OverflowError`. Ocurría **a mitad de una
+  pasada**, con el evento ya reclamado y el intento ya contado.
+
+De ahí sale un intervalo cerrado, y las dos cotas se eligen por motivos
+distintos. El mínimo, `timedelta.resolution` = **1 µs**, no es una decisión: es
+lo que la biblioteca sabe representar. El máximo, **86 400 s (24 h)**, sí lo es.
+No se usó el máximo de `float` ni `timedelta.max` porque serían cotas falsas —una
+espera de mil años es representable y no la programa nadie—; `sincronizar` es un
+comando finito que una persona lanza y espera, y una sola espera de más de un día
+sobrevive a cualquier sesión manual plausible y a la marca de agua de la propia
+ejecución. Con la base mínima, 24 horas siguen dejando sitio a 36 duplicaciones,
+muchas más de las que consume cualquier `max_attempts` sensato.
+
+**El lease es derivado, y también tiene que caber.** `duracion_del_lease` es
+`4 × http_timeout + 30`, y desborda mucho antes que el campo del que sale:
+`4 * 1e308` ya es `inf`. Se valida como una duración más, con lo que aparece un
+límite implícito —`http_timeout ≤ 21592.5 s`— que el mensaje de error explica en
+lugar de dejar al lector adivinar por qué un valor admisible falla.
+
+**Todo se comprueba en `__post_init__`, y esa es la decisión de fondo.** La
+alternativa era capturar `OverflowError` en cada punto que suma una duración a un
+instante —el emisor, el sincronizador, `outbox.reclamar_intento`—, y eso son tres
+sitios que pueden divergir y un fallo que llega cuando el evento ya está
+reclamado. Validando al construir, el rechazo ocurre antes de que exista una
+petición HTTP, antes de incrementar `intentos`, antes de insertar una fila en
+`intento_sincronizacion` y antes de mover ningún estado: la política que existe
+es utilizable, y no hay un solo `except OverflowError` en el paquete. Hay una
+prueba que lo afirma comparando la base entera —`captura_local`, `outbox` e
+`intento_sincronizacion`— antes y después de intentar sincronizar con seis
+configuraciones inválidas distintas.
+
+**Consecuencia sobre la regresión del tope fijo.** El caso que la demostraba
+—base `2**-100`, techo `1.0`— ya no es configurable, porque esa base está
+veinticinco órdenes de magnitud por debajo del mínimo. El peor caso que queda
+dentro del contrato es el intervalo entero, base 1 µs contra techo 24 h, donde
+caben 36.33 duplicaciones; es decir que **hoy** un `EXPONENTE_MAXIMO = 60` no se
+notaría. Se conserva igualmente el cálculo derivado con `math.frexp`, por dos
+razones: sigue siendo lo que hace `demora(k)` exacta y libre de desbordamiento
+para *cualquier* ordinal, y no depende de que esas dos constantes se queden donde
+están. Las pruebas se reescribieron para fijar eso —que la saturación cae donde
+la base dice— y no el número 60.
+
+**El límite se persiste por evento, en `max_intentos_aplicado`.** Se fija al
+reclamar el primer intento y no vuelve a cambiar. Así, editar `EDGE_MAX_ATTEMPTS`
+alcanza a los eventos que aún no han empezado y no reescribe retroactivamente el
+contrato de los que están en curso. Un evento migrado cuyos intentos heredados ya
+igualan el límite que adoptaría se cierra explícitamente como
+`AGOTAMIENTO_HEREDADO` **sin crear otro intento**, en lugar de quedar bloqueado
+para siempre.
+
+**El agotamiento no inventa un estado.** `FALLIDO` con `reintentable = 0` ya
+significaba «requiere revisión» en SCRUM-64, y la selección ya lo excluía. Lo
+único que se añade es `motivo_revision`, con vocabulario cerrado, para que la
+traza distinga un agotado de un rechazado. Se persiste en vez de deducirse porque
+deducirlo dependería del `EDGE_MAX_ATTEMPTS` vigente al mirarlo, y un evento no
+debería cambiar de diagnóstico porque alguien editara un `.env`.
+
+**El intento se cuenta al empezar, no al guardar el resultado.** Un proceso que
+muere a mitad de la petición no dejaba rastro en SCRUM-64 y podía repetir eso
+indefinidamente sin gastar presupuesto. El coste es que un intento de desenlace
+desconocido también consume límite, que es la lectura honesta: bien pudo llegar al
+servidor. Como consecuencia, `marcar_enviado` y `marcar_fallido` dejaron de
+incrementar el contador.
+
+**El ordinal sale de `UPDATE ... RETURNING`.** La reclamación es a la vez el
+compare-and-set y la fuente del número. La alternativa —actualizar y después
+consultar el contador— sería correcta sólo por el `BEGIN IMMEDIATE`, es decir, por
+un argumento sobre semántica de bloqueos en lugar de por una propiedad de una sola
+sentencia. Exige SQLite 3.35, y `conectar` lo comprueba y rechaza con una frase en
+vez de dejar aparecer un error de sintaxis a mitad de una sincronización.
+
+**«Elegible» se declara una vez.** `predicado_elegible()` renderiza la cláusula y
+la usan la selección, la reclamación y el censo. Los paréntesis alrededor de los
+dos estados elegibles no son cosméticos: `AND` liga más fuerte que `OR`, y sin
+ellos el límite de intentos y la fecha se aplicarían sólo a la rama `FALLIDO`, de
+modo que un `PENDIENTE` podría reintentarse sin límite alguno.
+
+### El lease local, y lo que no demuestra
+
+Un intento **en vuelo** y uno **abandonado** son indistinguibles sin una ventana
+temporal, y las dos salidas son malas: o se reintenta sobre intentos vivos
+—multiplicando peticiones y quemando el límite con fallos fantasma— o no se
+recupera nunca de una caída del proceso.
+
+La solución es un lease local mínimo: `reconciliable_en`, calculado **al reclamar
+el intento** con el timeout vigente entonces y persistido. Cambiar la
+configuración después no puede hacer que un intento activo parezca abandonado
+antes de tiempo ni retrasar arbitrariamente su recuperación.
+
+```
+duracion_lease = 4 × http_timeout + 30 s
+```
+
+Es una **heurística conservadora de recuperación**, no un máximo real de la
+petición ni una propiedad garantizada del cliente HTTP: httpx no impone una fecha
+límite total, y sus timeouts de lectura y escritura acotan la inactividad entre
+fragmentos. Una respuesta puede llegar después de que el lease venza, y el diseño
+lo trata como caso normal.
+
+**La seguridad no descansa en el lease.** Descansa en la misma `Idempotency-Key`,
+en las guardas por ordinal, en las guardas de terminalidad y en el tratamiento de
+resultados tardíos. El lease sólo reduce la frecuencia con la que hay que lidiar
+con uno.
+
+No es un lock distribuido —vive en el mismo archivo SQLite y vence solo— y no es
+un estado: `EstadoEntrega` no cambió. Se expresa como «existe un intento abierto y
+sin reconciliar», un hecho que el historial ya registra, y el índice parcial
+`ux_intento_abierto` lo convierte en una garantía de la base: **como máximo un
+intento abierto por evento**.
+
+### Resultados tardíos
+
+| Estado del evento | Resultado tardío | Efecto |
+| --- | --- | --- |
+| agotado o rechazado | `ENTREGADO` | **prevalece**: pasa a `ENVIADO` y se limpian las columnas de revisión |
+| agotado o rechazado | fallo | se guarda en el historial y **no toca la outbox** |
+| `ENVIADO` | cualquiera | se guarda en el historial; la guarda impide degradar la entrega |
+
+Una confirmación válida es verdad: PostgreSQL tiene la sesión, y dejar la fila
+diciendo lo contrario sería mentir sobre un hecho comprobado. Un fallo tardío, en
+cambio, no puede reabrir un evento que la reconciliación ya cerró; eso produciría
+un intento N+1 por encima del límite. La regla está además en SQL —`NOT (estado =
+'FALLIDO' AND reintentable = 0)` en `marcar_fallido`— para que la propiedad no
+dependa de que la rama de Python sea correcta. Se validó con un control negativo:
+retirada la guarda, la prueba falla; restaurada, pasa.
+
+**Un resultado real nunca se descarta en memoria.** Si el proceso recibió una
+respuesta, el historial la conserva aunque el intento ya estuviera reconciliado:
+tirar esa evidencia sería lo contrario de lo que este ticket produce. Lo que el
+carácter tardío gobierna es si la **outbox** puede tocarse, no si el hecho se
+registra.
+
+**Varias respuestas `ENTREGADO` para un mismo evento son legítimas.** Reconciliado
+el intento 1 puede iniciarse el 2, y ambos pueden devolver un `201` válido —uno
+inicial y otro *replay*—. Por eso no hay unicidad sobre `resultado = 'ENTREGADO'`:
+la habría, y habría reventado con un error de integridad justo en el camino más
+importante del ticket. Lo que sí es único es `confirmo_transicion = 1`, el intento
+que **aplicó** la transición local, y de él se deriva la fecha de confirmación.
+
+### Los cuatro timestamps
+
+| Fecha | Fuente única |
+| --- | --- |
+| captura | `captura_local.capturado_en`, leído justo **antes** de abrir la transacción |
+| intento | `intento_sincronizacion.iniciado_en`, una fila por intento |
+| confirmación | `finalizado_en` del intento con `confirmo_transicion = 1` |
+| sincronización | `outbox.enviado_en`, instante registrado para la transición local |
+
+La confirmación se **deriva** en lugar de copiarse a la outbox. Dos copias del
+mismo instante en dos tablas no se pueden mantener iguales con ningún `CHECK` de
+SQLite, y la solución que sí lo intentaba obligaba además a condicionar
+`evidencia_remota_coherente` para que un `ENVIADO` heredado —sin intentos— no
+hiciera abortar la migración entera. Derivarla eliminó las dos cosas: la
+restricción de SCRUM-64 quedó **idéntica**, carácter por carácter.
+
+`enviado_en` no es «el instante posterior al `COMMIT`»: se obtiene del reloj dentro
+de la transacción que ejecuta la transición, necesariamente antes de que el commit
+termine. Se documenta así y no de otra forma.
+
+PostgreSQL conserva su propia evidencia temporal en
+`idempotencia_solicitud.fecha_hora`. Son relojes distintos y las pruebas los
+correlacionan sin fingir que coinciden.
+
+### La correlación es la clave, y no se creó otra
+
+Se reutiliza la `Idempotency-Key` como identidad idempotente **y** como
+identificador de correlación técnica. Nace en el edge antes del primer envío, está
+persistida en SQLite, viaja en cada petición, está persistida en PostgreSQL por
+SCRUM-63, identifica la misma operación lógica durante todos los reintentos y no
+contiene información clínica ni personal.
+
+```
+SQLite.clave_idempotencia → HTTP Idempotency-Key
+  → operacional.idempotencia_solicitud (recurso, clave) → id_sesion + ids_lectura
+```
+
+No se añadió `X-Correlation-ID`, ni otro UUID, ni una columna en PostgreSQL, ni
+una migración del servidor. **PostgreSQL no cambió en absoluto en este ticket.**
+En logs y en la traza se muestra como `correlation_id`, pero el valor es
+exactamente la clave ya persistida.
+
+### El bucle, y por qué pregunta a la cola
+
+Decidir que se ha terminado porque «la ronda no seleccionó nada» falla justo
+después de un reinicio: con todos los reintentables programados para el futuro, la
+ronda no selecciona nada y una ejecución que debía esperar se iría dejando la cola
+intacta. Así que cada iteración toma un **censo** —elegibles ahora, programados,
+con intento abierto, enviados, en revisión, bloqueados— y decide desde ahí.
+
+`ENVIADO` y «requiere revisión» son ambos terminales y se cuentan **por separado**:
+agruparlos habría permitido que una ejecución terminara con eventos agotados
+informando éxito.
+
+**La guarda de progreso sólo castiga la inercia.** Una modificación durable la
+reinicia; una espera **positiva** también, porque dormir es avance temporal normal
+y no estancamiento. Sólo una iteración que no modificó nada, no reclamó nada y no
+esperó incrementa el contador. Contar las esperas habría matado una ejecución con
+techo de un segundo y lease de setenta a los cuatro segundos, y hay una prueba
+dedicada a ese caso exacto.
+
+**Un fallo de transporte pausa la ejecución entera, no la ronda.** SCRUM-64 rompía
+la pasada para no estrellar N timeouts seguidos contra una API caída; envuelto en
+un bucle, el censo veía los otros eventos elegibles y abría otra ronda de
+inmediato, de modo que cincuenta eventos significaban cincuenta fallos de conexión
+consecutivos. Ahora la ronda devuelve hasta cuándo pausar y el sincronizador
+retiene toda la ejecución. La pausa vive **en memoria**: es lo que este proceso
+aprendió sobre la API hace un instante, no un hecho durable sobre ningún evento. Y
+no bloquea la reconciliación, que es SQLite puro y debe seguir corriendo para que
+un lease pueda vencer.
+
+**Una marca de agua sobre `id_outbox`** acota cada ejecución a lo que existía al
+empezar, de modo que un proceso que siga capturando no la prolongue
+indefinidamente.
+
+**`batch_limit` es el tamaño de una ronda**, no el máximo de intentos ni el total
+de la ejecución. Lo que acota la ejecución es la marca de agua.
+
+### Clasificación de respuestas
+
+La clasificación siguió siendo la de `cliente.py`: no se escribió una segunda
+tabla de decisiones. Dos ajustes:
+
+- **`500 <= codigo < 600`.** Faltaba la cota superior, así que un código no
+  estándar `600` o `999` se clasificaba como reintentable. El contrato promete
+  reintentos para la familia `5xx`, y nada en un código fuera del estándar promete
+  que volver a intentarlo sirva de algo: ahora cae en «respuesta inesperada».
+- **`408` y `429` siguen siendo permanentes**, por decisión consciente y probada.
+  Este endpoint no implementa ni timeouts de petición ni *rate limiting*, así que
+  tratarlos como recuperables añadiría un camino que ninguna prueba podría ejercer
+  contra el servidor real y abriría la cuestión de honrar `Retry-After`, que no se
+  implementa.
+
+El resultado **desconocido** no estrenó un miembro del enum. Sigue siendo
+`REINTENTABLE` con `codigo_http = None`, y esa combinación recibió un nombre
+—`es_resultado_desconocido`— para que la ronda, la pausa y la traza dejaran de
+re-derivarla cada una por su cuenta.
+
+### Coherencia de `ultimo_http` y `ultimo_error`
+
+Se escriben **siempre juntos**, describiendo el mismo intento. La reconciliación
+guarda `ultimo_http = NULL` en sus dos ramas: dejar un `503` del intento anterior
+junto a «proceso interrumpido» sería un par que nunca ocurrió.
+
+`AGOTAMIENTO_HEREDADO` es la excepción deliberada: **no toca ninguno de los dos**.
+Son evidencia real del último intento de v1, y el motivo del cierre no es un
+resultado sino un límite que se adopta; eso ya lo dice `motivo_revision`.
+
+### Evolución del esquema SQLite: v1 → v2
+
+SQLite no sabe añadir un `CHECK` a una tabla existente, así que las cinco
+invariantes nuevas obligan a reconstruir `outbox`. La reconstrucción renombra la
+tabla **vieja** y crea la nueva **directamente con su nombre definitivo**.
+
+El orden no es estilístico. `ALTER TABLE outbox_v2 RENAME TO outbox` hace que
+SQLite almacene `CREATE TABLE "outbox" (...)`, **con comillas**, y
+`verificar_esquema` compara contra el texto que el módulo escribe: una migración
+construida así habría producido una base que la ejecución siguiente rechaza, un
+fallo que sólo aparece con datos reales. Se comprobó empíricamente antes de
+elegir, y hay una prueba que compara el DDL de una base nueva con el de una
+migrada.
+
+El único `DROP` del módulo retira la copia renombrada, dentro de la transacción y
+después de haber insertado sus filas en la nueva tabla. La prueba de SCRUM-64 que
+prohibía toda sentencia destructiva no se relajó: se **estrechó** para exigir que
+ésa sea la única, que apunte a la tabla temporal, que viva sólo dentro de
+`_migrar_v1_a_v2` y que el `INSERT` la preceda.
+
+Valores iniciales: `proximo_intento_en` a `NULL`, `motivo_revision` a
+`RECHAZO_PERMANENTE` para lo que ya estaba en revisión, `max_intentos_aplicado` a
+`NULL` y `intentos_heredados = intentos`.
+
+**Los intentos heredados no se reinventan ni se reinician.** v1 contaba intentos
+pero no guardaba su detalle, y ninguna fecha ni ningún resultado pueden
+reconstruirse para algo que nunca se registró. Se conserva el total, cuenta para el
+límite, y la invariante de coherencia se reformuló para cubrir los dos orígenes con
+una sola regla:
+
+```
+count(intento_sincronizacion) == outbox.intentos - outbox.intentos_heredados
+```
+
+Para un evento nativo el término heredado es 0 y la regla se reduce a la original.
+El primer intento v2 de un evento migrado continúa la numeración —el número 4 si
+traía tres— y el hueco 1-3 es la señal honesta de que no hay detalle.
+
+### Lo que se decidió NO hacer
+
+Sin demonio ni servicio de Windows, sin scheduler permanente, sin detección previa
+de conectividad —que un *health check* responda no garantiza que el request
+posterior funcione—, sin cola externa, sin Redis, RabbitMQ, Kafka, Celery ni MQTT,
+sin OpenTelemetry, sin locks distribuidos, sin estado `EN_PROCESO`, sin WAL, sin
+cambios en PostgreSQL, sin migraciones de Alembic, sin autenticación, sin purga
+automática de la outbox y sin refactorizaciones ajenas al ticket.
+
+### Validación
+
+Cuatro archivos de pruebas nuevos sin servidor —política, migración local del
+esquema, sincronización y traza— y uno que ejerce el ciclo resiliente completo
+contra PostgreSQL 16.
+
+Las pruebas de persistencia usan **archivos SQLite reales** bajo `tmp_path`, nunca
+`:memory:`, por la misma razón que en SCRUM-64: lo que hay que demostrar es que un
+evento sobrevive a que el proceso se cierre.
+
+**Ninguna prueba duerme.** El reloj y el sleeper se inyectan; el sleeper anota lo
+que recibe y adelanta un reloj falso, de modo que una espera de setenta segundos
+cuesta lo mismo que una de uno y la secuencia exacta de demoras queda observable.
+La suite integrada usa `SCRUM65_TEST_DATABASE_URL`, sin recurso alguno a
+`DATABASE_URL` ni a la variable de otra suite, y reutiliza sin cambiarlas las
+fixtures de SCRUM-62 con la misma prueba de atadura al engine.
+
+### Integración continua
+
+El workflow gana un séptimo paso, `Pruebas de sincronización contra PostgreSQL
+(SCRUM-65)`, con su propia variable construida de la misma fuente única y su
+reporte `pytest-scrum65.xml` incorporado al guardián que pone el job en rojo si
+alguna prueba de PostgreSQL queda omitida. Va después de SCRUM-64 por la misma
+razón de siempre: en serie es seguro compartir la base efímera, en paralelo no lo
+sería. Las cuatro suites nuevas sin servidor entran en el bloque offline.

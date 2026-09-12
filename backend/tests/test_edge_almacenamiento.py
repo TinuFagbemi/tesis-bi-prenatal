@@ -18,7 +18,7 @@ import sqlite3
 import pytest
 
 from app.edge import almacenamiento as alm
-from app.edge.estados import EstadoEntrega
+from app.edge.estados import EstadoEntrega, MotivoRevision
 
 
 @pytest.fixture
@@ -65,7 +65,11 @@ def test_inicializa_desde_una_ruta_inexistente(ruta):
     assert not ruta.exists()
     with alm.conectar(ruta) as conexion:
         assert alm.inicializar(conexion) is True
-        assert alm.tablas_presentes(conexion) == {alm.TABLA_CAPTURA, alm.TABLA_OUTBOX}
+        assert alm.tablas_presentes(conexion) == {
+            alm.TABLA_CAPTURA,
+            alm.TABLA_OUTBOX,
+            alm.TABLA_INTENTO,
+        }
         assert alm.leer_version(conexion) == alm.VERSION_DE_ESQUEMA
     assert ruta.exists()
 
@@ -111,7 +115,11 @@ def test_una_version_desconocida_se_rechaza_sin_tocar_el_archivo(ruta):
         with pytest.raises(alm.EsquemaIncompatible):
             alm.inicializar(conexion)
         # Sigue intacto: rechazar no es migrar ni limpiar.
-        assert alm.tablas_presentes(conexion) == {alm.TABLA_CAPTURA, alm.TABLA_OUTBOX}
+        assert alm.tablas_presentes(conexion) == {
+            alm.TABLA_CAPTURA,
+            alm.TABLA_OUTBOX,
+            alm.TABLA_INTENTO,
+        }
         assert alm.leer_version(conexion) == 99
 
 
@@ -148,13 +156,23 @@ def test_version_cero_con_tablas_ajenas_se_rechaza(ruta):
         assert alm.tablas_presentes(conexion) == {"agenda"}
 
 
-def test_inicializar_nunca_ejecuta_una_sentencia_destructiva():
-    """Ninguna sentencia destructiva aparece en el codigo ejecutable del modulo.
+def test_la_unica_sentencia_destructiva_es_la_de_la_migracion():
+    """El modulo no ejecuta ``DROP``/``TRUNCATE``/``DELETE`` fuera del upgrade.
 
-    Se mira el arbol sintactico con los docstrings retirados, no el texto
-    fuente: la documentacion del modulo menciona ``DROP`` y ``TRUNCATE``
-    precisamente para decir que no los ejecuta, y buscarlos en el texto crudo
-    encontraria esa frase en lugar de una sentencia.
+    SCRUM-64 podia exigir que no existiera ninguna. SCRUM-65 no: SQLite no sabe
+    anadir un ``CHECK`` a una tabla existente, asi que las cinco invariantes
+    nuevas obligan a reconstruir ``outbox``, y una reconstruccion termina
+    retirando la copia renombrada de la tabla vieja.
+
+    Asi que la prueba no se relaja, se estrecha: la unica sentencia destructiva
+    admitida es un ``DROP TABLE`` de la tabla temporal de migracion, y solo puede
+    aparecer dentro de ``_migrar_v1_a_v2``. Cualquier otra --incluido un ``DROP``
+    de ``outbox`` misma-- sigue prohibida.
+
+    Se mira el arbol sintactico con los docstrings retirados, no el texto fuente:
+    la documentacion del modulo menciona ``DROP`` y ``TRUNCATE`` precisamente
+    para decir que no los ejecuta, y buscarlos en el texto crudo encontraria esa
+    frase en lugar de una sentencia.
     """
     import ast
     import inspect
@@ -172,11 +190,41 @@ def test_inicializar_nunca_ejecuta_una_sentencia_destructiva():
         ):
             cuerpo.pop(0)
 
-    # ``ast.unparse`` descarta ademas los comentarios, asi que lo que queda son
-    # sentencias y literales de verdad.
-    codigo = ast.unparse(arbol).upper()
+    migracion = next(
+        nodo
+        for nodo in ast.walk(arbol)
+        if isinstance(nodo, ast.FunctionDef) and nodo.name == "_migrar_v1_a_v2"
+    )
+    codigo_migracion = ast.unparse(migracion).upper()
+
+    # 1. Dentro de la migracion: exactamente un DROP, y de la tabla temporal.
+    #    Las sentencias se componen con f-strings, asi que lo que queda tras
+    #    ``unparse`` es el marcador, no el nombre ya sustituido.
+    assert codigo_migracion.count("DROP TABLE") == 1
+    assert "DROP TABLE {TABLA_MIGRACION_V1}" in codigo_migracion
+    assert "DROP TABLE {TABLA_OUTBOX}" not in codigo_migracion
+    for prohibida in ("TRUNCATE", "DELETE FROM"):
+        assert prohibida not in codigo_migracion
+
+    # 2. Fuera de la migracion: ninguna, como en SCRUM-64.
+    migracion.body = [ast.Pass()]
+    resto = ast.unparse(arbol).upper()
     for prohibida in ("DROP TABLE", "TRUNCATE", "DELETE FROM"):
-        assert prohibida not in codigo
+        assert prohibida not in resto
+
+
+def test_la_migracion_copia_las_filas_antes_de_retirar_la_tabla_vieja():
+    """El ``DROP`` solo puede venir despues del ``INSERT ... SELECT``.
+
+    Un orden invertido perderia todos los eventos, y la prueba de datos no lo
+    detectaria si alguien reordenara las sentencias y ajustara los valores.
+    """
+    import ast
+    import inspect
+
+    fuente = inspect.getsource(alm._migrar_v1_a_v2)
+    texto = " ".join(ast.unparse(ast.parse(fuente.strip())).upper().split())
+    assert texto.index("INSERT INTO") < texto.index("DROP TABLE")
 
 
 # ---------------------------------------------------------------------------
@@ -376,10 +424,19 @@ def test_un_enviado_con_evidencia_completa_se_acepta(conexion):
 
 
 def _crear_con_outbox(ruta, ddl_outbox):
+    """Una base de la version actual cuya ``outbox`` puede estar manipulada.
+
+    El resto del esquema se crea completo a proposito: si faltara el historial,
+    ``verificar_esquema`` fallaria por tabla ausente y la prueba pasaria sin
+    haber ejercido nunca la deteccion que dice ejercer.
+    """
     with alm.conectar(ruta) as conexion:
         conexion.execute("BEGIN IMMEDIATE")
         conexion.execute(alm.DDL_CAPTURA)
         conexion.execute(ddl_outbox)
+        conexion.execute(alm.DDL_INTENTO)
+        conexion.execute(alm.DDL_INDICE_ABIERTO)
+        conexion.execute(alm.DDL_INDICE_CONFIRMO)
         conexion.execute(f"PRAGMA user_version = {alm.VERSION_DE_ESQUEMA}")
         conexion.execute("COMMIT")
 
@@ -462,7 +519,10 @@ def test_el_check_de_estados_cubre_exactamente_el_enum():
 def test_cada_estado_del_enum_es_aceptado_por_la_base(conexion, estado):
     extra = {}
     if estado is EstadoEntrega.FALLIDO:
+        # ``reintentable = 0`` significa "requiere revision", y desde
+        # SCRUM-65 esa combinacion tiene que declarar por que.
         extra["reintentable"] = 0
+        extra["motivo_revision"] = MotivoRevision.RECHAZO_PERMANENTE.value
     if estado is EstadoEntrega.ENVIADO:
         extra.update(EVIDENCIA_COMPLETA)
     with alm.transaccion(conexion):

@@ -75,6 +75,12 @@ jobs:
       # (API, modelos, migración renderizada offline, dataset simulado,
       # validación del cargador, contratos Pydantic, capa HTTP del endpoint y
       # el nodo edge simulado, que usa archivos SQLite temporales propios).
+      #
+      # Aquí corren también la política de reintentos, la migración local
+      # v1 -> v2 del almacenamiento del edge, la sincronización diferida con
+      # reloj y sleeper inyectados, y la traza. Ninguna duerme de verdad: el
+      # sleeper anota la espera y adelanta un reloj falso, así que una espera de
+      # setenta segundos no cuesta setenta segundos de CI.
       - name: Pruebas sin servidor PostgreSQL
         working-directory: backend
         run: |
@@ -83,7 +89,8 @@ jobs:
             --ignore=tests/test_load_mock_data_postgresql.py \
             --ignore=tests/test_ingestion_api_postgresql.py \
             --ignore=tests/test_ingestion_idempotency_postgresql.py \
-            --ignore=tests/test_edge_postgresql.py
+            --ignore=tests/test_edge_postgresql.py \
+            --ignore=tests/test_edge_sincronizacion_postgresql.py
 
       # Segunda capa: ciclo real upgrade -> downgrade -> upgrade -> alembic check
       # contra el servicio PostgreSQL de arriba. Corre antes que las pruebas del
@@ -154,10 +161,29 @@ jobs:
           SCRUM64_TEST_DATABASE_URL: postgresql+psycopg://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
         run: python -m pytest -q -rs tests/test_edge_postgresql.py --junitxml=pytest-scrum64.xml
 
+      # Séptima capa: la sincronización resiliente del nodo edge -- reintentos
+      # con espera incremental, reconciliación de un intento que quedó sin
+      # resultado, agotamiento y trazabilidad extremo a extremo -- sobre la misma
+      # base efímera. Reutiliza el mismo aislamiento por transacción revertida
+      # que SCRUM-62, SCRUM-63 y SCRUM-64: no ejecuta DDL y no borra nada.
+      #
+      # Va después de SCRUM-64 a propósito, por la misma razón por la que aquella
+      # iba después de SCRUM-63: en serie es seguro compartir la base, en
+      # paralelo no lo sería.
+      #
+      # El tiempo no se gasta: el reloj y el sleeper se inyectan, así que las
+      # esperas de la política se observan sin que el runner duerma. Lo único
+      # real aquí es PostgreSQL.
+      - name: Pruebas de sincronización contra PostgreSQL (SCRUM-65)
+        working-directory: backend
+        env:
+          SCRUM65_TEST_DATABASE_URL: postgresql+psycopg://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
+        run: python -m pytest -q -rs tests/test_edge_sincronizacion_postgresql.py --junitxml=pytest-scrum65.xml
+
       # La variable de entorno de cada capa es lo único que evita que su archivo
       # quede omitido, y pytest devuelve 0 aunque se salte todo. Por eso los
       # reportes JUnit se revisan después: un solo <skipped> en cualquiera de
-      # los cinco tumba el job.
+      # los seis tumba el job.
       - name: Verificar que ninguna prueba de PostgreSQL quedó omitida
         working-directory: backend
         run: |
@@ -172,6 +198,7 @@ jobs:
               "pytest-scrum62.xml": "SCRUM62_TEST_DATABASE_URL",
               "pytest-scrum63.xml": "SCRUM63_TEST_DATABASE_URL",
               "pytest-scrum64.xml": "SCRUM64_TEST_DATABASE_URL",
+              "pytest-scrum65.xml": "SCRUM65_TEST_DATABASE_URL",
           }
 
           fallo = False

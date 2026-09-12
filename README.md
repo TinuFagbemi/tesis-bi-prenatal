@@ -124,7 +124,7 @@ tesis-bi-prenatal/
 
 ## Estado actual del proyecto
 
-El repositorio se encuentra en una etapa temprana. Lo que ya existe y funciona es el esquema operacional en PostgreSQL con sus migraciones, el generador del dataset simulado, su carga idempotente, el endpoint que recibe una sesión de monitoreo con sus lecturas biométricas —con su contrato de idempotencia— y el nodo edge simulado, que captura paquetes sin conexión y los entrega después sin duplicarlos. **Aún no existen la sincronización automática (servicio permanente, detección de conectividad y reintentos programados), el ETL, el modelo dimensional, la autenticación y autorización, ni los dashboards**, y el endpoint disponible todavía no tiene control de acceso. El desarrollo activo se encuentra actualmente en el Sprint 4, y todo el trabajo se desarrolla y prueba en un entorno controlado/local, no en comunidades rurales reales.
+El repositorio se encuentra en una etapa temprana. Lo que ya existe y funciona es el esquema operacional en PostgreSQL con sus migraciones, el generador del dataset simulado, su carga idempotente, el endpoint que recibe una sesión de monitoreo con sus lecturas biométricas —con su contrato de idempotencia— y el nodo edge simulado, que captura paquetes sin conexión y los entrega después sin duplicarlos, con reintentos de espera incremental, agotamiento controlado y trazabilidad de extremo a extremo. **Aún no existen un servicio permanente o demonio que dispare esa sincronización por sí solo, la detección automática de conectividad, el ETL, el modelo dimensional, la autenticación y autorización, ni los dashboards**, y el endpoint disponible todavía no tiene control de acceso. El desarrollo activo se encuentra actualmente en el Sprint 4, y todo el trabajo se desarrolla y prueba en un entorno controlado/local, no en comunidades rurales reales.
 
 ## Roadmap general
 
@@ -557,11 +557,31 @@ PostgreSQL ocurre una sola vez**.
 Desde la raíz del repositorio:
 
 ```powershell
-python scripts/edge_node.py init                          # crea o verifica el almacenamiento local
+python scripts/edge_node.py init                          # crea o actualiza el almacenamiento local
 python scripts/edge_node.py capturar paquete.json         # guarda un paquete, sin usar la red
 python scripts/edge_node.py estado                        # resumen de la outbox
-python scripts/edge_node.py enviar                        # una sola pasada de envío
+python scripts/edge_node.py enviar                        # UNA ronda, sin esperas
+python scripts/edge_node.py sincronizar                   # reintentos con espera incremental
+python scripts/edge_node.py traza <Idempotency-Key>       # qué pasó con un evento
 ```
+
+#### `enviar` y `sincronizar` no son lo mismo
+
+| | `enviar` | `sincronizar` |
+| --- | --- | --- |
+| Rondas | una y termina | las que haga falta, hasta que no quede trabajo |
+| Espera entre intentos | ninguna | espera incremental acotada |
+| Fecha del próximo intento | **la ignora** | la respeta |
+| Máximo de intentos | lo respeta | lo respeta |
+| Repara un intento sin resultado | no | sí |
+| Para qué sirve | forzar un envío ahora, en una demostración | la sincronización diferida del ticket |
+
+`enviar` ignora la programación a propósito: es una acción manual y sería absurdo
+hacer esperar a una persona que está pidiendo un envío inmediato. Lo que **no**
+puede saltarse es el máximo de intentos —un límite que un comando puede rebasar
+no es un límite— ni un intento que ya está en vuelo.
+
+Ninguno de los dos es un demonio. `sincronizar` también termina.
 
 El archivo del paquete tiene **exactamente** el mismo formato que el cuerpo de
 la solicitud documentado en el §3: el nodo valida con el mismo contrato y no
@@ -585,6 +605,53 @@ python scripts/edge_node.py --base data/edge/demo.sqlite3 init
 | `EDGE_API_BASE_URL` | `http://127.0.0.1:8000` | API a la que se entrega |
 | `EDGE_HTTP_TIMEOUT` | `10.0` | segundos de espera por respuesta |
 | `EDGE_BUSY_TIMEOUT_MS` | `5000` | milisegundos de espera por bloqueo de SQLite |
+| `EDGE_MAX_ATTEMPTS` | `5` | intentos por evento, **incluido el primero** |
+| `EDGE_BASE_DELAY_SECONDS` | `1.0` | primera espera, en segundos |
+| `EDGE_MAX_DELAY_SECONDS` | `60.0` | techo de la espera |
+| `EDGE_BATCH_LIMIT` | `50` | eventos que toma **una ronda** |
+
+Las cuatro últimas son solo valores por omisión. El límite que gobierna un evento
+concreto es el que **adoptó** al reclamar su primer intento, guardado en
+`max_intentos_aplicado`: cambiar el entorno alcanza a los eventos que todavía no
+han empezado a sincronizarse, y no reescribe el contrato de los que ya están en
+curso.
+
+#### Qué duraciones se admiten
+
+`EDGE_BASE_DELAY_SECONDS`, `EDGE_MAX_DELAY_SECONDS` y `EDGE_HTTP_TIMEOUT` no
+aceptan cualquier número positivo: tienen que ser duraciones que este comando
+pueda **programar de verdad**, porque las tres acaban dentro de un `timedelta`.
+
+```
+0.000001 s (1 µs)  ≤  duración  ≤  86400 s (24 h)
+```
+
+- **El mínimo es la resolución de `timedelta`.** No es un número elegido a ojo:
+  `timedelta` redondea al microsegundo más cercano, así que por debajo del
+  microsegundo la espera que se programa deja de ser la que se configuró, y por
+  debajo de medio microsegundo se programa **cero** —es decir, ninguna espera—.
+  `EDGE_BASE_DELAY_SECONDS=5e-324` pasaba el antiguo `> 0` y hacía desaparecer en
+  silencio la espera incremental que el ticket promete.
+- **El máximo es una decisión operacional.** No es el máximo de `float` ni
+  `timedelta.max`, que serían cotas falsas: una espera de mil años es
+  representable y no la programa nadie. `sincronizar` es un comando finito que
+  una persona lanza y espera, y una sola espera de más de un día sobrevive a
+  cualquier sesión manual. De paso deja fuera `1e308`, que hacía estallar
+  `timedelta` con un `OverflowError` a mitad de una pasada.
+
+El **lease** —`4 × EDGE_HTTP_TIMEOUT + 30 s`— se deriva de una de ellas, y tiene
+que caber en el mismo intervalo. De ahí sale un límite implícito:
+
+```
+EDGE_HTTP_TIMEOUT ≤ 21592.5 s
+```
+
+Todo esto se comprueba **al construir la política**, antes de que exista una
+petición HTTP, antes de incrementar `intentos`, antes de insertar una fila en
+`intento_sincronizacion` y antes de mover el estado de ningún evento. Una
+configuración fuera de rango termina en `Error: ...` por `stderr` y **código 1**,
+con la base local intacta.
+
 `data/edge/` está en `.gitignore`: la base del nodo es un artefacto local y
 **nunca** se versiona. No hay ninguna variable para credenciales, porque el nodo
 no las necesita: escribe en un archivo local y habla HTTP con un endpoint que
@@ -601,6 +668,19 @@ todavía no tiene autenticación.
 Un `FALLIDO` **reintentable** (error de transporte, `5xx`) vuelve a la cola. Un
 `FALLIDO` **en revisión** (`409`, `404`, `422`) no: repetir la misma operación
 esperando otra respuesta no es una política, es una espera.
+
+Un `FALLIDO` en revisión guarda además **por qué** dejó de reintentarse, en
+`motivo_revision`:
+
+| Motivo | Qué ocurrió |
+| --- | --- |
+| `RECHAZO_PERMANENTE` | la API lo rechazó: `409`, `4xx`, o un `201` que no cumple el contrato |
+| `AGOTAMIENTO` | consumió todos sus intentos sin confirmarse |
+| `AGOTAMIENTO_HEREDADO` | traía de SCRUM-64 tantos intentos como el límite que adoptó |
+
+Se guarda en vez de deducirse porque deducirlo dependería del `EDGE_MAX_ATTEMPTS`
+del momento en que se mira, y un evento no debería cambiar de diagnóstico porque
+alguien editara un `.env`.
 
 `ENVIADO` no se degrada nunca. Si dos envíos coincidieran, el que llegue después
 con un fallo tardío no puede sobrescribir una entrega ya confirmada.
@@ -655,26 +735,184 @@ Con la API **encendida** (`uvicorn app.main:app` desde `backend/`, contra una
 base en `head`):
 
 ```powershell
-python scripts/edge_node.py --base data/edge/demo.sqlite3 enviar
-python scripts/edge_node.py --base data/edge/demo.sqlite3 estado
+python scripts/edge_node.py --base data/edge/demo.sqlite3 sincronizar
+python scripts/edge_node.py --base data/edge/demo.sqlite3 traza <clave>
 ```
 
-El evento pasa a `ENVIADO`. Ejecutar `enviar` otra vez selecciona cero eventos:
+El evento pasa a `ENVIADO`. Ejecutar `sincronizar` otra vez no selecciona nada:
 lo confirmado no se reenvía. Y si la confirmación se hubiera perdido, el
 siguiente intento sería un *replay* con los mismos identificadores —una sola
 sesión en PostgreSQL—.
 
+Para ver la recuperación completa, basta apagar la API, lanzar `sincronizar` con
+un límite pequeño y volver a encenderla antes de que se agoten los intentos:
+
+```powershell
+python scripts/edge_node.py --base data/edge/demo.sqlite3 sincronizar --max-intentos 3 --espera-base 5
+```
+
+El primer intento falla, el comando anuncia la espera, y al recuperarse la API el
+siguiente termina en `201`. Si la API no vuelve, los tres intentos se consumen y
+el evento queda `FALLIDO` con motivo `AGOTAMIENTO` —**no hay un cuarto**—.
+
+#### Códigos de salida de `sincronizar`
+
+| Código | Significado |
+| --- | --- |
+| `0` | la outbox estaba vacía, o todo lo relevante quedó `ENVIADO` |
+| `1` | error controlado de almacenamiento o de configuración |
+| `2` | queda al menos un evento agotado, rechazado o bloqueado: hace falta una persona |
+| `3` | condición interna inesperada: quedó trabajo elegible que no pudo intentarse |
+
+`enviar` conserva sus códigos `0` y `1` de SCRUM-64.
+
+### Reintentos, espera incremental y agotamiento
+
+`sincronizar` aplica una política **finita, configurable y única**: no hay una
+fórmula en el emisor y otra en el reintento.
+
+```
+delay(k) = min(EDGE_BASE_DELAY_SECONDS × 2^(k-1), EDGE_MAX_DELAY_SECONDS)
+```
+
+`k` es el **número ordinal del intento que acaba de fallar**. No es «los intentos
+previos»: esa lectura produce un desfase de uno, y con intentos heredados de
+SCRUM-64 se nota enseguida. Un evento que trae tres intentos de la versión
+anterior hace el número 4; si falla, le toca `delay(4)`.
+
+Cuántas duplicaciones caben hasta el techo **depende de la base**, así que no hay
+ningún tope fijo del exponente: el punto de saturación se deriva de los dos
+valores configurados. Con las omisiones la séptima espera ya está en el techo;
+en el extremo del rango admisible —base 1 µs, techo 24 h— hacen falta 38. Un
+ordinal enorme devuelve el techo, sin desbordarse.
+
+> **`EDGE_MAX_ATTEMPTS` incluye el primer intento.** Con 3 hay un intento
+> inmediato y dos reintentos, y **no existe un cuarto intento automático**.
+
+Con los valores por omisión —5 intentos, base 1 s, techo 60 s— la secuencia es:
+
+```
+intento 1   inmediato
+intento 2   tras 1 s
+intento 3   tras 2 s
+intento 4   tras 4 s
+intento 5   tras 8 s
+            agotado: FALLIDO / AGOTAMIENTO
+```
+
+Suma de esperas: **15 segundos**. A eso hay que añadir el tiempo de las cinco
+peticiones HTTP. Es una estimación de las condiciones del prototipo, no un máximo
+real: httpx no impone una fecha límite total de petición, y sus timeouts de
+lectura y escritura acotan la inactividad entre fragmentos, no la duración
+completa.
+
+No hay *jitter*: un solo nodo no tiene manada que dispersar.
+
+Un error **permanente** no espera nada. Gasta un intento y se cierra.
+
+### Las cuatro fechas de un evento
+
+| Fecha | Dónde vive | Qué significa exactamente |
+| --- | --- | --- |
+| **captura** | `captura_local.capturado_en` | instante leído del reloj **inmediatamente antes** de abrir la transacción de captura |
+| **intento** | `intento_sincronizacion.iniciado_en` | inicio de cada intento. **Una fila por intento**, no un único «último» |
+| **confirmación** | `finalizado_en` del intento que aplicó la transición | instante en que el edge **recibió y validó** una aceptación. Reloj local del nodo |
+| **sincronización** | `outbox.enviado_en` | instante registrado para la transición local a `ENVIADO` |
+
+Todas en UTC con zona explícita. La de confirmación se **deriva** del intento que
+movió la fila, en lugar de copiarse a la outbox: dos copias del mismo instante en
+dos tablas no se pueden mantener iguales con ninguna restricción de SQLite, y
+acabarían discrepando.
+
+PostgreSQL conserva además su propia evidencia temporal en
+`operacional.idempotencia_solicitud.fecha_hora`. Son **relojes distintos** y la
+documentación no finge lo contrario.
+
+Un evento entregado antes de SCRUM-65 no tiene historial de intentos, así que su
+confirmación aparece como «no medida». No se rellena con `enviado_en`, que es
+otra medición de otro momento.
+
+### Consultar la traza de un evento
+
+```powershell
+python scripts/edge_node.py traza 7c9e6679-7425-40de-944b-e07fc1f90ae7
+```
+
+El identificador de correlación **es la `Idempotency-Key`**. No se creó un
+segundo identificador: la clave ya nace en el nodo, ya viaja en cada petición, ya
+está guardada en `operacional.idempotencia_solicitud`, es opaca y no contiene
+ningún dato clínico. Dos identificadores para la misma operación solo se pueden
+desincronizar.
+
+La salida distingue los desenlaces posibles —pendiente sin intentar, en espera de
+un nuevo intento, confirmado en primera aceptación, confirmado por *replay*,
+agotado, rechazado permanentemente— y muestra la secuencia de intentos con su
+resultado, su código HTTP y la espera que se aplicó después de cada uno.
+
+**Nunca imprime** el paquete, un valor clínico, una credencial, una URL, una
+cabecera, SQL ni un *stack trace*, y no hay ninguna opción para pedirlos.
+
+La correlación completa es:
+
+```
+SQLite: outbox.clave_idempotencia
+  → HTTP: cabecera Idempotency-Key
+  → PostgreSQL: operacional.idempotencia_solicitud (recurso, clave)
+  → id_sesion e ids_lectura de esa misma fila
+```
+
+### Evolución del almacenamiento local
+
+El esquema local está versionado con `PRAGMA user_version`. SCRUM-64 creó la
+versión 1; esta versión es la 2, y `init` **actualiza una base v1 conservando
+todos sus eventos**: no hay que borrar nada.
+
+```powershell
+python scripts/edge_node.py --base data/edge/demo.sqlite3 init
+# Almacenamiento local actualizado a la version actual. Los eventos guardados se
+# conservaron; los intentos anteriores se cuentan como heredados y no tienen
+# historial detallado.
+```
+
+Los intentos que una base v1 ya había consumido se conservan en
+`intentos_heredados` y **el contador no se reinicia**: cuentan para el límite. Lo
+que no existe es su detalle, porque nunca se guardó, y la traza lo dice en vez de
+inventarlo:
+
+```
+intentos            : 4 de 5  (3 heredados de SCRUM-64, sin historial detallado)
+secuencia de intentos:
+  1-3                 sin historial disponible: capturados antes de SCRUM-65
+  4                   2026-03-01T12:00:01+00:00 | REINTENTABLE | http 503 | espera 8 s
+```
+
+Una base de una versión que esta instalación no conoce se **rechaza**; no se
+migra ni se reescribe.
+
+### Un intento que se quedó sin respuesta
+
+Si el proceso muere entre el envío y el guardado del resultado, el intento queda
+registrado **sin desenlace**. La siguiente ejecución lo repara: lo marca como
+observado —sin inventarle un resultado— y, según queden intentos o no, programa
+el siguiente o declara el agotamiento.
+
+Que la ventana de recuperación venza **autoriza** a repararlo; no demuestra que
+la petición original haya terminado. Una respuesta puede llegar más tarde, y el
+diseño lo trata como caso normal: si es una entrega válida, prevalece; si es un
+fallo, se guarda en el historial y no reabre un evento ya cerrado. Lo que impide
+un duplicado no es esa ventana, sino la misma `Idempotency-Key` de siempre.
+
 ### Lo que este nodo todavía no hace
 
-`enviar` ejecuta **una** pasada finita y termina. No hay servicio permanente, ni
-detección automática de conectividad, ni reintentos programados, ni *backoff*.
-Lo que este componente demuestra es que **una pasada siempre se puede volver a
-ejecutar sin riesgo**; el mecanismo que la ejecute sola es trabajo posterior y
-no debe darse por implementado.
+No hay servicio permanente, ni demonio, ni detección automática de conectividad,
+ni orquestación de varios nodos, ni métricas operativas, ni purga de la outbox.
+`sincronizar` es un comando que empieza, hace su trabajo y termina; quien decida
+ejecutarlo periódicamente es trabajo posterior y no debe darse por implementado.
+Tampoco hay autenticación: el endpoint al que entrega todavía no la tiene.
 
 ## Calidad del proyecto
 
-- **Integración continua:** el workflow [`CI`](.github/workflows/ci.yml) se ejecuta en cada Pull Request hacia `main`, instala el backend con Python 3.12 y corre las pruebas automatizadas. Contra un servicio PostgreSQL 16 efímero se validan las migraciones, la carga idempotente del dataset, el endpoint de ingesta, la idempotencia de reenvíos —concurrencia real incluida— y el ciclo completo del nodo edge simulado hasta PostgreSQL; el job queda en rojo si alguna de esas pruebas se omite en lugar de ejecutarse.
+- **Integración continua:** el workflow [`CI`](.github/workflows/ci.yml) se ejecuta en cada Pull Request hacia `main`, instala el backend con Python 3.12 y corre las pruebas automatizadas. Contra un servicio PostgreSQL 16 efímero se validan las migraciones, la carga idempotente del dataset, el endpoint de ingesta, la idempotencia de reenvíos —concurrencia real incluida—, el ciclo completo del nodo edge simulado hasta PostgreSQL y su sincronización resiliente con reintentos, reconciliación y trazabilidad; el job queda en rojo si alguna de esas pruebas se omite en lugar de ejecutarse. Las pruebas de tiempo no duermen: el reloj y la espera se inyectan.
 - **Criterios de cierre de un ticket:** [Definition of Done](docs/definition_of_done.md).
 
 ## Estrategia de ramas

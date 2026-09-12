@@ -31,9 +31,10 @@ from app.edge.cliente import (
     RUTA_SESIONES,
     ClienteEdge,
     ResultadoEntrega,
+    clasificar,
 )
 from app.edge.emisor import ejecutar_pasada
-from app.edge.estados import EstadoEntrega
+from app.edge.estados import EstadoEntrega, MotivoRevision
 from tests.test_edge_captura import (
     PAQUETE_DE_UNA_LECTURA,
     paquete_con_sincronizacion,
@@ -218,6 +219,228 @@ def test_un_rechazo_de_validacion_no_es_exito_ni_reintentable(conexion, codigo):
     fila = outbox.leer_evento(conexion, registro.id_outbox)
     assert fila["estado"] == EstadoEntrega.FALLIDO.value
     assert fila["reintentable"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Los limites de la familia reintentable
+#
+# El contrato promete reintentos para la **familia 5xx**, ni un codigo menos ni
+# uno mas. Estas pruebas fijan los dos bordes y la decision sobre 408 y 429, que
+# son los casos que una lectura descuidada movería de lado.
+# ---------------------------------------------------------------------------
+
+
+def test_un_599_sigue_siendo_reintentable(conexion):
+    """El borde superior de la familia, con su desenlace completo.
+
+    ``599`` es 5xx y por tanto se reintenta: queda ``FALLIDO`` reintentable, sin
+    motivo de revision --no requiere una persona-- y con su proxima fecha ya
+    programada.
+    """
+    registro = capturar_uno(conexion)
+    resumen = ejecutar_pasada(conexion, cliente_con(respuesta_fija(599, {"detail": "x"})))
+
+    assert resumen.reintentables == 1
+    assert resumen.rechazados == 0
+    fila = outbox.leer_evento(conexion, registro.id_outbox)
+    assert fila["estado"] == EstadoEntrega.FALLIDO.value
+    assert fila["reintentable"] == 1
+    assert fila["motivo_revision"] is None
+    assert fila["proximo_intento_en"] is not None
+    assert fila["ultimo_http"] == 599
+
+
+@pytest.mark.parametrize("codigo", [600, 699, 999])
+def test_un_codigo_por_encima_de_la_familia_5xx_no_se_reintenta(conexion, codigo):
+    """La cota superior de ``5xx`` no es decoracion.
+
+    Escrita como ``500 <= codigo``, la condicion se traga cualquier codigo no
+    estandar por arriba y el nodo insistiria contra una respuesta que no
+    pertenece a ninguna familia documentada y que nada promete que vaya a
+    mejorar. Aqui se comprueba lo contrario: cae en «respuesta inesperada»,
+    gasta un solo intento y se cierra para revision.
+    """
+    registro = capturar_uno(conexion)
+    resumen = ejecutar_pasada(conexion, cliente_con(respuesta_fija(codigo, {"detail": "x"})))
+
+    assert resumen.rechazados == 1
+    assert resumen.reintentables == 0
+    fila = outbox.leer_evento(conexion, registro.id_outbox)
+    assert fila["estado"] == EstadoEntrega.FALLIDO.value
+    assert fila["reintentable"] == 0
+    assert fila["motivo_revision"] == MotivoRevision.RECHAZO_PERMANENTE.value
+    assert fila["proximo_intento_en"] is None
+    assert fila["ultimo_http"] == codigo
+
+
+# ---------------------------------------------------------------------------
+# El detalle remoto no entra en la traza
+#
+# El endpoint compone sus mensajes con el paquete que recibio --«No existe un
+# embarazo con id_embarazo=999999.»-- asi que conservarlo «porque lo escribimos
+# nosotros» metia valores del paquete en SQLite y los sacaba por ``traza``.
+# Truncar acotaba el tamano y no hacia nada con el contenido.
+# ---------------------------------------------------------------------------
+
+DETALLE_ENVENENADO = (
+    "No existe un embarazo con id_embarazo=999999. "
+    "El dispositivo id_dispositivo=100 no tiene asignacion que cubra la sesion "
+    "del 2025-02-24T14:21:00+00:00 al 2025-02-24T14:25:00+00:00. "
+    "hr_valor=137 spo2_valor=96 mov_valor=12. "
+    "postgresql://operador:contrasena_secreta@servidor.invalid:5432/fetalalert. "
+    "SELECT * FROM operacional.embarazo WHERE id_embarazo = 999999; "
+    "Traceback (most recent call last): File 'ingesta.py', line 118, in _leer"
+)
+
+# Cada uno identifica algo que jamas debe salir del edge: una referencia del
+# paquete, un instante clinico, un valor biometrico, una credencial, SQL o un
+# rastro de excepcion.
+#
+# **Ninguno puede ser una cifra corta suelta.** El texto que se inspecciona
+# incluye instantes ISO con seis digitos de microsegundos y un UUID4, asi que un
+# marcador de tres digitos coincide por azar: "137" aparece en el 0.4% de los
+# valores de microsegundo posibles, y con los seis instantes que lleva una traza
+# eso es cerca de una ejecucion fallida de cada once, sin que haya fuga alguna.
+# Los valores biometricos van por tanto anclados a su nombre de campo, que es
+# ademas lo que de verdad identifica al paquete.
+MARCADORES_PROHIBIDOS = (
+    "id_embarazo", "id_dispositivo", "hr_valor", "spo2_valor", "mov_valor",
+    "999999", "2025-02-24", "operador", "contrasena_secreta",
+    "servidor.invalid", "postgresql://", "SELECT", "operacional.embarazo",
+    "Traceback", "ingesta.py",
+)
+
+# Y aun asi el texto inspeccionado se hace determinista, que es la unica defensa
+# que no depende de acertar con la longitud de cada marcador: un instante fijo y
+# una clave fija, elegidos para que su propio texto no contenga ninguno.
+INSTANTE_FIJO = datetime(2026, 4, 5, 8, 30, 45, 500000, tzinfo=timezone.utc)
+CLAVE_FIJA = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+
+
+def _sin_marcadores(texto, contexto):
+    assert texto is not None, contexto
+    for marcador in MARCADORES_PROHIBIDOS:
+        assert marcador not in texto, f"{contexto} filtro '{marcador}': {texto!r}"
+
+
+def _marcadores_ausentes_del_andamiaje():
+    """El instante y la clave de esta seccion no disparan el filtro por si solos."""
+    for texto in (INSTANTE_FIJO.isoformat(), CLAVE_FIJA):
+        _sin_marcadores(texto, "andamiaje de la prueba")
+
+
+def test_el_andamiaje_de_esta_seccion_no_dispara_el_filtro():
+    """Sin esto, la prueba de abajo podria fallar por su propio decorado."""
+    _marcadores_ausentes_del_andamiaje()
+
+
+@pytest.mark.parametrize("codigo", [400, 404, 409, 422, 500, 503])
+def test_el_detalle_remoto_nunca_llega_a_la_entrega(codigo):
+    """Clasificacion pura: ni un caracter del ``detail`` sale en ``Entrega``."""
+    respuesta = httpx.Response(
+        codigo,
+        json={"detail": DETALLE_ENVENENADO},
+        request=httpx.Request("POST", BASE + RUTA_SESIONES),
+    )
+    entrega = clasificar(respuesta, lecturas_enviadas=1)
+
+    _sin_marcadores(entrega.error, f"Entrega.error ({codigo})")
+    # Lo util si se conserva: el codigo y la clasificacion.
+    assert str(codigo) in entrega.error
+    assert entrega.codigo_http == codigo
+
+
+@pytest.mark.parametrize("codigo", [404, 409, 422, 500])
+def test_el_detalle_remoto_no_se_persiste_ni_aparece_en_la_traza(conexion, codigo):
+    """Los cuatro destinos: outbox, historial, ``Entrega`` y la traza.
+
+    El reloj y la clave se inyectan fijos porque el texto que se inspecciona es
+    el ``repr`` entero de la traza, instantes incluidos: con el reloj real, los
+    seis digitos de microsegundos generaban coincidencias espurias con los
+    marcadores numericos y la prueba fallaba sin que hubiera fuga.
+    """
+    registro = cap.capturar(
+        conexion,
+        PAQUETE_DE_UNA_LECTURA,
+        generador_de_clave=lambda: CLAVE_FIJA,
+        reloj=lambda: INSTANTE_FIJO,
+    )
+    ejecutar_pasada(
+        conexion,
+        cliente_con(respuesta_fija(codigo, {"detail": DETALLE_ENVENENADO})),
+        reloj=lambda: INSTANTE_FIJO,
+    )
+
+    fila = outbox.leer_evento(conexion, registro.id_outbox)
+    _sin_marcadores(fila["ultimo_error"], "outbox.ultimo_error")
+
+    intento = conexion.execute(
+        "SELECT error FROM intento_sincronizacion WHERE id_outbox = ?",
+        (registro.id_outbox,),
+    ).fetchone()
+    _sin_marcadores(intento["error"], "intento_sincronizacion.error")
+
+    traza = outbox.leer_traza(conexion, clave=registro.clave)
+    plano = repr(traza) + " ".join(repr(i) for i in traza.intentos_registrados)
+    _sin_marcadores(plano, "leer_traza")
+
+    # Y lo que si se conserva sigue ahi.
+    assert fila["ultimo_http"] == codigo
+
+
+def test_la_forma_del_detalle_si_se_conserva(conexion):
+    """Distinguir «texto», «estructurado con N» y «sin cuerpo» sigue siendo util.
+
+    Es informacion sobre la **respuesta**, no sobre el paquete: dice si el
+    servidor rechazo el cuerpo campo por campo o si contesto algo que ni siquiera
+    es esta API.
+    """
+    respuesta_texto = httpx.Response(
+        404, json={"detail": DETALLE_ENVENENADO},
+        request=httpx.Request("POST", BASE + RUTA_SESIONES),
+    )
+    assert "detalle textual (no se registra)" in clasificar(
+        respuesta_texto, lecturas_enviadas=1
+    ).error
+
+    respuesta_lista = httpx.Response(
+        422, json={"detail": [{"input": 137}, {"input": 96}]},
+        request=httpx.Request("POST", BASE + RUTA_SESIONES),
+    )
+    error_lista = clasificar(respuesta_lista, lecturas_enviadas=1).error
+    assert "2 entrada(s)" in error_lista
+    _sin_marcadores(error_lista, "detalle estructurado")
+
+    respuesta_vacia = httpx.Response(
+        500, content=b"<html>no soy esta API</html>",
+        request=httpx.Request("POST", BASE + RUTA_SESIONES),
+    )
+    assert "sin cuerpo JSON" in clasificar(respuesta_vacia, lecturas_enviadas=1).error
+
+
+@pytest.mark.parametrize("codigo", [408, 429])
+def test_408_y_429_siguen_siendo_permanentes(conexion, codigo):
+    """Una decision consciente, no un olvido.
+
+    Los dos codigos *suenan* transitorios --tiempo agotado y demasiadas
+    peticiones-- y en otro servicio lo serian. En este no: el endpoint no
+    implementa ni timeouts de peticion ni limitacion de tasa, asi que tratarlos
+    como recuperables anadiria un camino que ninguna prueba podria ejercer
+    contra el servidor real y abriria la cuestion de honrar ``Retry-After``, que
+    **no se implementa**. Si algun dia el servidor los emitiera, esta prueba es
+    el sitio donde la decision tendria que revisarse a proposito.
+    """
+    registro = capturar_uno(conexion)
+    resumen = ejecutar_pasada(conexion, cliente_con(respuesta_fija(codigo, {"detail": "x"})))
+
+    assert resumen.rechazados == 1
+    assert resumen.reintentables == 0
+    fila = outbox.leer_evento(conexion, registro.id_outbox)
+    assert fila["estado"] == EstadoEntrega.FALLIDO.value
+    assert fila["reintentable"] == 0
+    assert fila["motivo_revision"] == MotivoRevision.RECHAZO_PERMANENTE.value
+    assert fila["proximo_intento_en"] is None
+    assert fila["ultimo_http"] == codigo
 
 
 @pytest.mark.parametrize(
@@ -431,9 +654,28 @@ def test_un_fallido_en_revision_no_vuelve_a_seleccionarse(conexion):
 
 
 def test_un_fallido_reintentable_si_vuelve_a_seleccionarse(conexion):
+    """Sigue en la cola, y desde SCRUM-65 tambien se sabe *cuando*.
+
+    Un fallo recuperable programa su proximo intento, asi que la seleccion que
+    respeta esa fecha no lo devuelve todavia; la que la ignora --la del comando
+    manual ``enviar``-- si. Las dos mitades se afirman aqui para que la politica
+    no pueda desaparecer sin que una de ellas falle.
+    """
     capturar_uno(conexion)
     ejecutar_pasada(conexion, cliente_con(respuesta_fija(503, {"detail": "x"})))
-    assert len(outbox.seleccionar_elegibles(conexion, limite=10)) == 1
+
+    assert outbox.seleccionar_elegibles(conexion, limite=10) == ()
+    assert (
+        len(
+            outbox.seleccionar_elegibles(
+                conexion, limite=10, respetar_programacion=False
+            )
+        )
+        == 1
+    )
+
+    despues = outbox.ahora_utc() + timedelta(hours=1)
+    assert len(outbox.seleccionar_elegibles(conexion, limite=10, ahora=despues)) == 1
 
 
 def test_el_limite_acota_la_pasada(conexion):
@@ -606,13 +848,16 @@ def test_una_pasada_sobre_un_evento_ya_entregado_lo_reporta_sin_degradarlo(conex
     original = emisor_modulo.outbox.seleccionar_elegibles
     try:
         emisor_modulo.outbox.seleccionar_elegibles = (
-            lambda conexion_bd, *, limite: seleccion_vieja
+            lambda conexion_bd, **argumentos: seleccion_vieja
         )
         resumen = ejecutar_pasada(conexion, cliente_con(transporte_caido(httpx.ReadTimeout)))
     finally:
         emisor_modulo.outbox.seleccionar_elegibles = original
 
+    # Desde SCRUM-65 ni siquiera se llega a la red: la reclamacion vuelve a
+    # comprobar el predicado completo y no encuentra nada que reclamar.
     assert resumen.ya_entregados == 1
+    assert resumen.reclamados == 0
     assert resumen.reintentables == 0
     assert estado_de(conexion, registro.id_outbox) == EstadoEntrega.ENVIADO.value
 
