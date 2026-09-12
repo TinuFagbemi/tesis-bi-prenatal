@@ -2,11 +2,13 @@ from itertools import chain
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import CheckConstraint, engine_from_config, pool
+from sqlalchemy import CheckConstraint, MetaData, engine_from_config, pool
 
+import app.etl.modelos  # noqa: F401  -- registers the analytic tables on BaseAnalitica.metadata
 import app.models  # noqa: F401  -- registers every model on Base.metadata
 from app.config import settings
-from app.db.base import Base
+from app.db.base import NAMING_CONVENTION, Base
+from app.db.base_analitica import BaseAnalitica
 
 config = context.config
 if config.config_file_name is not None:
@@ -14,7 +16,36 @@ if config.config_file_name is not None:
 
 config.set_main_option("sqlalchemy.url", settings.database_url)
 
-target_metadata = Base.metadata
+# One registry per schema (SCRUM-69): the operational one keeps its own contract
+# of 23 tables and the analytic one holds the star schema. Alembic compares the
+# database against a single MetaData holding a copy of every table of both,
+# under the naming convention they share.
+#
+# A single MetaData, and not the list Alembic also accepts, because Alembic
+# applies the naming convention to its operations -- ``op.create_table`` and the
+# rest -- only when ``target_metadata`` is a MetaData that carries one. With a
+# list, the CHECK constraints that back the enums of the first revision would
+# be created under their bare names on a fresh database, and the deployed schema
+# would stop matching the models. Leaving the analytic tables out instead would
+# make autogenerate see them as unknown, and ``alembic check`` would propose
+# dropping a schema the project owns.
+target_metadata = MetaData(naming_convention=NAMING_CONVENTION)
+
+
+def _esquema_referido(tabla, esquema_destino, restriccion, esquema_referido):
+    """Schema of the table a copied foreign key points at.
+
+    The models write their foreign keys without a schema ("paciente.id_paciente")
+    and each registry resolves them in its own default schema. The combined
+    MetaData has no default, so the copy names it explicitly: no foreign key
+    crosses from one schema to the other, so it is always the table's own.
+    """
+    return esquema_referido or tabla.schema
+
+
+for registro in (Base.metadata, BaseAnalitica.metadata):
+    for tabla in registro.tables.values():
+        tabla.to_metadata(target_metadata, referred_schema_fn=_esquema_referido)
 
 # Every operational table lives in the non-default ``operacional`` schema. Without
 # include_schemas=True Alembic only reflects the connection's default schema, so
