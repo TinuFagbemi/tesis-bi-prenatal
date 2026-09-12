@@ -284,21 +284,20 @@ Ya hecho:
 
 - el trabajo está confirmado en commits y el árbol local está limpio;
 - la rama `feature/scrum-65-sincronizacion-reintentos-trazabilidad` está
-  **publicada** en GitHub, con sus commits en el remoto.
+  **publicada** en GitHub, con sus commits en el remoto;
+- **el Pull Request #13 existe y está abierto** contra `main`;
+- **GitHub Actions se ejecutó antes del merge y terminó correctamente** sobre el
+  commit revisado (`c4c8851`);
+- **la otra autora revisó el Pull Request y lo aprobó** sobre ese mismo commit.
 
 Todavía **pendiente**:
 
-- **el Pull Request no existe** —y por tanto GitHub Actions no se ha ejecutado
-  para SCRUM-65: el workflow se dispara con `pull_request` hacia `main`, no con
-  un push a una rama de trabajo—;
-- la otra autora no lo ha revisado ni aprobado;
-- no está integrado en `main`;
-- no hay CI posterior al merge.
+- integrar el Pull Request #13 en `main`;
+- comprobar el CI posterior al merge sobre `main`.
 
-La rama parte del `main` que integró SCRUM-64, así que el Pull Request tendrá
+La rama parte del `main` que integró SCRUM-64, así que el Pull Request #13 tiene
 `main` como base y
-`feature/scrum-65-sincronizacion-reintentos-trazabilidad` como head, y el CI se
-disparará solo al abrirlo.
+`feature/scrum-65-sincronizacion-reintentos-trazabilidad` como head.
 
 ## Estado verificado localmente de SCRUM-64
 
