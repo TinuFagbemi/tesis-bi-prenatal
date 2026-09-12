@@ -90,7 +90,8 @@ jobs:
             --ignore=tests/test_ingestion_api_postgresql.py \
             --ignore=tests/test_ingestion_idempotency_postgresql.py \
             --ignore=tests/test_edge_postgresql.py \
-            --ignore=tests/test_edge_sincronizacion_postgresql.py
+            --ignore=tests/test_edge_sincronizacion_postgresql.py \
+            --ignore=tests/test_etl_postgresql.py
 
       # Segunda capa: ciclo real upgrade -> downgrade -> upgrade -> alembic check
       # contra el servicio PostgreSQL de arriba. Corre antes que las pruebas del
@@ -180,10 +181,25 @@ jobs:
           SCRUM65_TEST_DATABASE_URL: postgresql+psycopg://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
         run: python -m pytest -q -rs tests/test_edge_sincronizacion_postgresql.py --junitxml=pytest-scrum65.xml
 
+      # Octava capa: el esquema analítico y el ETL. A diferencia de las capas
+      # anteriores, esta suite no escribe sobre la base del servicio: la usa
+      # solo como conexión de mantenimiento para crear bases temporales propias
+      # (prefijo scrum69_tmp_), migrarlas, cargar el dataset canónico, ejecutar
+      # el ETL con commits reales -- rollback, candado, idempotencia -- y
+      # eliminarlas al terminar. Solo elimina las que ella misma creó. El rol
+      # efímero del servicio puede crear bases, y nada más lo necesita.
+      #
+      # Va la última y en serie, como todas: ninguna otra suite ve sus bases.
+      - name: Pruebas del esquema analítico y el ETL contra PostgreSQL (SCRUM-69)
+        working-directory: backend
+        env:
+          SCRUM69_TEST_DATABASE_URL: postgresql+psycopg://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
+        run: python -m pytest -q -rs tests/test_etl_postgresql.py --junitxml=pytest-scrum69.xml
+
       # La variable de entorno de cada capa es lo único que evita que su archivo
       # quede omitido, y pytest devuelve 0 aunque se salte todo. Por eso los
       # reportes JUnit se revisan después: un solo <skipped> en cualquiera de
-      # los seis tumba el job.
+      # los siete tumba el job.
       - name: Verificar que ninguna prueba de PostgreSQL quedó omitida
         working-directory: backend
         run: |
@@ -199,6 +215,7 @@ jobs:
               "pytest-scrum63.xml": "SCRUM63_TEST_DATABASE_URL",
               "pytest-scrum64.xml": "SCRUM64_TEST_DATABASE_URL",
               "pytest-scrum65.xml": "SCRUM65_TEST_DATABASE_URL",
+              "pytest-scrum69.xml": "SCRUM69_TEST_DATABASE_URL",
           }
 
           fallo = False
