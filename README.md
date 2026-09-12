@@ -40,13 +40,13 @@ El sistema se organiza en cinco capas:
 2. **Simulación del nodo edge / almacenamiento temporal** — un componente en Python con SQLite que representa el comportamiento de un nodo edge: almacena lecturas localmente y mantiene una cola de registros pendientes de sincronización.
 3. **Backend central** — una API REST desarrollada con **FastAPI**, responsable de autenticación, autorización, validación, y recepción de datos sincronizados de forma asíncrona (no en tiempo real).
 4. **Persistencia** — **PostgreSQL**, con un modelo operacional normalizado y un modelo dimensional (Star Schema) para analítica.
-5. **ETL y analítica** — procesos ETL en Python/pandas que alimentan dashboards en **Microsoft Power BI**, actualizados de forma periódica/asíncrona tras cada sincronización — no en tiempo real. Power BI está destinado exclusivamente a personal médico o autorizado.
+5. **ETL y analítica** — un proceso ETL *batch* reproducible en **Python/SQLAlchemy** que transforma el esquema `operacional` en el esquema analítico `analitico` de **PostgreSQL**, previsto para una ejecución periódica (nocturna). **Microsoft Power BI** consume después el esquema `analitico`. No se ejecuta necesariamente tras cada sincronización, y no hay *scheduler* ni demonio implementado: el mecanismo de ejecución es el comando `scripts/etl_analitico.py`. La actualización es asíncrona — nunca en tiempo real — y Power BI está destinado exclusivamente a personal médico o autorizado.
 
 ## Seguimiento dual: gestante y personal médico
 
 El objetivo general contempla un seguimiento **dual** entre la gestante y el personal médico, con niveles de acceso distintos:
 
-- **Personal médico/autorizado:** accede a la analítica y los dashboards en Power BI, alimentados por el ETL tras cada sincronización.
+- **Personal médico/autorizado:** accede a la analítica y los dashboards en Power BI, alimentados por el ETL *batch* en su ejecución periódica, no tras cada sincronización.
 - **Gestante:** el sistema contempla algún mecanismo de acceso limitado a su propia información, separado de Power BI. **La forma concreta de implementación de este acceso (aplicación, portal, u otro canal) todavía no está definida** y se documentará en esta sección una vez confirmada. No debe asumirse que ya existe una interfaz para la gestante.
 
 ## Flujo simulado de conectividad intermitente
@@ -77,7 +77,7 @@ Para representar el comportamiento de zonas rurales con conectividad inestable, 
 - **Hash de contraseñas:** Argon2id
 - **Cifrado de datos en tránsito:** HTTPS/TLS
 - **Protección de datos:** anonimización (sobre datos ficticios), auditoría (`AuditoriaLog`) y controles alineados con la Ley 81 de 2019 de Panamá
-- **ETL:** Python, pandas, SQLAlchemy
+- **ETL:** Python, SQLAlchemy, PostgreSQL
 - **Analítica y dashboards:** Microsoft Power BI Desktop
 - **Pruebas automatizadas:** pytest
 - **Documentación/pruebas manuales de API:** Swagger/OpenAPI (integrado en FastAPI)
@@ -87,7 +87,7 @@ Para representar el comportamiento de zonas rurales con conectividad inestable, 
 ## Modelos de datos
 
 - **Modelo operacional:** modelo relacional normalizado en PostgreSQL para el funcionamiento del sistema (pacientes, embarazos, sesiones de monitoreo, lecturas, usuarios, roles, auditoría, etc.), con datos exclusivamente ficticios y sintéticos.
-- **Modelo dimensional (Star Schema vigente):**
+- **Modelo dimensional (Star Schema vigente)**, implementado en el esquema `analitico` (ver [Esquema analítico y ETL](#esquema-analítico-y-etl)):
   - `Fact_LecturaBiometrica` — tabla de hechos central.
   - `Dim_Paciente`
   - `Dim_Medico`
@@ -124,7 +124,7 @@ tesis-bi-prenatal/
 
 ## Estado actual del proyecto
 
-El repositorio se encuentra en una etapa temprana. Lo que ya existe y funciona es el esquema operacional en PostgreSQL con sus migraciones, el generador del dataset simulado, su carga idempotente, el endpoint que recibe una sesión de monitoreo con sus lecturas biométricas —con su contrato de idempotencia— y el nodo edge simulado, que captura paquetes sin conexión y los entrega después sin duplicarlos, con reintentos de espera incremental, agotamiento controlado y trazabilidad de extremo a extremo. **Aún no existen un servicio permanente o demonio que dispare esa sincronización por sí solo, la detección automática de conectividad, el ETL, el modelo dimensional, la autenticación y autorización, ni los dashboards**, y el endpoint disponible todavía no tiene control de acceso. El desarrollo activo se encuentra actualmente en el Sprint 4, y todo el trabajo se desarrolla y prueba en un entorno controlado/local, no en comunidades rurales reales.
+El repositorio se encuentra en una etapa temprana. Lo que ya existe y funciona es el esquema operacional en PostgreSQL con sus migraciones, el generador del dataset simulado, su carga idempotente, el endpoint que recibe una sesión de monitoreo con sus lecturas biométricas —con su contrato de idempotencia—, el nodo edge simulado, que captura paquetes sin conexión y los entrega después sin duplicarlos, con reintentos de espera incremental, agotamiento controlado y trazabilidad de extremo a extremo, y el esquema analítico (Star Schema) con su ETL reproducible, idempotente e incremental. **Aún no existen un servicio permanente o demonio que dispare la sincronización o el ETL por sí solo, la detección automática de conectividad, la autenticación y autorización, la seguridad por fila ni los dashboards**, y el endpoint disponible todavía no tiene control de acceso. El desarrollo activo se encuentra actualmente en el Sprint 4, y todo el trabajo se desarrolla y prueba en un entorno controlado/local, no en comunidades rurales reales.
 
 ## Roadmap general
 
@@ -910,9 +910,178 @@ ni orquestación de varios nodos, ni métricas operativas, ni purga de la outbox
 ejecutarlo periódicamente es trabajo posterior y no debe darse por implementado.
 Tampoco hay autenticación: el endpoint al que entrega todavía no la tiene.
 
+## Esquema analítico y ETL
+
+El modelo dimensional aprobado —el Star Schema del Capítulo III, versión 6 del
+diagrama— vive en su propio esquema de PostgreSQL, `analitico`, junto a
+`operacional` y en la misma base. Lo alimenta un ETL *batch* reproducible: lee
+`operacional`, clasifica cada lectura con la Tabla de Umbrales de Tamizaje y
+carga dimensiones, bridge y hechos. Los tableros de Power BI, que se construirán
+después, leerán únicamente `analitico`; el ETL no los crea.
+
+### Qué contiene
+
+| Estructura del modelo | Tabla física | Grano |
+| --- | --- | --- |
+| `Fact_LecturaBiometrica` | `analitico.fact_lectura_biometrica` | una fila por lectura biométrica operacional (`id_lectura`) |
+| `Dim_Paciente` | `analitico.dim_paciente` | una fila por paciente |
+| `Dim_Medico` | `analitico.dim_medico` | una fila por médico |
+| `Dim_Clinica` | `analitico.dim_clinica` | una fila por clínica |
+| `Dim_TiempoGestacional` | `analitico.dim_tiempo_gestacional` | una fila por semana del catálogo |
+| `Dim_Embarazo` | `analitico.dim_embarazo` | una fila por embarazo |
+| `Dim_Semaforo` | `analitico.dim_semaforo` | una fila por nivel (OK, WARNING, ERROR) |
+| `Dim_FactorRiesgo` | `analitico.dim_factor_riesgo` | una fila por factor de riesgo |
+| `Bridge_EmbarazoFactorRiesgo` | `analitico.bridge_embarazo_factor_riesgo` | una fila por par embarazo/factor |
+
+- Las dimensiones usan como clave el identificador operacional, sin claves
+  sustitutas ni historial: se sobrescriben en su lugar (tipo 1).
+- `id_sesion` es una **adición técnica** al hecho respecto del diagrama: permite
+  contar sesiones —732 frente a 1,180 lecturas— y rastrear cada lectura hasta su
+  sesión, sin crear otra dimensión.
+- Ninguna tabla de `analitico` tiene llave foránea hacia `operacional`. La
+  trazabilidad se conserva con las claves operacionales copiadas y la comprueba
+  la conciliación.
+- El médico de cada lectura es el del seguimiento PRINCIPAL vigente ese día, y
+  debe estar afiliado ese mismo día a la clínica del embarazo; si no, la
+  ejecución se detiene.
+- La clínica de `Dim_Medico` y `Dim_Paciente` es contexto y admite NULL cuando
+  todavía no hay relación —una paciente sin embarazo registrado, un médico sin
+  afiliación—: nunca una clínica inventada. La ruta para filtrar por clínica es
+  `Fact_LecturaBiometrica.id_clinica`.
+- `Dim_Embarazo.clasificacion_embarazo` queda en NULL: el modelo la prevé, pero
+  las fuentes de negocio aún no definen una regla de clasificación. El ETL no
+  inventa semántica clínica y cada ejecución informa cuántas quedan pendientes.
+
+El mapeo campo por campo, las reglas y las verificaciones están en
+[docs/modelo_analitico_etl.md](docs/modelo_analitico_etl.md).
+
+### Ejecutar
+
+Requisitos: la base en `alembic upgrade head` y el esquema operacional con
+datos —por ejemplo, el dataset simulado cargado como se explica arriba. La
+conexión sale de `DATABASE_URL`, igual que el cargador; si el comando se ejecuta
+desde Windows fuera de Docker, esa variable debe apuntar a `localhost` y al
+puerto publicado por el contenedor.
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe -m alembic upgrade head
+cd ..
+.\backend\.venv\Scripts\python.exe scripts\etl_analitico.py ejecutar    # carga incremental y conciliación
+.\backend\.venv\Scripts\python.exe scripts\etl_analitico.py conciliar   # solo conciliación, sin escribir
+```
+
+`ejecutar` es una única transacción: o se confirma completa —dimensiones, bridge
+y hechos— o no queda nada. No hay scheduler ni demonio: una ejecución nocturna
+futura invocaría este mismo comando.
+
+Ejemplo de la primera ejecución sobre el dataset simulado (salida resumida; no
+contiene ningún dato personal):
+
+```text
+ETL analítico FetalAlert
+resultado=SUCCESS
+revision_alembic=60facdbacf51
+version_umbrales=SIM-1.0
+dim_paciente: insertadas=30 actualizadas=0 sin_cambios=0
+bridge_embarazo_factor_riesgo: insertadas=23 actualizadas=0 sin_cambios=0
+hechos_nuevos=1180
+hechos_existentes=0
+conciliacion=OK verificaciones=27 fallidas=0
+lecturas_origen=1180 hechos=1180
+sesiones_con_lecturas_origen=732 sesiones_en_hecho=732 sesiones_monitoreo=732
+forma_signos_maternos=560 forma_movimiento=620
+semaforo: OK=826 WARNING=295 ERROR=59
+estado_hr: OK=472 WARNING=76 ERROR=12
+estado_spo2: OK=478 WARNING=64 ERROR=18
+estado_mov: OK=436 WARNING=155 ERROR=29
+clasificacion_embarazo_pendiente=30
+```
+
+Una segunda ejecución sobre el mismo origen informa `hechos_nuevos=0` y todas
+las dimensiones `sin_cambios`.
+
+| Código | Significado |
+| ---: | --- |
+| `0` | éxito (en `conciliar`: sin diferencias) |
+| `1` | error de configuración, de precondición o de base de datos |
+| `2` | el origen contiene algo que las reglas no permiten cargar sin inventar: un valor sin regla, una derivación ambigua o un semáforo distinto del registrado |
+| `3` | la conciliación encontró diferencias |
+| `4` | otra ejecución tiene el candado |
+
+### Clasificación: estados por métrica y semáforo global
+
+El ETL calcula `estado_hr`, `estado_spo2` y `estado_mov` con la versión
+**SIM-1.0** de los umbrales, que traduce la Tabla de Umbrales de Tamizaje a
+intervalos sobre valores continuos:
+
+| Métrica | ERROR | WARNING | OK |
+| --- | --- | --- | --- |
+| Frecuencia cardíaca materna (lpm) | `< 55` o `> 110` | `55 ≤ HR < 60` o `100 ≤ HR ≤ 110` | `60 ≤ HR < 100` |
+| SpO₂ (%) | `< 92` | `92 ≤ SpO₂ < 95` | `≥ 95` |
+| Movimientos fetales (conteo) | `< 5` | `5 – 9` | `≥ 10` |
+
+- El 100 figura en la tabla como normal y como precaución: gana la mayor
+  severidad, así que es WARNING.
+- Entre 55 y 60 lpm la clasificación es WARNING: una bradicardia que todavía no
+  alcanza el umbral de alerta es precaución de **tamizaje**, no un diagnóstico
+  individual. Los intervalos son exhaustivos, así que ningún valor de HR detiene
+  la ejecución.
+- El umbral de movimientos, 10, es la referencia de validación del dataset
+  simulado, no una afirmación clínica universal. No hay movimientos válidos antes
+  de la semana 20.
+- Una métrica que no aplica queda en NULL, igual que su estado; `mov_valor = 0`
+  es un conteo real y se clasifica.
+
+El semáforo global es el estado más severo de las métricas que aplican. Antes de
+confirmar, el ETL lo compara con el semáforo que la lectura ya tiene en
+`operacional`: si alguno difiere, la ejecución completa se revierte y no se
+corrige ni el origen ni el hecho.
+
+### Idempotencia, incrementalidad y recuperación
+
+- **Lecturas nuevas:** son las cuyo `id_lectura` no está en el hecho. Esa
+  comparación de conjuntos encuentra una llegada tardía con fecha clínica
+  antigua, un identificador menor que el mayor ya cargado o un hueco en la
+  secuencia. No se usa `MAX(id)`, ni una marca de agua por fecha, ni
+  `fecha_hora_sincronizacion`, ni la fecha de la tabla de idempotencia.
+- **Dimensiones:** se actualizan solo si algún valor cambió de verdad.
+- **Hechos:** son inmutables y se insertan con un `INSERT` normal. Si una
+  lectura ya cargada cambia o desaparece en el origen, la conciliación lo
+  detecta y la ejecución falla sin actualizar ni borrar el hecho; si una clave
+  candidata ya existiera, la inserción falla en lugar de saltarse la fila.
+- **Una sola transacción `REPEATABLE READ`,** cuya primera sentencia toma un
+  candado de transacción de PostgreSQL (`pg_try_advisory_xact_lock`): una
+  segunda ejecución simultánea se detiene en el acto, sin leer ni escribir, y
+  termina con código 4. El candado lo libera PostgreSQL al confirmar o al
+  revertir, así que no existe ninguna liberación manual.
+- **Conciliación completa antes del commit**, con SQL independiente del código
+  que transforma: conteos, conjuntos de claves, contenido, semáforo, formas de
+  lectura, huérfanos, médico responsable, clínicas, dimensiones y bridge.
+- **Sin tabla de control:** el progreso es el propio conjunto de claves del
+  hecho, y solo avanza cuando la transacción se confirma.
+
+### Seguridad
+
+La salida del comando contiene solo identificadores técnicos, conteos y códigos.
+Nunca imprime una cédula, un nombre, un teléfono, un correo, un valor biométrico,
+`DATABASE_URL` ni una contraseña, y un error de base de datos se describe sin su
+sentencia ni sus parámetros. Las dimensiones de paciente y médico contienen los
+atributos personales del modelo aprobado, con datos exclusivamente simulados;
+la seguridad por fila, la seudonimización y el acceso de solo lectura para Power
+BI corresponden a tickets posteriores y no están implementados aquí.
+
+### Desarrollo apilado
+
+Durante su desarrollo, este trabajo se construye sobre la rama de la
+sincronización diferida del nodo edge, todavía en revisión: la revisión de
+Alembic del esquema analítico (`60facdbacf51`) se apoya en `87d8ed46686b`. La
+sincronización no cambió PostgreSQL, así que el ETL no depende de su código;
+solo comparte la misma línea base.
+
 ## Calidad del proyecto
 
-- **Integración continua:** el workflow [`CI`](.github/workflows/ci.yml) se ejecuta en cada Pull Request hacia `main`, instala el backend con Python 3.12 y corre las pruebas automatizadas. Contra un servicio PostgreSQL 16 efímero se validan las migraciones, la carga idempotente del dataset, el endpoint de ingesta, la idempotencia de reenvíos —concurrencia real incluida—, el ciclo completo del nodo edge simulado hasta PostgreSQL y su sincronización resiliente con reintentos, reconciliación y trazabilidad; el job queda en rojo si alguna de esas pruebas se omite en lugar de ejecutarse. Las pruebas de tiempo no duermen: el reloj y la espera se inyectan.
+- **Integración continua:** el workflow [`CI`](.github/workflows/ci.yml) se ejecuta en cada Pull Request hacia `main`, instala el backend con Python 3.12 y corre las pruebas automatizadas. Contra un servicio PostgreSQL 16 efímero se validan las migraciones, la carga idempotente del dataset, el endpoint de ingesta, la idempotencia de reenvíos —concurrencia real incluida—, el ciclo completo del nodo edge simulado hasta PostgreSQL, su sincronización resiliente con reintentos, reconciliación y trazabilidad, y el esquema analítico con su ETL —carga inicial, idempotencia, incrementalidad, rollback, candado y zona horaria— sobre bases temporales propias; el job queda en rojo si alguna de esas pruebas se omite en lugar de ejecutarse. Las pruebas de tiempo no duermen: el reloj y la espera se inyectan.
 - **Criterios de cierre de un ticket:** [Definition of Done](docs/definition_of_done.md).
 
 ## Estrategia de ramas
