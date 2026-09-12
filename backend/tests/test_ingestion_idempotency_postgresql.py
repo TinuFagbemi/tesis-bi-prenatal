@@ -112,7 +112,10 @@ VARIABLE_DE_ENTORNO = "SCRUM63_TEST_DATABASE_URL"
 MOTOR_REQUERIDO = "postgresql"
 
 REVISION_INICIAL = "150788f88be7"
-REVISION_HEAD = "87d8ed46686b"
+# The revision this suite validates. Since SCRUM-69 it is no longer the head of
+# the chain -- the analytic schema sits on top of it -- so the cycle below names
+# it explicitly instead of assuming the head is SCRUM-63's.
+REVISION_SCRUM_63 = "87d8ed46686b"
 TABLA_IDEMPOTENCIA = "idempotencia_solicitud"
 
 pytestmark = pytest.mark.skipif(
@@ -287,7 +290,10 @@ def ciclo_de_la_revision(engine_de_pruebas, url_de_pruebas):
         # es lo que de verdad mantiene el ciclo lejos de la base de desarrollo.
         parche.setattr(settings, "database_url", url_de_pruebas)
 
-        command.downgrade(config, "-1")
+        # The target is named, not relative: «-1» would now revert the analytic
+        # revision that sits on top, and this cycle is about SCRUM-63's. Going
+        # down to the initial revision takes every later revision with it.
+        command.downgrade(config, REVISION_INICIAL)
         fotografia["tras_downgrade"] = _revision_estampada(engine_de_pruebas)
         fotografia["tabla_tras_downgrade"] = _tiene_la_tabla(engine_de_pruebas)
 
@@ -304,16 +310,23 @@ def ciclo_de_la_revision(engine_de_pruebas, url_de_pruebas):
     return fotografia
 
 
-def test_el_head_de_la_cadena_es_la_revision_de_scrum_63():
-    script = ScriptDirectory.from_config(construir_config_alembic())
+def _head_de_la_cadena() -> str:
+    return ScriptDirectory.from_config(construir_config_alembic()).get_current_head()
 
-    assert script.get_heads() == [REVISION_HEAD]
+
+def test_la_revision_de_scrum_63_sigue_en_la_cadena_y_el_head_desciende_de_ella():
+    script = ScriptDirectory.from_config(construir_config_alembic())
+    [head] = script.get_heads()
+
     assert script.get_bases() == [REVISION_INICIAL]
-    assert script.get_revision(REVISION_HEAD).down_revision == REVISION_INICIAL
+    assert script.get_revision(REVISION_SCRUM_63).down_revision == REVISION_INICIAL
+    assert REVISION_SCRUM_63 in {
+        revision.revision for revision in script.iterate_revisions(head, "base")
+    }
 
 
 def test_la_base_parte_del_head(ciclo_de_la_revision):
-    assert ciclo_de_la_revision["partida"] == REVISION_HEAD
+    assert ciclo_de_la_revision["partida"] == _head_de_la_cadena()
 
 
 def test_el_downgrade_retrocede_hasta_la_revision_inicial(ciclo_de_la_revision):
@@ -323,7 +336,7 @@ def test_el_downgrade_retrocede_hasta_la_revision_inicial(ciclo_de_la_revision):
 
 
 def test_el_upgrade_vuelve_a_dejar_la_base_en_el_head(ciclo_de_la_revision):
-    assert ciclo_de_la_revision["tras_upgrade"] == REVISION_HEAD
+    assert ciclo_de_la_revision["tras_upgrade"] == _head_de_la_cadena()
     assert ciclo_de_la_revision["tabla_tras_upgrade"] is True
 
 
