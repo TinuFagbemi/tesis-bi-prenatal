@@ -1382,3 +1382,287 @@ reporte `pytest-scrum65.xml` incorporado al guardián que pone el job en rojo si
 alguna prueba de PostgreSQL queda omitida. Va después de SCRUM-64 por la misma
 razón de siempre: en serie es seguro compartir la base efímera, en paralelo no lo
 sería. Las cuatro suites nuevas sin servidor entran en el bloque offline.
+
+## SCRUM-69 — Esquema analítico y proceso ETL reproducible
+
+Hasta aquí el sistema guardaba lecturas; ninguna estaba lista para analizarse.
+Este ticket materializa el modelo dimensional aprobado —el Star Schema v6 del
+Capítulo III— y el ETL que lo alimenta desde `operacional`. Las fuentes de
+autoridad se separaron así: el **modelo objetivo** lo fijan el diagrama v6, el
+Capítulo III y su Tabla de Umbrales; **qué datos existen** lo fijan los modelos,
+las migraciones y el dataset; **cómo se implementa sin romper nada** lo fijan
+Alembic, las pruebas y el CI. Una columna que no existe en `operacional` no se
+elimina del modelo si el Capítulo III dice que el ETL debe derivarla.
+
+### Decisiones aprobadas
+
+**Un esquema propio, `analitico`, y un registro declarativo propio.** Las nueve
+tablas viven en `BaseAnalitica` (`app/db/base_analitica.py`), no en `Base`: el
+contrato de 23 tablas operacionales sigue describiendo exactamente lo mismo, y
+las pruebas analíticas son un contrato aparte. Ambos registros comparten la
+convención de nombres. Los nombres físicos son snake_case; los del diagrama
+(`Fact_LecturaBiometrica`, `Dim_Paciente`...) son los nombres lógicos y se
+documentan.
+
+**Grano: una fila del hecho por lectura operacional**, con la misma
+`id_lectura` como clave. Las dimensiones reutilizan el identificador
+operacional: sin claves sustitutas, sin secuencias, sin SCD tipo 2, sin staging
+permanente. Las dimensiones son tipo 1.
+
+**`id_sesion`, refinamiento aditivo.** El diagrama no lo tiene; se añadió como
+dimensión degenerada, `INTEGER NOT NULL`, indexada y sin llave foránea, porque
+contar filas del hecho no es contar sesiones (1,180 lecturas, 732 sesiones) y el
+análisis de adherencia necesita `COUNT(DISTINCT id_sesion)`. No cambia el grano.
+Debe reflejarse después en el diagrama.
+
+**`id_tiempo_gestacional` apunta a `id_tiempo_gest`.** No se «unificaron» los
+nombres: una llave foránea no necesita llamarse como la clave que referencia, y
+el diagrama ya los define distintos.
+
+**Correcciones físicas, nunca cambios de negocio.** Donde un tipo del diagrama
+podía truncar o redondear un valor que `operacional` acepta, se usó el más
+amplio: `NUMERIC(5,2)` para HR y SpO₂ (el diagrama decía `INT` y
+`DECIMAL(4,1)`), `TIMESTAMPTZ` para `fecha_hora` (el diagrama decía `TIMESTAMP`),
+`BIGINT` para `id_lectura` como dibujado, y en los textos las longitudes
+operacionales —nombre completo 243 = 4 × 60 + 3 separadores, teléfonos 120,
+correo 120, clínica 150, provincia y distrito 60, factores 50 y 150, mensaje
+255, versión 30, descripciones `TEXT`—. `especialidad` es `VARCHAR(100)`: el 504
+del diagrama se trató como error tipográfico. Donde el tipo dibujado ya era un
+superconjunto seguro, se conservó (`VARCHAR(7)` para `codigo_nivel`, cuyo valor
+más largo es «WARNING»).
+
+**Sin llaves foráneas hacia `operacional`.** Dentro de `analitico` sí existen las
+llaves dimensionales; ninguna sale del esquema. La trazabilidad se conserva con
+las claves operacionales copiadas y la demuestra la conciliación. Así el
+almacén no queda atado al ciclo transaccional.
+
+**Dos llaves foráneas con nombre explícito.** La convención produciría 71 y 67
+caracteres y PostgreSQL recorta en 63 sin avisar; se nombraron
+`fk_fact_lectura_id_tiempo_gestacional` y
+`fk_bridge_embarazo_factor_id_factor_riesgo`, y una prueba compara los nombres
+desplegados con los declarados.
+
+**Estados por métrica y semáforo global.** El ETL calcula `estado_hr`,
+`estado_spo2` y `estado_mov` —el Capítulo III dice que el ETL «calcula el estado
+clínico de cada variable»— con códigos `OK`, `WARNING` y `ERROR`, y `NULL`
+cuando la métrica no aplica. El semáforo global es el estado más severo de las
+métricas aplicables (OK < WARNING < ERROR), se resuelve contra `Dim_Semaforo` y
+se **compara** con el `id_semaforo` que la lectura ya tiene en `operacional`: si
+difieren, la ejecución falla y se revierte. Los conteos 826/295/59 se miden
+sobre el semáforo analítico.
+
+**Umbrales SIM-1.0, en un solo lugar.** `app/etl/reglas.py` es el único sitio
+del repositorio donde viven:
+
+- HR: `< 55` o `> 110` es ERROR, `55 ≤ HR < 60` y `100 ≤ HR ≤ 110` son WARNING,
+  `60 ≤ HR < 100` es OK. La Tabla 4 pone el 100 en dos rangos: gana la mayor
+  severidad.
+- **`55 ≤ HR < 60` es WARNING, y la regla es exhaustiva.** Una primera versión
+  trató ese intervalo como un hueco de la tabla y lo convirtió en un error de
+  dominio que revertía la ejecución. La revisión cerró la regla: una bradicardia
+  que todavía no alcanza el umbral de alerta es **precaución de tamizaje**, no
+  un diagnóstico individual ni un dato imposible. Los intervalos de HR cubren
+  ahora la recta continua, ningún valor detiene la carga por falta de regla y el
+  pendiente «regla clínica para HR 55–59» queda cerrado.
+- SpO₂: `< 92` ERROR, `92 ≤ SpO₂ < 95` WARNING, `≥ 95` OK. La frontera de la
+  tabla es 95 y el valor es continuo: 94.5 es WARNING, no hay hueco.
+- Movimientos: `≥ 10` OK, `5 ≤ mov < 10` WARNING, `< 5` ERROR, e inválido antes
+  de la semana 20. La tabla habla de un «umbral por trimestre» sin números; 10
+  es la constante con la que se construyó el dataset simulado, no una afirmación
+  clínica universal. La función recibe el trimestre para que una versión futura
+  pueda variarlo.
+- La versión de las reglas debe coincidir con `version_referencia` del catálogo
+  del semáforo, y la prioridad del catálogo con el orden de severidad.
+
+El generador no se convirtió en clasificador. Una prueba comprueba que su umbral
+coincide y que los valores que fabrica para cada nivel caen en ese nivel.
+
+**Día clínico: America/Panama.** El médico de cada lectura es el del seguimiento
+PRINCIPAL cuyo periodo cubre la fecha de captura convertida a la zona de Panamá,
+porque las fechas de seguimiento son fechas clínicas de ese contexto. Uno se
+usa; ninguno es un error de integridad; dos son una ambigüedad. No se elige «el
+primero» ni el menor identificador, y no se consulta `activo`: un seguimiento
+cerrado sigue cubriendo las lecturas tomadas mientras estuvo abierto. APOYO y
+REEMPLAZO no se usan: ninguna fuente dice cómo sustituyen al PRINCIPAL.
+
+**Clínicas y teléfonos derivados sin elegir.** La clínica del hecho es siempre
+la del embarazo de esa lectura. `Dim_Medico.id_clinica` y
+`Dim_Paciente.id_clinica` son **atributos de contexto** —derivados de
+`medico_clinica` y de los embarazos de la paciente— y obedecen a una sola regla:
+
+- si **no** existe ninguna relación aplicable, la columna queda **NULL**;
+- si existe exactamente **una** clínica distinta, se deriva esa clínica;
+- si existen **varias** clínicas distintas, hay ambigüedad y la transformación
+  falla.
+
+Nunca se elige «la primera», ni el identificador menor, ni ninguna otra clínica
+de forma arbitraria. Esas dos columnas son contexto, no una segunda ruta de
+filtrado.
+
+Esto **no** relaja la regla del médico del hecho, que es más estricta y vive
+aparte: `Fact_LecturaBiometrica.id_medico` exige el seguimiento PRINCIPAL
+vigente en la fecha clínica, el médico correspondiente y una afiliación de ese
+médico a la clínica del embarazo aplicable ese mismo día. Para el hecho, cero
+afiliaciones aplicables sigue siendo un error que detiene la ejecución.
+
+El teléfono es el contacto `CELULAR` marcado como principal: uno se usa,
+ninguno es NULL, dos fallan.
+
+**`duracion_est_semanas` se deriva** de `fecha_probable_parto − fecha_inicio`,
+en semanas enteras (280 días, 40 semanas, en todo el dataset). Un residuo no se
+redondea: no hay regla aprobada, así que detiene la ejecución.
+
+**`clasificacion_embarazo`, pendiente y visible.** Campo previsto por el modelo
+dimensional v6. La versión actual de las fuentes de negocio no define una regla
+de clasificación. SCRUM-69 conserva el atributo como nullable, sin CHECK de
+valores, y no inventa semántica clínica. No es un NULL silencioso: cada
+ejecución informa `clasificacion_embarazo_pendiente` (30 en la base canónica).
+No se usa en criterios de aceptación, semáforos, filtros, clasificación clínica
+ni seguridad por fila. Rellenarlo después es cambiar una función, no reconstruir
+el almacén.
+
+**Bridge con los atributos del diagrama.** `id_embarazo`, `id_factor_riesgo`,
+`fecha_diagnostico`, `activo`, `observaciones` y una clave primaria compuesta
+que garantiza la idempotencia. `fecha_fin` no se añadió. Una relación que
+desaparece del origen no se borra: la conciliación la señala y la ejecución
+falla, hasta que exista una política de borrado aprobada.
+
+**Incrementalidad por anti-join.** Una lectura es nueva si su `id_lectura` no
+está en el hecho. Se descartaron `MAX(id)` —pierde una transacción que toma un
+identificador menor y confirma después—, la marca de agua por fecha clínica
+—pierde una llegada tardía—, `fecha_hora_sincronizacion` —el edge la envía
+NULL— e `idempotencia_solicitud.fecha_hora` —es la hora de la reclamación, no la
+del commit, y no existe para lo que cargó SCRUM-61. El anti-join no ve una
+lectura ya cargada que cambió; eso lo ve la conciliación completa, que falla sin
+actualizar el hecho: los hechos son inmutables.
+
+**Una transacción `REPEATABLE READ` cuya primera sentencia es el candado.**
+`pg_try_advisory_xact_lock` se toma dentro de la misma transacción del ETL y
+antes que cualquier otra consulta. No espera: si otra ejecución lo tiene, esta
+termina de inmediato con código 4 sin haber leído ni escrito nada. Lo libera
+PostgreSQL al confirmar o al revertir, así que **no hay ningún
+`pg_advisory_unlock`** y ningún camino puede dejarlo tomado. Extracción, cargas
+y conciliación ven la misma instantánea, y cualquier error revierte todo,
+dimensiones y bridge incluidos.
+
+Queda una ventana mínima, y es la razón por la que el hecho se inserta con un
+`INSERT` normal: bajo `REPEATABLE READ` la instantánea se fija en esa primera
+sentencia, así que una ejecución que arranque justo mientras otra confirma
+podría fijarla un instante antes de ver ese commit y tomar el candado un
+instante después de que se libere. Su anti-join seleccionaría filas ya
+insertadas y la inserción chocaría con sus llaves primarias: la ejecución falla,
+se revierte y basta con repetirla. Preferimos ese fallo ruidoso a un
+`ON CONFLICT DO NOTHING` que lo convertiría en filas saltadas en silencio.
+
+**Los hechos se insertan sin `ON CONFLICT`.** El anti-join selecciona las
+lecturas que el hecho no tiene y el candado garantiza un único escritor; una
+clave que aun así exista es una anomalía, no un caso previsto. La violación de
+integridad se traduce a un error con su SQLSTATE —sin la sentencia ni sus
+valores— y revierte la ejecución. Además se comprueba que las filas insertadas
+sean exactamente las candidatas detectadas.
+
+**El médico del hecho debe estar afiliado ese día a la clínica del embarazo.**
+Al seguimiento PRINCIPAL vigente se le añade la comprobación de
+`medico_clinica`: exactamente una afiliación cuyo periodo
+(`fecha_inicio`–`fecha_final`, bordes inclusivos) cubra el día clínico de
+Panamá, y que sea la clínica del embarazo. `activo` no filtra: una afiliación
+cerrada sigue cubriendo los días en que estuvo abierta. Cero afiliaciones,
+afiliación a otra clínica o dos afiliaciones aplicables detienen la ejecución;
+como `medico_clinica` tiene clave (médico, clínica), dos aplicables son siempre
+dos clínicas el mismo día, y ninguna fuente dice cuál gana. La conciliación
+repite la comprobación en SQL.
+
+**La clínica de `Dim_Medico` y `Dim_Paciente` admite NULL.** Es un atributo de
+contexto: NULL significa que todavía no hay relación —una paciente sin embarazo
+registrado, un médico sin afiliación—, nunca una clínica inventada, y no debe
+usarse como ruta de filtrado. Una entidad maestra sin relación ya no detiene la
+carga completa; dos clínicas distintas siguen siendo una ambigüedad que la
+detiene. El médico al que apunta un hecho siempre tiene afiliación, y es la
+comprobación por fecha la que lo garantiza.
+
+**`tzdata` se declara en `requirements.txt`.** El día clínico usa
+`ZoneInfo("America/Panama")`, y en Windows la base de zonas horarias llega solo
+con ese paquete. Hasta ahora aparecía como dependencia transitiva de `psycopg`;
+depender de eso es depender de un detalle ajeno. Se declara sin tope superior
+porque su versión es el año de la base IANA: fijar un máximo dejaría de recibir
+cambios de zonas.
+
+**Sin `etl_log`.** Ninguna fuente vigente exige guardar el historial de
+ejecuciones; la planificación antigua que lo mencionaba no prevalece sobre el
+modelo aprobado. El progreso es el conjunto de claves del hecho, y la evidencia
+reproducible es la salida estructurada del comando.
+
+**Limpieza = validar y fallar.** El texto vigente del Capítulo III y de la
+Figura 5 describe la limpieza como la eliminación de lecturas duplicadas o fuera
+de rango. SCRUM-69 adopta deliberadamente una política más conservadora: el
+origen ya impide duplicados y valores fuera de rango, y lo que las reglas no
+admiten hace fallar la ejecución y provoca rollback, sin descartar la lectura en
+silencio. Es una decisión de implementación consciente —una lectura que
+desaparece sin dejar rastro es peor que una ejecución que se detiene y se
+reejecuta corregida—, no una descripción de lo que hoy dice la tesis: el texto y
+el diagrama quedan pendientes de actualización.
+
+**Conciliación independiente.** `app/etl/conciliacion.py` no importa las reglas
+ni la transformación: repite en SQL las derivaciones —nombre, teléfono, clínica,
+médico responsable con `AT TIME ZONE 'America/Panama'`, duración— y compara. Los
+umbrales no se duplican ahí; los estados por métrica se verifican con las
+pruebas de frontera y, en SQL, con dos señales independientes: el global debe ser
+el más severo y debe coincidir con el de origen. Dos verificaciones son
+informativas: la semana recalculada con el día de Panamá (la API validó la
+semana con el offset recibido, que `TIMESTAMPTZ` no conserva) y las sesiones sin
+lecturas, que no generan hechos porque el grano es la lectura.
+
+**Un comando batch, sin scheduler.** `scripts/etl_analitico.py` con dos órdenes,
+`ejecutar` y `conciliar` (solo lectura). La cadencia nocturna del Capítulo III
+es la de un proceso que invocaría este mismo comando. Códigos de salida: 0
+éxito, 1 configuración o base de datos, 2 origen rechazado por las reglas, 3
+conciliación fallida, 4 candado ocupado. La salida solo lleva identificadores,
+conteos y códigos; un error de base de datos se describe sin sentencia ni
+parámetros.
+
+**Cambios mínimos en lo heredado.** `alembic/env.py` compara la base contra un
+único `MetaData` que contiene una copia de las tablas de los dos registros, con
+la convención de nombres compartida. No se usó la lista de metadatas que Alembic
+también acepta, y el motivo quedó demostrado: Alembic solo aplica la convención
+de nombres a sus operaciones (`op.create_table`) cuando `target_metadata` es un
+`MetaData` que la lleva, y con una lista los CHECK de los enums de la primera
+revisión se creaban con su nombre corto en una base nueva. La prueba de
+migración de SCRUM-52 lo detectó; la suite de SCRUM-69 añade una prueba que lo
+fija. Al copiar, cada llave foránea sin esquema recibe el de su propia tabla
+(ninguna cruza de esquema), y los nombres, destinos y CHECK ligados a tipos de
+la copia son idénticos a los de los registros. `test_migrations.py`
+reconoce tres revisiones y aparta las sentencias del esquema analítico antes de
+contar las operacionales —con una prueba que demuestra que solo apartó esas—.
+La suite de SCRUM-63 sigue probando su propia revisión: la nombra, baja
+explícitamente a la inicial en lugar de usar «-1» y comprueba que el head
+desciende de ella. El cargador no se tocó.
+
+### Validación
+
+Cuatro archivos de pruebas nuevos sin servidor —reglas, transformación, contrato
+del esquema y de su revisión, y comando— y uno contra PostgreSQL 16 que crea sus
+propias bases temporales (`scrum69_tmp_`), las migra, carga el dataset canónico
+y ejecuta el ETL con commits reales: primera carga, segunda ejecución idéntica,
+incremento por el endpoint con *replay*, llegada tardía, identificador menor que
+el máximo, lectura modificada, dimensión tipo 1, relación desaparecida, lectura
+inválida con recuperación, semáforo discrepante, médico ambiguo, candado,
+zona horaria y salida del comando sin datos personales. Solo elimina las bases
+que creó en esa ejecución, comprobadas por nombre.
+
+### Integración continua
+
+El workflow gana un octavo paso, `Pruebas del esquema analítico y el ETL contra
+PostgreSQL (SCRUM-69)`, con su propia variable `SCRUM69_TEST_DATABASE_URL`
+—construida de la misma fuente única— y su reporte `pytest-scrum69.xml` en el
+guardián de omisiones. Esa URL es solo la conexión de mantenimiento: la suite no
+escribe sobre la base del servicio.
+
+### Pendiente fuera del código
+
+- Regla de negocio de `clasificacion_embarazo`.
+- Umbrales de movimiento por trimestre, si el proyecto los define.
+- Actualizar el diagrama v6 y el Capítulo III: `id_sesion`, las correcciones
+  físicas de tipos y longitudes, la clave del bridge, TIMESTAMPTZ, SIM-1.0 y
+  sus fronteras, America/Panama, y el comando como mecanismo del batch. El
+  diccionario del Capítulo III describe `hr_valor` como frecuencia cardíaca
+  fetal; el modelo la define materna.

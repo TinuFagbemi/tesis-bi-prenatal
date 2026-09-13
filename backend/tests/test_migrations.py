@@ -11,6 +11,13 @@ than one revision. Rendering only the head would compare a single ``CREATE
 TABLE`` against the twenty-three tables of the metadata and fail for the wrong
 reason.
 
+**The operational schema only.** From SCRUM-69 the chain also deploys the
+analytic schema, whose contract lives in ``test_etl_esquema.py``. The rendered
+chain is therefore split by schema before anything is counted here: every
+statement about ``analitico`` is set aside -- and a test below checks that
+nothing else was -- so the pinned operational counts keep describing exactly
+the twenty-three operational tables, instead of becoming a global total.
+
 The comparison is deliberately structural rather than textual: autogenerate
 emits constraints in alphabetical order while the models declare them in
 whichever order reads best, so each ``CREATE TABLE`` body is split into a set of
@@ -35,7 +42,8 @@ from tests.test_models import ONDELETE_ESPERADOS, TABLAS_ESPERADAS
 
 # SCRUM-52 deployed the operational schema in one revision and every later
 # sprint stacks on top of it. SCRUM-63 adds the second: idempotencia_solicitud.
-CANTIDAD_DE_REVISIONES_ESPERADA = 2
+# SCRUM-69 adds the third, the analytic schema, which touches nothing here.
+CANTIDAD_DE_REVISIONES_ESPERADA = 3
 
 # Shape of the deployed schema, pinned so a silent drift in either the models or
 # the revisions fails here. UNIQUE went from 18 to 17 when the 1:1 between
@@ -150,14 +158,53 @@ def _columnas_enum() -> list[tuple[str, str, list[str]]]:
     ]
 
 
+# The analytic schema of SCRUM-69, named as a literal for the same reason the
+# revisions do: this module describes DDL, not application constants.
+ESQUEMA_ANALITICO = "analitico"
+SEPARADOR_DE_SENTENCIAS = ";\n"
+
+
+def _sentencias(sql: str) -> list[str]:
+    return [sentencia for sentencia in sql.split(SEPARADOR_DE_SENTENCIAS) if sentencia.strip()]
+
+
+def _es_del_esquema_analitico(sentencia: str) -> bool:
+    return ESQUEMA_ANALITICO in sentencia
+
+
+def _solo_operacional(sql: str) -> str:
+    """The rendered chain without the statements about the analytic schema."""
+    return SEPARADOR_DE_SENTENCIAS.join(
+        sentencia for sentencia in _sentencias(sql) if not _es_del_esquema_analitico(sentencia)
+    )
+
+
 @pytest.fixture(scope="module")
 def sql_upgrade() -> str:
-    return _renderizar("upgrade")
+    return _solo_operacional(_renderizar("upgrade"))
 
 
 @pytest.fixture(scope="module")
 def sql_downgrade() -> str:
-    return _renderizar("downgrade")
+    return _solo_operacional(_renderizar("downgrade"))
+
+
+@pytest.mark.parametrize("direccion", ["upgrade", "downgrade"])
+def test_solo_se_apartan_sentencias_del_esquema_analitico(direccion):
+    """The split must not hide an operational statement from the counts below.
+
+    Everything set aside names the analytic schema and none of it names the
+    operational one -- which also means no analytic table references an
+    operational one.
+    """
+    apartadas = [
+        sentencia
+        for sentencia in _sentencias(_renderizar(direccion))
+        if _es_del_esquema_analitico(sentencia)
+    ]
+
+    assert apartadas
+    assert all(SCHEMA_OPERACIONAL not in sentencia for sentencia in apartadas)
 
 
 # --------------------------------------------------------------------------

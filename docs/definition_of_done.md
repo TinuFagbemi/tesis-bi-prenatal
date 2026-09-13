@@ -10,10 +10,10 @@ migraciones, datos simulados o documentación.
       implementado, y nada fuera de su alcance se coló en el cambio.
 - [ ] **Pruebas locales aprobadas.** La suite corre en verde en la computadora
       de quien desarrolla, antes de abrir el Pull Request, desde `backend/`:
-      `python -m pytest -q --ignore=tests/test_migration_postgresql.py --ignore=tests/test_load_mock_data_postgresql.py --ignore=tests/test_ingestion_api_postgresql.py --ignore=tests/test_ingestion_idempotency_postgresql.py --ignore=tests/test_edge_postgresql.py --ignore=tests/test_edge_sincronizacion_postgresql.py`.
+      `python -m pytest -q --ignore=tests/test_migration_postgresql.py --ignore=tests/test_load_mock_data_postgresql.py --ignore=tests/test_ingestion_api_postgresql.py --ignore=tests/test_ingestion_idempotency_postgresql.py --ignore=tests/test_edge_postgresql.py --ignore=tests/test_edge_sincronizacion_postgresql.py --ignore=tests/test_etl_postgresql.py`.
 - [ ] **CI aprobado.** El workflow `CI` (`.github/workflows/ci.yml`) termina en
       verde para el Pull Request. Un job en rojo bloquea el cierre del ticket.
-- [ ] **Pruebas de PostgreSQL ejecutadas y no omitidas.** Los seis archivos que
+- [ ] **Pruebas de PostgreSQL ejecutadas y no omitidas.** Los siete archivos que
       necesitan un servidor real deben ejecutarse de verdad y no aparecer como
       *skipped*:
       `tests/test_migration_postgresql.py`, con `SCRUM52_TEST_DATABASE_URL`
@@ -42,6 +42,13 @@ migraciones, datos simulados o documentación.
       trazabilidad de una misma clave desde SQLite hasta
       `operacional.idempotencia_solicitud`— con el reloj y la espera inyectados,
       de modo que no depende de ningún *sleep* real.
+      Y `tests/test_etl_postgresql.py`, con `SCRUM69_TEST_DATABASE_URL`, que
+      usa esa conexión solo para crear y eliminar sus propias bases temporales
+      (`scrum69_tmp_`): en ellas migra, carga el dataset canónico y ejecuta el
+      ETL analítico con commits reales —carga inicial y conciliación, segunda
+      ejecución idéntica, incremento por el endpoint con *replay*, llegada
+      tardía, identificador menor que el máximo, lectura modificada, rollback,
+      candado y zona horaria—, y no deja ninguna base al terminar.
       El workflow `CI` lo verifica sobre el reporte JUnit de cada ejecución y
       falla el job si al menos una prueba de PostgreSQL queda omitida.
 - [ ] **Pull Request vinculado al ticket de Jira y aprobado.** El PR referencia
@@ -58,6 +65,48 @@ migraciones, datos simulados o documentación.
       README y los documentos de `docs/` lo reflejan.
 - [ ] **Integrado en `main`.** El trabajo quedó incorporado a la rama de
       integración final del ticket.
+
+## Estado verificado localmente de SCRUM-69
+
+Esta sección registra **lo que ya se comprobó en la computadora de desarrollo**,
+como evidencia local previa al Pull Request. **No sustituye la ejecución remota
+de CI ni la revisión de la otra autora.** La rama se desarrolló apilada sobre la
+de SCRUM-65, todavía en revisión.
+
+### Comprobado
+
+- **Conteos de pruebas, reproduciendo los comandos exactos del CI** contra un
+  PostgreSQL 16 desechable, tanto con las versiones del entorno local como con
+  las que instalaría el CI a la fecha (Alembic 1.20.0, SQLAlchemy 2.0.52):
+
+  | Bloque | Resultado |
+  | --- | --- |
+  | Offline (sin servidor PostgreSQL) | 1,215 passed |
+  | Migraciones — SCRUM-52 | 79 passed |
+  | Cargador — SCRUM-61 | 25 passed |
+  | Endpoint — SCRUM-62 | 46 passed |
+  | Idempotencia — SCRUM-63 | 64 passed |
+  | Nodo edge — SCRUM-64 | 20 passed |
+  | Sincronización — SCRUM-65 | 16 passed |
+  | Esquema analítico y ETL — SCRUM-69 | 50 passed |
+  | **Total** | **1,515 passed, 0 failed, 0 skipped** |
+
+  El guardián JUnit del workflow, ejecutado tal cual sobre los siete reportes,
+  confirma 300 pruebas de PostgreSQL ejecutadas y ninguna omitida. Los siete
+  bloques de PostgreSQL dan los mismos conteos con el entorno local y con el
+  del CI, y el guardián termina en 0 en ambos.
+- **Una sola cabeza de Alembic:** `60facdbacf51`, que se apoya en
+  `87d8ed46686b`. El ciclo `upgrade → downgrade → upgrade` y `alembic check`
+  terminan sin diferencias, y el esquema operacional se despliega con los mismos
+  nombres de restricciones de siempre.
+- **Línea base del ETL sobre el dataset canónico:** 1,180 hechos; 732 sesiones
+  distintas en las lecturas de origen y en el hecho, y 732 sesiones con al menos
+  una lectura; 560 lecturas de signos maternos y 620 de movimiento; semáforo
+  826 OK, 295 WARNING y 59 ERROR, idéntico al registrado en `operacional`;
+  `estado_hr` 472/76/12, `estado_spo2` 478/64/18 y `estado_mov` 436/155/29;
+  cero huérfanos, cero combinaciones inválidas de NULL y 30 clasificaciones de
+  embarazo pendientes, reportadas sin ser error. La segunda ejecución no inserta
+  ni actualiza nada.
 
 ## Estado verificado localmente de SCRUM-65
 
@@ -236,17 +285,18 @@ Ya hecho:
 - el trabajo está confirmado en commits y el árbol local está limpio;
 - la rama `feature/scrum-65-sincronizacion-reintentos-trazabilidad` está
   **publicada** en GitHub, con sus commits en el remoto;
-- **el Pull Request #13 existe y está abierto** contra `main`;
+- **el Pull Request #13 se creó** contra `main`;
 - **GitHub Actions se ejecutó antes del merge y terminó correctamente** sobre el
   commit revisado (`c4c8851`);
-- **la otra autora revisó el Pull Request y lo aprobó** sobre ese mismo commit.
+- **la otra autora revisó el Pull Request y lo aprobó** sobre ese mismo commit;
+- **el Pull Request #13 quedó integrado en `main`**, con el merge commit
+  `2b902d0d4575f614bed0223affecad036a817fec`;
+- **el CI posterior al merge terminó correctamente sobre `main`**, en la
+  ejecución `34720038528` disparada por el `push` de ese merge.
 
-Todavía **pendiente**:
+**No queda ninguna verificación externa pendiente para SCRUM-65.**
 
-- integrar el Pull Request #13 en `main`;
-- comprobar el CI posterior al merge sobre `main`.
-
-La rama parte del `main` que integró SCRUM-64, así que el Pull Request #13 tiene
+La rama partió del `main` que integró SCRUM-64, así que el Pull Request #13 tuvo
 `main` como base y
 `feature/scrum-65-sincronizacion-reintentos-trazabilidad` como head.
 
