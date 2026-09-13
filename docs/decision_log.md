@@ -1487,11 +1487,26 @@ REEMPLAZO no se usan: ninguna fuente dice cómo sustituyen al PRINCIPAL.
 
 **Clínicas y teléfonos derivados sin elegir.** La clínica del hecho es siempre
 la del embarazo de esa lectura. `Dim_Medico.id_clinica` y
-`Dim_Paciente.id_clinica` se derivan si la clínica es única (por
-`medico_clinica` y por los embarazos de la paciente) y fallan si hay cero o
-varias. El teléfono es el contacto `CELULAR` marcado como principal: uno se usa,
-ninguno es NULL, dos fallan. Esas dos columnas de clínica son contexto, no una
-segunda ruta de filtrado.
+`Dim_Paciente.id_clinica` son **atributos de contexto** —derivados de
+`medico_clinica` y de los embarazos de la paciente— y obedecen a una sola regla:
+
+- si **no** existe ninguna relación aplicable, la columna queda **NULL**;
+- si existe exactamente **una** clínica distinta, se deriva esa clínica;
+- si existen **varias** clínicas distintas, hay ambigüedad y la transformación
+  falla.
+
+Nunca se elige «la primera», ni el identificador menor, ni ninguna otra clínica
+de forma arbitraria. Esas dos columnas son contexto, no una segunda ruta de
+filtrado.
+
+Esto **no** relaja la regla del médico del hecho, que es más estricta y vive
+aparte: `Fact_LecturaBiometrica.id_medico` exige el seguimiento PRINCIPAL
+vigente en la fecha clínica, el médico correspondiente y una afiliación de ese
+médico a la clínica del embarazo aplicable ese mismo día. Para el hecho, cero
+afiliaciones aplicables sigue siendo un error que detiene la ejecución.
+
+El teléfono es el contacto `CELULAR` marcado como principal: uno se usa,
+ninguno es NULL, dos fallan.
 
 **`duracion_est_semanas` se deriva** de `fecha_probable_parto − fecha_inicio`,
 en semanas enteras (280 días, 40 semanas, en todo el dataset). Un residuo no se
