@@ -10,10 +10,10 @@ migraciones, datos simulados o documentación.
       implementado, y nada fuera de su alcance se coló en el cambio.
 - [ ] **Pruebas locales aprobadas.** La suite corre en verde en la computadora
       de quien desarrolla, antes de abrir el Pull Request, desde `backend/`:
-      `python -m pytest -q --ignore=tests/test_migration_postgresql.py --ignore=tests/test_load_mock_data_postgresql.py --ignore=tests/test_ingestion_api_postgresql.py --ignore=tests/test_ingestion_idempotency_postgresql.py --ignore=tests/test_edge_postgresql.py --ignore=tests/test_edge_sincronizacion_postgresql.py --ignore=tests/test_etl_postgresql.py`.
+      `python -m pytest -q --ignore=tests/test_migration_postgresql.py --ignore=tests/test_load_mock_data_postgresql.py --ignore=tests/test_ingestion_api_postgresql.py --ignore=tests/test_ingestion_idempotency_postgresql.py --ignore=tests/test_edge_postgresql.py --ignore=tests/test_edge_sincronizacion_postgresql.py --ignore=tests/test_etl_postgresql.py --ignore=tests/test_autenticacion_postgresql.py`.
 - [ ] **CI aprobado.** El workflow `CI` (`.github/workflows/ci.yml`) termina en
       verde para el Pull Request. Un job en rojo bloquea el cierre del ticket.
-- [ ] **Pruebas de PostgreSQL ejecutadas y no omitidas.** Los siete archivos que
+- [ ] **Pruebas de PostgreSQL ejecutadas y no omitidas.** Los ocho archivos que
       necesitan un servidor real deben ejecutarse de verdad y no aparecer como
       *skipped*:
       `tests/test_migration_postgresql.py`, con `SCRUM52_TEST_DATABASE_URL`
@@ -49,6 +49,13 @@ migraciones, datos simulados o documentación.
       ejecución idéntica, incremento por el endpoint con *replay*, llegada
       tardía, identificador menor que el máximo, lectura modificada, rollback,
       candado y zona horaria—, y no deja ninguna base al terminar.
+      Y `tests/test_autenticacion_postgresql.py`, con
+      `SCRUM70_TEST_DATABASE_URL`, que crea sus propias bases temporales
+      (`scrum70_tmp_`), las migra, carga el dataset canónico y valida allí
+      la autenticación con hashes Argon2id reales, la matriz de roles y la
+      auditoría con commits de verdad —incluidas las restricciones reales de
+      `auditoria_log`: actor nulo en el login fallido, `ip_origen` NOT NULL y
+      la clave foránea RESTRICT—, y no deja ninguna base al terminar.
       El workflow `CI` lo verifica sobre el reporte JUnit de cada ejecución y
       falla el job si al menos una prueba de PostgreSQL queda omitida.
 - [ ] **Pull Request vinculado al ticket de Jira y aprobado.** El PR referencia
@@ -65,6 +72,49 @@ migraciones, datos simulados o documentación.
       README y los documentos de `docs/` lo reflejan.
 - [ ] **Integrado en `main`.** El trabajo quedó incorporado a la rama de
       integración final del ticket.
+
+## Estado verificado localmente de SCRUM-70
+
+### Comprobado
+
+- Autenticación con las 37 cuentas simuladas del dataset, con hashes Argon2id
+  reales y salt aleatorio de la biblioteca.
+- Los tres perfiles se autentican; en la única operación de negocio, PACIENTE
+  obtiene `201` y ADMIN y MEDICO obtienen `403`.
+- `exigir_roles` probado con listas blancas independientes ADMIN-only,
+  MEDICO-only y PACIENTE-only.
+- `401` para credencial ausente, esquema incorrecto, token malformado, firma
+  inválida, token expirado, claims inválidos y cuenta borrada o desactivada, con
+  el desafío Bearer coherente en cada caso; `403` sin desafío.
+- Cuenta inexistente, contraseña incorrecta y cuenta inactiva producen respuestas
+  indistinguibles, y las tres pasan por la verificación Argon2id.
+- Rol y estado resueltos desde PostgreSQL en cada petición: desactivar una cuenta
+  o cambiarle el rol surte efecto en la petición siguiente.
+- Un claim `rol` inyectado en un token no cambia nada.
+- Auditoría de las cuatro acciones del catálogo, con actor nulo en el login
+  fallido y sin contraseñas, hashes, tokens, cabeceras, payloads ni PII.
+- Un rollback de negocio no deja auditoría de éxito, y un *replay* no genera
+  fila.
+- La API no arranca sin `JWT_SECRET_KEY`; Alembic, el ETL y el cargador sí
+  funcionan sin ella.
+- Captura sin conexión operativa sin `EDGE_API_TOKEN`; `init`, `capturar`,
+  `estado` y `traza` no la exigen.
+- Preflight del nodo edge: ninguna credencial inválida consume intentos de la
+  cola.
+- Un `401` posterior al preflight conserva clave y paquete, no programa demora, y
+  tras corregir la credencial el evento se entrega sin duplicar.
+- El token no aparece en SQLite, la outbox, la traza, los logs ni la salida del
+  comando.
+- Idempotencia, *replay*, colisión `409` y concurrencia intactas.
+- Esquema analítico y ETL preservados, con los conteos canónicos.
+- Un solo `head` de Alembic, `60facdbacf51`, sin revisión nueva.
+
+### Verificaciones externas requeridas para cerrar SCRUM-70
+
+- [ ] CI en verde sobre el Pull Request, con las ocho suites de PostgreSQL
+      ejecutadas y ninguna omitida.
+- [ ] Aprobación de la otra autora en el Pull Request.
+- [ ] Comentarios de revisión resueltos.
 
 ## Estado verificado localmente de SCRUM-69
 
