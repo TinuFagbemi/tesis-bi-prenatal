@@ -59,6 +59,16 @@ from app.api.v1.sesiones import CABECERA_IDEMPOTENCIA, CABECERA_REPLAY
 from app.config import settings
 from app.db.base import SCHEMA_OPERACIONAL
 from app.db.session import get_db
+from app.models.catalogos import Rol
+from app.models.enums import NombreRol
+from app.models.seguridad import AuditoriaLog, Usuario
+
+# La identidad PACIENTE de la suite se define una sola vez, en el modulo
+# de SCRUM-62, junto a la transaccion revertida de la que depende.
+from tests.test_ingestion_api_postgresql import (  # noqa: F401
+    EMAIL_IDENTIDAD_DE_LA_SUITE,
+    identidad_de_la_suite,
+)
 from app.main import app
 from app.models.catalogos import Semaforo, TiempoGestacional
 from app.models.clinico import Clinica, Embarazo, Paciente
@@ -1327,6 +1337,37 @@ def entorno_concurrente(engine_de_pruebas, url_de_pruebas, request):
                     Semaforo.id_semaforo.in_(
                         {referencias_creadas.id_semaforo} - semaforos_previos
                     )
+                )
+            )
+            # La identidad de la suite (SCRUM-70). A diferencia de las demas
+            # pruebas de este archivo, las concurrentes **confirman** lo que
+            # escriben: no hay transaccion exterior que revierta, asi que la
+            # cuenta que la dependencia crea al atender la primera peticion, y
+            # las filas de auditoria que el endpoint escribe a su nombre,
+            # sobreviven a la prueba si nadie las retira.
+            #
+            # La auditoria va primero: su clave foranea es RESTRICT y PostgreSQL
+            # se niega a borrar una cuenta con historial, que es exactamente la
+            # garantia que el modelo quiere y que aqui hay que respetar en orden.
+            id_identidad = conexion.execute(
+                select(Usuario.id_usuario).where(
+                    Usuario.email == EMAIL_IDENTIDAD_DE_LA_SUITE
+                )
+            ).scalar_one_or_none()
+            if id_identidad is not None:
+                conexion.execute(
+                    delete(AuditoriaLog).where(AuditoriaLog.id_usuario == id_identidad)
+                )
+                conexion.execute(
+                    delete(Usuario).where(Usuario.id_usuario == id_identidad)
+                )
+            # Y el rol, solo si lo creo esta suite y ya no lo usa nadie.
+            conexion.execute(
+                delete(Rol).where(
+                    Rol.nombre_rol == NombreRol.PACIENTE,
+                    ~select(Usuario.id_usuario)
+                    .where(Usuario.id_rol == Rol.id_rol)
+                    .exists(),
                 )
             )
 
