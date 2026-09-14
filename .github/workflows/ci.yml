@@ -33,6 +33,15 @@ jobs:
       # aborta contra cualquier otro nombre, porque el ciclo de validación
       # borra y recrea el esquema operacional completo.
       POSTGRES_DB: scrum52_validacion_tmp
+      # Material de firma ficticio, efimero y exclusivo de este job: se
+      # genera para esta ejecucion, vive solo dentro de ella y desaparece al
+      # terminar. No corresponde a ningun entorno y no debe reutilizarse
+      # fuera de aqui. Por eso va en claro y no como secret del repositorio,
+      # igual que las credenciales de PostgreSQL de arriba.
+      #
+      # Es distinto de POSTGRES_PASSWORD a proposito: la aplicacion rechaza
+      # arrancar si la clave de firma repite la de la base.
+      JWT_SECRET_KEY: ci_efimero_no_es_secreto_clave_de_firma_de_pruebas
 
     services:
       postgres:
@@ -91,7 +100,8 @@ jobs:
             --ignore=tests/test_ingestion_idempotency_postgresql.py \
             --ignore=tests/test_edge_postgresql.py \
             --ignore=tests/test_edge_sincronizacion_postgresql.py \
-            --ignore=tests/test_etl_postgresql.py
+            --ignore=tests/test_etl_postgresql.py \
+            --ignore=tests/test_autenticacion_postgresql.py
 
       # Segunda capa: ciclo real upgrade -> downgrade -> upgrade -> alembic check
       # contra el servicio PostgreSQL de arriba. Corre antes que las pruebas del
@@ -196,10 +206,34 @@ jobs:
           SCRUM69_TEST_DATABASE_URL: postgresql+psycopg://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
         run: python -m pytest -q -rs tests/test_etl_postgresql.py --junitxml=pytest-scrum69.xml
 
+      # Novena capa: autenticacion, RBAC y auditoria. Como la del ETL, no
+      # escribe sobre la base del servicio: la usa solo como conexion de
+      # mantenimiento para crear bases temporales propias (prefijo
+      # scrum70_tmp_), migrarlas, cargar el dataset canonico, autenticar
+      # cuentas simuladas con hashes Argon2id reales y escribir auditoria con
+      # commits de verdad, y eliminarlas al terminar. Solo elimina las que
+      # ella misma creo.
+      #
+      # Necesita bases propias y no la transaccion revertida de las capas
+      # anteriores: la auditoria del login y la de una denegacion usan una
+      # transaccion propia que confirma, y un SAVEPOINT exterior no puede
+      # contener un commit ajeno.
+      #
+      # Va la ultima y en serie, como todas.
+      - name: Pruebas de autenticacion contra PostgreSQL (SCRUM-70)
+        working-directory: backend
+        env:
+          SCRUM70_TEST_DATABASE_URL: postgresql+psycopg://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
+        run: python -m pytest -q -rs tests/test_autenticacion_postgresql.py --junitxml=pytest-scrum70.xml
+
       # La variable de entorno de cada capa es lo único que evita que su archivo
       # quede omitido, y pytest devuelve 0 aunque se salte todo. Por eso los
       # reportes JUnit se revisan después: un solo <skipped> en cualquiera de
-      # los siete tumba el job.
+      # los ocho tumba el job.
+      #
+      # El guardián detecta **omisiones**. Los fallos y los errores los detecta
+      # el código de salida de pytest, en el step que los produce. Son dos
+      # comprobaciones distintas y ninguna sustituye a la otra.
       - name: Verificar que ninguna prueba de PostgreSQL quedó omitida
         working-directory: backend
         run: |
@@ -216,6 +250,7 @@ jobs:
               "pytest-scrum64.xml": "SCRUM64_TEST_DATABASE_URL",
               "pytest-scrum65.xml": "SCRUM65_TEST_DATABASE_URL",
               "pytest-scrum69.xml": "SCRUM69_TEST_DATABASE_URL",
+              "pytest-scrum70.xml": "SCRUM70_TEST_DATABASE_URL",
           }
 
           fallo = False
