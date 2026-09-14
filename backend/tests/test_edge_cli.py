@@ -47,6 +47,9 @@ from app.edge.estados import EstadoEntrega, MotivoRevision
 from tests.test_edge_captura import PAQUETE_DE_UNA_LECTURA
 
 RAIZ = Path(__file__).resolve().parents[2]
+
+# El cliente real, antes de que ninguna prueba lo sustituya.
+CLIENTE_HTTP_ORIGINAL = httpx.Client
 RUTA_CLI = RAIZ / "scripts" / "edge_node.py"
 
 
@@ -209,12 +212,61 @@ def test_estado_sobre_un_nodo_vacio_funciona(cli, base, capsys):
 # ---------------------------------------------------------------------------
 
 
-def _con_transporte(monkeypatch, cli, manejador):
-    """Sustituye el cliente HTTP del comando por uno guionado."""
+# Credencial ficticia de estas pruebas. No es un token real, no se firma con
+# nada y no vale contra ninguna API: solo existe para que ``_cliente_http``
+# acepte construir el cliente, que es lo unico que la exige.
+TOKEN_DE_PRUEBA = "token-simulado-de-las-pruebas-del-cli"
 
-    class ClienteGuionado(httpx.Client):
+IDENTIDAD_PACIENTE = {"id_usuario": 130, "rol": "PACIENTE"}
+
+
+def _con_transporte(
+    monkeypatch,
+    cli,
+    manejador,
+    *,
+    identidad=None,
+    token: str | None = TOKEN_DE_PRUEBA,
+):
+    """Sustituye el cliente HTTP del comando por uno guionado.
+
+    Desde SCRUM-70 los comandos con red hacen dos cosas antes de tocar la
+    outbox: exigen ``EDGE_API_TOKEN`` y preguntan por su identidad. Las dos se
+    resuelven aqui, y el guion que cada prueba escribe sigue describiendo
+    unicamente la respuesta de la ingesta: el preflight se responde por
+    separado, asi que ninguna prueba heredada tuvo que cambiar su manejador.
+
+    ``identidad`` permite guionar el preflight --un 401, un rol equivocado, un
+    cuerpo ilegible-- y ``token=None`` permite ejercer la ausencia de credencial.
+    """
+    if token is None:
+        monkeypatch.delenv("EDGE_API_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("EDGE_API_TOKEN", token)
+
+    respuesta_de_identidad = (
+        identidad
+        if identidad is not None
+        else httpx.Response(200, json=IDENTIDAD_PACIENTE)
+    )
+
+    def enrutar(peticion):
+        if peticion.url.path == cli.RUTA_IDENTIDAD:
+            if callable(respuesta_de_identidad):
+                return respuesta_de_identidad(peticion)
+            return respuesta_de_identidad
+        return manejador(peticion)
+
+    # Se hereda del cliente **original**, capturado al importar este modulo, y no
+    # de ``httpx.Client`` tal como este en este instante. La diferencia importa:
+    # ``cli.httpx`` es el modulo httpx global, asi que el parche de abajo cambia
+    # ``httpx.Client`` para todo el proceso. Una segunda llamada a esta funcion
+    # dentro de la misma prueba --corregir una credencial y reintentar, por
+    # ejemplo-- heredaria entonces del guion anterior, cuyo ``__init__`` volveria
+    # a imponer su propio transporte y ganaria el primero.
+    class ClienteGuionado(CLIENTE_HTTP_ORIGINAL):
         def __init__(self, **argumentos):
-            argumentos["transport"] = httpx.MockTransport(manejador)
+            argumentos["transport"] = httpx.MockTransport(enrutar)
             super().__init__(**argumentos)
 
     monkeypatch.setattr(cli.httpx, "Client", ClienteGuionado)

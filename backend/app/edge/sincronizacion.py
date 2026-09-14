@@ -66,6 +66,11 @@ CODIGO_EXITO = 0
 CODIGO_ERROR = 1
 CODIGO_REVISION = 2
 CODIGO_ANOMALIA = 3
+# The API refused the credential. A code of its own because the queue is not
+# in trouble and nothing needs reviewing: the events are intact, retryable and
+# immediately eligible, and what has to change is the token. Reporting this as
+# «requires review» would send a person to inspect packages that are fine.
+CODIGO_CREDENCIAL = 4
 
 # Consecutive iterations that modify nothing, claim nothing and do not wait,
 # before the run gives up and reports an internal inconsistency. Normal pending
@@ -93,6 +98,10 @@ class ResumenSincronizacion:
     anomalias: int
     censo: outbox.Censo
     codigo_de_salida: int
+    # The run ended because the credential was refused mid-flight, after the
+    # preflight had accepted it -- a token that expired inside the window between
+    # the two. Distinct from the pause counters: no wait was scheduled.
+    detenida_por_credencial: bool = False
 
 
 def _instante(texto: str | None) -> datetime | None:
@@ -275,6 +284,7 @@ def sincronizar(
     sellados = herencias = 0
     entregados = reintentables = rechazados = agotados = 0
     ya_entregados = tardios = anomalias = 0
+    sin_credencial = False
 
     censo = outbox.censar(
         conexion,
@@ -328,6 +338,14 @@ def sincronizar(
             anomalias += ronda.anomalias
             modifico = modifico or ronda.reclamados > 0
 
+            if ronda.detenida_por_credencial:
+                # Stop the whole run, not just the round. Every remaining event
+                # would fail the same way, and each failure would cost it an
+                # attempt of its budget. Nothing is scheduled and nothing is
+                # paused: the queue waits for a person to replace the token.
+                sin_credencial = True
+                break
+
             if ronda.pausa_hasta is not None:
                 pausa = (
                     ronda.pausa_hasta
@@ -371,7 +389,9 @@ def sincronizar(
         id_maximo=tope,
     )
 
-    if codigo is None:
+    if codigo is None and sin_credencial:
+        codigo = CODIGO_CREDENCIAL
+    elif codigo is None:
         necesita_persona = (
             censo.requieren_revision > 0 or censo.bloqueados_por_configuracion > 0
         )
@@ -394,4 +414,5 @@ def sincronizar(
         anomalias=anomalias,
         censo=censo,
         codigo_de_salida=codigo,
+        detenida_por_credencial=sin_credencial,
     )
