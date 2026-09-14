@@ -49,7 +49,24 @@ CLAIMS_REQUERIDOS = ("sub", "exp", "iat")
 # string -- not an integer that happens to look like one. ``[0-9]`` is an ASCII
 # range, deliberately: ``str.isdigit()`` accepts Unicode digits such as U+0661,
 # and ``int()`` would then happily parse an identifier no database row has.
-_PATRON_SUB = re.compile(r"^[0-9]+$")
+#
+# The pattern also fixes the **domain**, not only the alphabet:
+#
+# * **canonical form** -- a leading ``[1-9]`` refuses ``0``, ``00`` and ``0137``.
+#   ``emitir`` writes ``str(id_usuario)``, which never has leading zeros, so a
+#   subject with them is a representation this application does not produce;
+#   accepting it would give one account several valid spellings.
+# * **at most ten digits** -- so ``int()`` below can neither hit Python's limit on
+#   digit conversion (a few thousand digits raise ``ValueError``, which would be
+#   a 500) nor spend effort on an absurd value.
+#
+# Ten digits still reach 9,999,999,999, so the range is checked after
+# converting: :data:`ID_USUARIO_MAXIMO` is the ceiling of PostgreSQL ``INTEGER``,
+# the type of ``operacional.usuario.id_usuario``. Anything above it could only
+# fail later, inside the database, as a 500 instead of a 401.
+_PATRON_SUB = re.compile(r"[1-9][0-9]{0,9}")
+ID_USUARIO_MINIMO = 1
+ID_USUARIO_MAXIMO = 2_147_483_647
 
 # One message for every way a token can be wrong. A caller learns that its
 # credential was not accepted and nothing else: which claim was missing, whether
@@ -134,4 +151,9 @@ def validar(token: str, configuracion: ConfiguracionJWT) -> int:
     if not isinstance(sujeto, str) or _PATRON_SUB.fullmatch(sujeto) is None:
         raise TokenInvalido
 
-    return int(sujeto)
+    # At most ten ASCII digits with no leading zero: this conversion cannot raise.
+    id_usuario = int(sujeto)
+    if not ID_USUARIO_MINIMO <= id_usuario <= ID_USUARIO_MAXIMO:
+        raise TokenInvalido
+
+    return id_usuario

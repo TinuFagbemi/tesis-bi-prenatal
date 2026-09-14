@@ -14,11 +14,12 @@ closed and refuses to start without a usable secret, while every non-API tool
 keeps working. There is no usable default anywhere -- ``None`` signs nothing.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
@@ -87,6 +88,24 @@ class Settings(BaseSettings):
         le=EXPIRACION_MAXIMA_MINUTOS,
     )
 
+    @field_validator("jwt_secret_key", mode="before")
+    @classmethod
+    def _en_blanco_es_ausente(cls, valor: Any) -> Any:
+        """``JWT_SECRET_KEY=`` or a value of only whitespace means *not configured*.
+
+        ``.env.example`` ships the variable empty on purpose, so copying it as is
+        yields an empty string, not ``None``. Treating that as absent is what
+        makes the refusal say what actually happened -- the secret is missing --
+        instead of reporting a short secret nobody set.
+
+        A non-blank value is returned **untouched**. Stripping it would sign with
+        a key different from the one configured, silently.
+        """
+        texto = valor.get_secret_value() if isinstance(valor, SecretStr) else valor
+        if isinstance(texto, str) and not texto.strip():
+            return None
+        return valor
+
 
 settings = Settings()
 
@@ -98,9 +117,14 @@ class ConfiguracionJWT:
     A frozen dataclass rather than the ``Settings`` object so the functions that
     issue and validate tokens take exactly what they need and nothing else, and
     so a test can build one without touching the environment.
+
+    ``secreto`` is excluded from the generated ``repr``. Without that, printing
+    this object -- a debugger, a traceback rendered with its locals, a stray log
+    line -- would show the signing key in clear, which is exactly what wrapping
+    it in ``SecretStr`` inside ``Settings`` exists to prevent.
     """
 
-    secreto: str
+    secreto: str = field(repr=False)
     expiracion: timedelta
 
 

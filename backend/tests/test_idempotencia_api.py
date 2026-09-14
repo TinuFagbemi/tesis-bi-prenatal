@@ -34,7 +34,9 @@ from app.api.v1.sesiones import (
     REPLAY_NO,
     REPLAY_SI,
 )
+from app.api.dependencias import usuario_actual
 from app.db.session import get_db
+from tests.conftest import principal_de_prueba
 from app.main import app
 from app.schemas.monitoreo import SesionMonitoreoEntrada
 from app.services import idempotencia as modulo_idempotencia
@@ -99,12 +101,22 @@ def servicio(monkeypatch):
 
 
 def cliente_con(sesion_falsa, *, clave: str | None = CLAVE_VALIDA) -> TestClient:
-    """Cliente atado a un doble de Session concreto.
+    """Cliente atado a un doble de Session concreto, ya autenticado.
 
     Se construye a mano en vez de con una fixture parametrizada porque cada
     prueba necesita guionar su propio doble antes de que exista el cliente.
+
+    La identidad PACIENTE se instala desde SCRUM-70, y aqui importa un detalle
+    de orden: la autorizacion se resuelve **antes** que la clave de
+    idempotencia, asi que sin ella las pruebas del 400 recibirian un 401 y
+    dejarian de comprobar lo suyo. El override se deshace solo, en la fixture
+    ``limpiar_overrides``, que es de uso automatico.
+
+    Lo que se sustituye es la resolucion del token; la comprobacion del rol se
+    sigue ejecutando de verdad.
     """
     app.dependency_overrides[get_db] = lambda: sesion_falsa
+    app.dependency_overrides[usuario_actual] = principal_de_prueba
     cabeceras = {} if clave is None else {CABECERA_IDEMPOTENCIA: clave}
     return TestClient(app, headers=cabeceras)
 
@@ -256,15 +268,24 @@ def test_la_primera_solicitud_no_se_marca_como_reenvio(servicio):
 
 
 def test_la_primera_solicitud_reclama_la_clave_antes_de_escribir_el_paquete(servicio):
-    """El orden es el diseño: consultar, reclamar, escribir, completar, confirmar."""
+    """El orden es el diseño: consultar, reclamar, escribir, auditar, confirmar.
+
+    Desde SCRUM-70 hay dos pasos más, y su posición es lo que esta prueba
+    protege: la fila de ``auditoria_log`` se añade **después** de completar la
+    reclamación y **antes** del único commit. Estar dentro de la transacción es
+    lo que hace que la auditoría de éxito y la sesión se confirmen juntas o no se
+    confirme ninguna; si el ``add`` se colara después del commit, o trajera un
+    commit propio, el orden dejaría de ser este.
+    """
     servicio()
     sesion = SesionFalsa()
 
     cliente_con(sesion).post(RUTA, json=paquete())
 
-    assert sesion.pasos == ["select", "insert", "update", "commit"]
+    assert sesion.pasos == ["select", "insert", "update", "add", "flush", "commit"]
     assert sesion.commits == 1
     assert sesion.rollbacks == 0
+    assert len(sesion.agregados) == 1
 
 
 def test_la_reclamacion_se_completa_con_la_sesion_y_las_lecturas(servicio):

@@ -24,6 +24,7 @@ from app.config import ConfiguracionJWT
 from app.services.tokens import (
     ALGORITMO,
     CLAIMS_REQUERIDOS,
+    ID_USUARIO_MAXIMO,
     MENSAJE_TOKEN_INVALIDO,
     TokenInvalido,
     emitir,
@@ -332,3 +333,83 @@ def test_la_excepcion_de_la_biblioteca_queda_encadenada_pero_no_publicada(
 
     assert isinstance(capturado.value.__cause__, jwt.PyJWTError)
     assert str(capturado.value) == MENSAJE_TOKEN_INVALIDO
+
+
+# ---------------------------------------------------------------------------
+# 4. El dominio de sub: 1 <= id_usuario <= 2147483647 (code review de SCRUM-70)
+# ---------------------------------------------------------------------------
+#
+# ``operacional.usuario.id_usuario`` es ``INTEGER``. Un ``sub`` fuera de ese
+# dominio no puede corresponder a ninguna cuenta, y antes de la correccion
+# terminaba en un 500: ``int()`` rechaza cadenas de miles de digitos con
+# ``ValueError``, y un valor por encima de ``INTEGER`` fallaria dentro de la
+# consulta. Ahora cualquiera de ellos es ``TokenInvalido``, es decir, un 401.
+#
+# Decision documentada: se exige la **forma canonica**, sin ceros iniciales.
+# ``emitir`` escribe ``str(id_usuario)`` y nunca produce ``0137``; aceptarlo daria
+# a una misma cuenta varias grafias validas.
+
+
+def test_el_maximo_de_integer_se_acepta(configuracion):
+    token = forjar(payload_valido(sub=str(ID_USUARIO_MAXIMO)))
+
+    assert validar(token, configuracion) == ID_USUARIO_MAXIMO
+    assert ID_USUARIO_MAXIMO == 2_147_483_647
+
+
+def test_el_minimo_se_acepta(configuracion):
+    assert validar(forjar(payload_valido(sub="1")), configuracion) == 1
+
+
+@pytest.mark.parametrize(
+    "sujeto",
+    [
+        str(ID_USUARIO_MAXIMO + 1),
+        "9999999999",
+        "99999999999",
+        "9" * 5000,
+        "0",
+        "00",
+        "0137",
+        "-1",
+        "-2147483648",
+        " 137",
+        "137 ",
+        "1 37",
+        "١٣٧",
+        "１３７",
+        "+137",
+        "137\n",
+    ],
+    ids=[
+        "maximo-mas-uno",
+        "diez-digitos-fuera-de-rango",
+        "once-digitos",
+        "miles-de-digitos",
+        "cero",
+        "doble-cero",
+        "ceros-iniciales",
+        "negativo",
+        "minimo-de-integer",
+        "espacio-delante",
+        "espacio-detras",
+        "espacio-en-medio",
+        "digitos-arabigos",
+        "digitos-de-ancho-completo",
+        "signo-mas",
+        "salto-de-linea-final",
+    ],
+)
+def test_un_sub_fuera_del_dominio_es_token_invalido(configuracion, sujeto):
+    """Siempre ``TokenInvalido``: nunca ``ValueError`` ni otra excepcion."""
+    with pytest.raises(TokenInvalido):
+        validar(forjar(payload_valido(sub=sujeto)), configuracion)
+
+
+@pytest.mark.parametrize(
+    "sujeto", [137, ID_USUARIO_MAXIMO, 0, -1, 1.0, True, None, ["137"], {"id": 137}]
+)
+def test_un_sub_que_no_es_una_cadena_es_token_invalido(configuracion, sujeto):
+    """Un ``sub`` JSON numerico, u otro tipo, no es un sujeto valido."""
+    with pytest.raises(TokenInvalido):
+        validar(forjar(payload_valido(sub=sujeto)), configuracion)
