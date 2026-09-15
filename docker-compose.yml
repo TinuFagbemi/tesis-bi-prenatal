@@ -27,6 +27,14 @@ services:
       APP_ENV: "${APP_ENV:-development}"
       # Debe apuntar a db:5432 (red interna de Docker), nunca a localhost:5433.
       DATABASE_URL: "${DATABASE_URL:?Define DATABASE_URL en el archivo .env}"
+      # Material de firma de los tokens (SCRUM-70). Se pasa de forma explicita y
+      # sin valor funcional por omision: si falta o no es valido, app.main se
+      # niega a arrancar. No se usa ":?" a proposito: procesar este archivo o
+      # levantar solo "db" (migraciones, cargador, ETL) no debe depender de una
+      # credencial que esos componentes no usan. EDGE_API_TOKEN no se pasa: es
+      # del nodo edge, no de la API.
+      JWT_SECRET_KEY: "${JWT_SECRET_KEY:-}"
+      JWT_EXPIRATION_MINUTES: "${JWT_EXPIRATION_MINUTES:-30}"
     ports:
       - "8000:8000"
     depends_on:

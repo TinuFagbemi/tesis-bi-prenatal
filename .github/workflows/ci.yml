@@ -103,6 +103,156 @@ jobs:
             --ignore=tests/test_etl_postgresql.py \
             --ignore=tests/test_autenticacion_postgresql.py
 
+      # Contrato del camino .env/shell -> docker-compose.yml -> entorno del
+      # contenedor de la API. Las pruebas de Python reciben JWT_SECRET_KEY
+      # directamente del entorno de este job, asi que nunca recorren ese camino:
+      # un servicio api que no recibiera la variable pasaba el CI y no arrancaba
+      # con Docker Compose.
+      #
+      # Solo resuelve el modelo con "docker compose config": no construye
+      # imagenes ni arranca contenedores. Cada caso parte de un entorno
+      # controlado -- sin las variables de este job y con un --env-file vacio,
+      # para que ningun .env intervenga -- y usa valores ficticios. El modelo
+      # resuelto no se imprime nunca, porque contiene valores de entorno.
+      - name: Contrato de Docker Compose para la API (SCRUM-70)
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          import tempfile
+
+          # Valores ficticios, exclusivos de esta comprobacion.
+          FICTICIAS = {
+              "POSTGRES_USER": "compose_contrato",
+              "POSTGRES_PASSWORD": "compose_contrato_no_es_secreto",
+              "POSTGRES_DB": "compose_contrato",
+              "DATABASE_URL": (
+                  "postgresql+psycopg://compose_contrato:"
+                  "compose_contrato_no_es_secreto@db:5432/compose_contrato"
+              ),
+          }
+          SECRETO_FICTICIO = "compose_contrato_clave_ficticia_de_firma_0123456789"
+          TOKEN_EDGE_FICTICIO = "compose_contrato_token_edge_ficticio"
+          ENTORNO_DE_LA_API = {
+              "APP_NAME",
+              "APP_ENV",
+              "DATABASE_URL",
+              "JWT_SECRET_KEY",
+              "JWT_EXPIRATION_MINUTES",
+          }
+          # Prefijos que el caso controla: se retiran del entorno heredado.
+          CONTROLADAS = ("APP_", "COMPOSE_", "DATABASE_URL", "EDGE_", "JWT_", "POSTGRES_")
+
+          fallos = []
+
+
+          def comprobar(condicion, descripcion):
+              if condicion:
+                  print(f"OK: {descripcion}")
+              else:
+                  print(f"::error::Contrato de Compose roto: {descripcion}")
+                  fallos.append(descripcion)
+
+
+          def resolver(caso, **variables):
+              """Modelo resuelto por Compose con exactamente estas variables."""
+              entorno = {
+                  clave: valor
+                  for clave, valor in os.environ.items()
+                  if not clave.startswith(CONTROLADAS)
+              }
+              entorno.update(FICTICIAS)
+              entorno.update(variables)
+
+              with tempfile.NamedTemporaryFile("w", suffix=".env", delete=False) as vacio:
+                  env_file_vacio = vacio.name
+              try:
+                  resultado = subprocess.run(
+                      [
+                          "docker", "compose",
+                          "-f", "docker-compose.yml",
+                          "--env-file", env_file_vacio,
+                          "config", "--format", "json",
+                      ],
+                      env=entorno,
+                      capture_output=True,
+                      text=True,
+                  )
+              finally:
+                  os.unlink(env_file_vacio)
+
+              comprobar(
+                  resultado.returncode == 0,
+                  f"{caso}: docker compose config resuelve el proyecto "
+                  f"(codigo {resultado.returncode})",
+              )
+              if resultado.returncode != 0:
+                  return None, ""
+              return json.loads(resultado.stdout), resultado.stdout
+
+
+          # 1. Clave definida y expiracion ausente.
+          modelo, texto = resolver(
+              "con JWT_SECRET_KEY",
+              JWT_SECRET_KEY=SECRETO_FICTICIO,
+              EDGE_API_TOKEN=TOKEN_EDGE_FICTICIO,
+          )
+          if modelo is not None:
+              api = modelo["services"]["api"].get("environment") or {}
+              db = modelo["services"]["db"].get("environment") or {}
+              comprobar(
+                  api.get("JWT_SECRET_KEY") == SECRETO_FICTICIO,
+                  "con JWT_SECRET_KEY: el servicio api la recibe exactamente",
+              )
+              comprobar(
+                  api.get("JWT_EXPIRATION_MINUTES") == "30",
+                  "sin JWT_EXPIRATION_MINUTES: el servicio api recibe 30",
+              )
+              comprobar(
+                  set(api) == ENTORNO_DE_LA_API,
+                  "el servicio api recibe solo " + ", ".join(sorted(ENTORNO_DE_LA_API)),
+              )
+              comprobar(
+                  "EDGE_API_TOKEN" not in api and TOKEN_EDGE_FICTICIO not in texto,
+                  "EDGE_API_TOKEN no se inyecta en ningun servicio",
+              )
+              comprobar(
+                  not any(clave.startswith("JWT_") for clave in db),
+                  "el servicio db no recibe material JWT",
+              )
+
+          # 2. Clave ausente: el proyecto se resuelve y la API la recibe vacia.
+          modelo, _ = resolver("sin JWT_SECRET_KEY")
+          if modelo is not None:
+              api = modelo["services"]["api"].get("environment") or {}
+              comprobar(
+                  api.get("JWT_SECRET_KEY") == "",
+                  "sin JWT_SECRET_KEY: el servicio api la recibe vacia y es "
+                  "app.main quien falla cerrado",
+              )
+              comprobar(
+                  api.get("JWT_EXPIRATION_MINUTES") == "30",
+                  "sin JWT_SECRET_KEY: la expiracion sigue siendo 30",
+              )
+
+          # 3. Expiracion configurada: llega tal cual; Pydantic aplica sus limites.
+          modelo, _ = resolver(
+              "con JWT_EXPIRATION_MINUTES",
+              JWT_SECRET_KEY=SECRETO_FICTICIO,
+              JWT_EXPIRATION_MINUTES="45",
+          )
+          if modelo is not None:
+              api = modelo["services"]["api"].get("environment") or {}
+              comprobar(
+                  api.get("JWT_EXPIRATION_MINUTES") == "45",
+                  "con JWT_EXPIRATION_MINUTES: el servicio api recibe el valor configurado",
+              )
+
+          sys.exit(1 if fallos else 0)
+          PY
+
       # Segunda capa: ciclo real upgrade -> downgrade -> upgrade -> alembic check
       # contra el servicio PostgreSQL de arriba. Corre antes que las pruebas del
       # cargador porque es quien deja la base desplegada en el head de Alembic,
