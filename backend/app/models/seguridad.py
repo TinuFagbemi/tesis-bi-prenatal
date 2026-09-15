@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Integer,
@@ -21,9 +22,35 @@ if TYPE_CHECKING:
 
 
 class Usuario(Base):
-    """Application account. Only the Argon2id digest is stored, never a password."""
+    """Application account. Only the Argon2id digest is stored, never a password.
+
+    **The email is stored in canonical form only (SCRUM-97).** The CHECK below is
+    the database side of ``app.services.correo.canonizar_email``: no empty value,
+    no whitespace, nothing that ``lower()`` would change. Together with
+    ``uq_usuario_email`` it makes two addresses a person reads as the same one
+    collide in PostgreSQL, whatever the application did before inserting.
+
+    **Role and clinical link must agree (SCRUM-97).** A PACIENTE account has
+    exactly one ``usuario_paciente`` row and no ``usuario_medico`` row, a MEDICO
+    account the opposite, and an ADMIN account neither. That rule spans three
+    tables, so it cannot be a CHECK: revision ``54053d46abd6`` enforces it with
+    the function ``operacional.validar_rol_vinculo_usuario()`` and three
+    constraint triggers ``DEFERRABLE INITIALLY DEFERRED``, evaluated at commit so
+    an account and its link can be inserted one after the other in the same
+    transaction. Alembic does not compare triggers, so they are recorded here in
+    prose rather than declared.
+    """
 
     __tablename__ = "usuario"
+    __table_args__ = (
+        CheckConstraint(
+            # ``\s`` and not ``[[:space:]]``: SQLAlchemy reads ``:space`` inside
+            # a text clause as a bind parameter. In PostgreSQL both are the same
+            # class.
+            r"email <> '' AND email = lower(email) AND email !~ '\s'",
+            name="email_canonico",
+        ),
+    )
 
     id_usuario: Mapped[int] = mapped_column(Integer, primary_key=True)
     id_rol: Mapped[int] = mapped_column(

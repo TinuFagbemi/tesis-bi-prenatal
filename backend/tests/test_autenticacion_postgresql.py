@@ -36,6 +36,7 @@ from typing import Any
 
 import pytest
 from alembic import command
+from alembic.script import ScriptDirectory
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
@@ -415,27 +416,48 @@ def test_desactivar_la_cuenta_invalida_el_token_en_la_siguiente_peticion(
 
 
 def test_cambiar_el_rol_cambia_lo_que_el_token_puede_hacer(cliente, base, password):
-    """El token no cambia; el permiso si, porque el rol se lee en cada peticion."""
+    """El token no cambia; el permiso si, porque el rol se lee en cada peticion.
+
+    Desde SCRUM-97 una cuenta ADMIN no puede conservar un vinculo de paciente: el
+    trigger diferido ``rol_vinculo_coherente`` lo rechaza al confirmar. Por eso el
+    cambio de rol retira el vinculo en la **misma** transaccion, dejando un
+    estado valido. Lo que la prueba demuestra no cambia.
+    """
     token = iniciar_sesion(cliente, EMAIL_PACIENTE, password)
     assert cliente.get(RUTA_YO, headers=bearer(token)).json()["rol"] == "PACIENTE"
 
     id_admin = base.escalar(f"SELECT id_rol FROM {O}.rol WHERE nombre_rol = 'ADMIN'")
-    base.escribir(
-        f"UPDATE {O}.usuario SET id_rol = :rol WHERE email = :email",
-        rol=id_admin,
-        email=EMAIL_PACIENTE,
-    )
+    with base.engine.begin() as conexion:
+        conexion.execute(
+            text(
+                f"DELETE FROM {O}.usuario_paciente WHERE id_usuario ="
+                f" (SELECT id_usuario FROM {O}.usuario WHERE email = :email)"
+            ),
+            {"email": EMAIL_PACIENTE},
+        )
+        conexion.execute(
+            text(f"UPDATE {O}.usuario SET id_rol = :rol WHERE email = :email"),
+            {"rol": id_admin, "email": EMAIL_PACIENTE},
+        )
 
     assert cliente.get(RUTA_YO, headers=bearer(token)).json()["rol"] == "ADMIN"
 
 
 def test_borrar_una_cuenta_sin_historial_invalida_su_token(cliente, base, password):
+    """Desde SCRUM-97 el vinculo y la cuenta se retiran en una sola transaccion.
+
+    Borrar solo el vinculo y confirmar dejaria una cuenta MEDICO sin su medico,
+    que el trigger diferido ``rol_vinculo_coherente`` rechaza.
+    """
     token = iniciar_sesion(cliente, EMAIL_MEDICO, password)
     id_usuario = cliente.get(RUTA_YO, headers=bearer(token)).json()["id_usuario"]
 
     base.escribir(f"DELETE FROM {O}.auditoria_log WHERE id_usuario = :id", id=id_usuario)
-    base.escribir(f"DELETE FROM {O}.usuario_medico WHERE id_usuario = :id", id=id_usuario)
-    base.escribir(f"DELETE FROM {O}.usuario WHERE id_usuario = :id", id=id_usuario)
+    with base.engine.begin() as conexion:
+        conexion.execute(
+            text(f"DELETE FROM {O}.usuario_medico WHERE id_usuario = :id"), {"id": id_usuario}
+        )
+        conexion.execute(text(f"DELETE FROM {O}.usuario WHERE id_usuario = :id"), {"id": id_usuario})
 
     assert cliente.get(RUTA_YO, headers=bearer(token)).status_code == 401
 
@@ -694,9 +716,18 @@ def test_las_columnas_de_la_tabla_son_las_esperadas(base):
 # ---------------------------------------------------------------------------
 
 
-def test_el_head_de_alembic_no_cambio(base):
-    """El esquema de SCRUM-51/52 ya preveia esto: no hay revision nueva."""
-    assert base.escalar("SELECT version_num FROM alembic_version") == "60facdbacf51"
+def test_scrum70_no_anadio_ninguna_revision(base):
+    """El esquema de SCRUM-51/52 ya preveia esto: SCRUM-70 no creo revision.
+
+    Desde SCRUM-97 el head es la revision de cuentas, y se apoya directamente en
+    la analitica de SCRUM-69: entre ambas no hay nada de SCRUM-70.
+    """
+    script = ScriptDirectory.from_config(construir_config_alembic())
+    [head] = script.get_heads()
+
+    assert base.escalar("SELECT version_num FROM alembic_version") == head
+    assert head == "54053d46abd6"
+    assert script.get_revision(head).down_revision == "60facdbacf51"
 
 
 def test_el_hash_argon2id_cabe_en_la_columna_desplegada(base):

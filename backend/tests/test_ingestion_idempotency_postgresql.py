@@ -61,12 +61,13 @@ from app.db.base import SCHEMA_OPERACIONAL
 from app.db.session import get_db
 from app.models.catalogos import Rol
 from app.models.enums import NombreRol
-from app.models.seguridad import AuditoriaLog, Usuario
+from app.models.seguridad import AuditoriaLog, Usuario, UsuarioPaciente
 
 # La identidad PACIENTE de la suite se define una sola vez, en el modulo
 # de SCRUM-62, junto a la transaccion revertida de la que depende.
 from tests.test_ingestion_api_postgresql import (  # noqa: F401
     EMAIL_IDENTIDAD_DE_LA_SUITE,
+    _crear_usuario,
     identidad_de_la_suite,
 )
 from app.main import app
@@ -1244,6 +1245,22 @@ def entorno_concurrente(engine_de_pruebas, url_de_pruebas, request):
                 conexion, (VENTANA.semana, VENTANA_TEMPRANA.semana)
             ),
             id_semaforo=_asegurar_semaforo(conexion),
+        )
+        # La identidad de la suite (SCRUM-70), confirmada **con su vinculo**.
+        # Desde SCRUM-97 una cuenta PACIENTE sin ``usuario_paciente`` no puede
+        # confirmarse: el trigger diferido ``rol_vinculo_coherente`` la rechaza.
+        # Estas pruebas son las unicas de la suite que confirman, asi que la
+        # cuenta se crea aqui, vinculada a la paciente ficticia de este mismo
+        # entorno; la dependencia de SCRUM-62 la encuentra ya existente y la
+        # reutiliza. La limpieza de abajo retira paciente y cuenta en la misma
+        # transaccion, y el vinculo se va con ellas.
+        conexion.execute(
+            insert(UsuarioPaciente).values(
+                id_usuario=_crear_usuario(
+                    conexion, rol=NombreRol.PACIENTE, email=EMAIL_IDENTIDAD_DE_LA_SUITE
+                ),
+                id_paciente=id_paciente,
+            )
         )
 
     participantes = [

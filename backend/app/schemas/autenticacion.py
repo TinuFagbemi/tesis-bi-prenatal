@@ -23,21 +23,26 @@ well-formed unknown one is answered 401, and the difference would tell a caller
 which addresses are worth trying. A bounded string keeps every bad credential
 on the same path.
 
+**The identifier is canonicalised before anything else (SCRUM-97).**
+:data:`EmailDeAcceso` runs ``app.services.correo.canonizar_email`` -- strip,
+lowercase, refuse empty or internal whitespace, then the length -- so
+``Paciente31@Example.com`` logs in as the account stored as
+``paciente31@example.com``. The same type is the email of the provisioning body,
+so an address is accepted at the door under exactly the rule it was stored
+under. The few values refused here are refused for their shape alone, the same
+way for every caller; nothing about which accounts exist changes the answer.
+
 All accounts are fictitious and simulated.
 """
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, SecretStr
 
 from app.models.enums import NombreRol
-from app.models.seguridad import Usuario
-
-# Read from the column, never restated. ``operacional.usuario.email`` is the
-# authority on how long an identifier may be.
-LONGITUD_MAXIMA_EMAIL = Usuario.__table__.c.email.type.length
+from app.services.correo import LONGITUD_MAXIMA_EMAIL, canonizar_email
 
 # A password is not stored, so nothing constrains its length from the database
 # side. The ceiling exists only so an unbounded body cannot force an Argon2id
@@ -45,15 +50,31 @@ LONGITUD_MAXIMA_EMAIL = Usuario.__table__.c.email.type.length
 LONGITUD_MAXIMA_PASSWORD = 512
 
 
+def _canonizar_si_es_texto(valor: Any) -> Any:
+    """Canonical form of a string; anything else is left for Pydantic to refuse."""
+    return canonizar_email(valor) if isinstance(valor, str) else valor
+
+
+# The access email of every contract that carries one. ``BeforeValidator`` runs
+# before the length bounds, so they are measured on the canonical value; the
+# bounds stay declared so OpenAPI still publishes them.
+EmailDeAcceso = Annotated[
+    str,
+    BeforeValidator(_canonizar_si_es_texto),
+    Field(min_length=1, max_length=LONGITUD_MAXIMA_EMAIL),
+]
+
+
 class CredencialesEntrada(BaseModel):
     """The credentials of one login attempt."""
 
     model_config = ConfigDict(extra="forbid")
 
-    email: str = Field(
-        min_length=1,
-        max_length=LONGITUD_MAXIMA_EMAIL,
-        description="Identificador de la cuenta simulada.",
+    email: EmailDeAcceso = Field(
+        description=(
+            "Identificador de la cuenta simulada. Se compara en forma canónica: "
+            "sin espacios exteriores y en minúsculas."
+        ),
     )
     password: SecretStr = Field(
         min_length=1,
