@@ -92,11 +92,22 @@ migraciones, datos simulados o documentación.
   o cambiarle el rol surte efecto en la petición siguiente.
 - Un claim `rol` inyectado en un token no cambia nada.
 - Auditoría de las cuatro acciones del catálogo, con actor nulo en el login
-  fallido y sin contraseñas, hashes, tokens, cabeceras, payloads ni PII.
+  fallido. `auditoria_log` no persiste contraseñas, `password_hash`, tokens JWT,
+  la cabecera `Authorization`, el correo introducido en un `LOGIN_FALLIDO` ni
+  payload clínico; sí conserva los identificadores técnicos y la `ip_origen` que
+  forman parte del modelo de auditoría.
 - Un rollback de negocio no deja auditoría de éxito, y un *replay* no genera
   fila.
 - La API no arranca sin `JWT_SECRET_KEY`; Alembic, el ETL y el cargador sí
-  funcionan sin ella.
+  funcionan sin ella. Lo mismo con Docker Compose, que pasa la clave y su
+  expiración de forma explícita solo al servicio `api`: con una clave válida la
+  API arranca y `/health` responde `200`; sin ella el contenedor falla cerrado
+  con `ConfiguracionJWTInvalida`, y `docker compose up -d db` no la necesita.
+- Dataset y cargador: Argon2id usa salt aleatorio, así que cada generación
+  produce `password_hash` distintos. El mismo artefacto cargado dos veces es
+  idempotente —la segunda carga inserta 0 filas—; un dataset regenerado cargado
+  sobre una base ya sembrada termina en `ConflictoDeDatos` en
+  `usuario.password_hash` y revierte la carga completa, sin sobrescribir.
 - Captura sin conexión operativa sin `EDGE_API_TOKEN`; `init`, `capturar`,
   `estado` y `traza` no la exigen.
 - Preflight del nodo edge: ninguna credencial inválida consume intentos de la
@@ -111,10 +122,41 @@ migraciones, datos simulados o documentación.
 
 ### Verificaciones externas requeridas para cerrar SCRUM-70
 
-- [ ] CI en verde sobre el Pull Request, con las ocho suites de PostgreSQL
-      ejecutadas y ninguna omitida.
+El estado de estas verificaciones cambia fuera del contenido versionado y debe
+comprobarse directamente en GitHub y Jira antes de cerrar el ticket.
+
+Ya hecho:
+
+- el trabajo está confirmado en commits firmados y la rama
+  `feature/scrum-70-autenticacion-rbac-auditoria` está publicada en GitHub;
+- el Pull Request #15 está abierto contra `main`;
+- **GitHub Actions terminó correctamente** sobre el commit
+  `b4af89dfc5eb25a2b240c760349ae1814e49e36f`, en la ejecución `34999415238`
+  del workflow `CI`, con conclusión `success`:
+
+  | Bloque | Resultado |
+  | --- | --- |
+  | Offline (sin servidor PostgreSQL) | 1,597 passed |
+  | Contrato de Docker Compose para la API | 11/11 comprobaciones |
+  | Migraciones — SCRUM-52 | 79 passed |
+  | Cargador — SCRUM-61 | 25 passed |
+  | Endpoint — SCRUM-62 | 47 passed |
+  | Idempotencia — SCRUM-63 | 64 passed |
+  | Nodo edge — SCRUM-64 | 20 passed |
+  | Sincronización — SCRUM-65 | 16 passed |
+  | Esquema analítico y ETL — SCRUM-69 | 50 passed |
+  | Autenticación, RBAC y auditoría — SCRUM-70 | 34 passed |
+
+  El guardián JUnit validó los 8 reportes: ninguna prueba de PostgreSQL quedó
+  omitida.
+- a la fecha de este registro, el Pull Request #15 no tiene hilos de revisión
+  abiertos.
+
+Pendiente:
+
 - [ ] Aprobación de la otra autora en el Pull Request.
-- [ ] Comentarios de revisión resueltos.
+- [ ] Comentarios de su revisión resueltos, si los hubiera.
+- [ ] Integración en `main` y CI posterior al merge en verde.
 
 ## Estado verificado localmente de SCRUM-69
 

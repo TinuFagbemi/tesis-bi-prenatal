@@ -117,22 +117,40 @@ Para representar el comportamiento de zonas rurales con conectividad inestable, 
 
 Controles alineados con los requisitos de la Ley 81 de 2019 de Panamá (Protección de Datos Personales). `auditoria_log` es *append-only por diseño de la aplicación* —el código solo inserta, y su clave foránea `ON DELETE RESTRICT` impide borrar una cuenta con historial— y aporta **trazabilidad y atribución técnica**. No constituye inmutabilidad criptográfica ni no repudio: quien tenga privilegios de administración sobre PostgreSQL puede alterar la tabla.
 
-## Estructura prevista del repositorio
+## Estructura del repositorio
+
+Vista general; no lista todos los archivos.
 
 ```
 tesis-bi-prenatal/
-├── data/        # Datos simulados y fixtures sintéticos de prueba
-├── docs/        # Documentación de decisiones, arquitectura y modelos de datos
-├── scripts/     # Scripts de generación de datos simulados y utilidades
-├── README.md
-└── .gitignore
+├── .github/workflows/   # CI: pruebas sin servidor, contrato de Compose y suites PostgreSQL
+├── backend/
+│   ├── app/
+│   │   ├── api/         # rutas FastAPI y dependencias de autenticación y RBAC
+│   │   ├── db/          # bases declarativas y sesión de SQLAlchemy
+│   │   ├── edge/        # nodo edge simulado: SQLite, outbox, sincronización y traza
+│   │   ├── etl/         # ETL del esquema operacional al analítico
+│   │   ├── loader/      # carga idempotente del dataset simulado
+│   │   ├── models/      # modelos SQLAlchemy del esquema operacional
+│   │   ├── schemas/     # contratos Pydantic
+│   │   ├── services/    # ingesta, idempotencia, tokens, contraseñas y auditoría
+│   │   ├── config.py
+│   │   └── main.py      # aplicación FastAPI
+│   ├── alembic/         # migraciones
+│   ├── tests/           # pruebas pytest, sin servidor y contra PostgreSQL
+│   ├── Dockerfile
+│   └── requirements.txt
+├── data/                # datasets y bases locales generados; no se versionan
+├── docs/                # decision log, Definition of Done y especificaciones
+├── scripts/             # comandos: generador, cargador, ETL y nodo edge
+├── docker-compose.yml   # PostgreSQL y API para el entorno local
+├── .env.example
+└── README.md
 ```
-
-*(Esta estructura se ampliará conforme avancen los sprints: backend, simulación del nodo edge, ETL y pruebas tendrán sus propios directorios.)*
 
 ## Estado actual del proyecto
 
-El repositorio se encuentra en una etapa temprana. Lo que ya existe y funciona es el esquema operacional en PostgreSQL con sus migraciones, el generador del dataset simulado, su carga idempotente, el endpoint que recibe una sesión de monitoreo con sus lecturas biométricas —con su contrato de idempotencia—, el nodo edge simulado, que captura paquetes sin conexión y los entrega después sin duplicarlos, con reintentos de espera incremental, agotamiento controlado y trazabilidad de extremo a extremo, y el esquema analítico (Star Schema) con su ETL reproducible, idempotente e incremental. A partir de SCRUM-70 existen además autenticación con JWT, autorización por rol y auditoría de accesos: el endpoint de ingesta ya no es público. **Aún no existen un servicio permanente o demonio que dispare la sincronización o el ETL por sí solo, la detección automática de conectividad, la seguridad por fila, la anonimización, HTTPS/TLS, el cifrado en reposo ni los dashboards.** El desarrollo activo se encuentra actualmente en el Sprint 4, y todo el trabajo se desarrolla y prueba en un entorno controlado/local, no en comunidades rurales reales.
+El repositorio se encuentra en una etapa temprana. Lo que ya existe y funciona es el esquema operacional en PostgreSQL con sus migraciones, el generador del dataset simulado, su carga idempotente, el endpoint que recibe una sesión de monitoreo con sus lecturas biométricas —con su contrato de idempotencia—, el nodo edge simulado, que captura paquetes sin conexión y los entrega después sin duplicarlos, con reintentos de espera incremental, agotamiento controlado y trazabilidad de extremo a extremo, y el esquema analítico (Star Schema) con su ETL reproducible, idempotente e incremental. A partir de SCRUM-70 existen además autenticación con JWT, autorización por rol y auditoría de accesos: el endpoint de ingesta ya no es público. **Aún no existen un servicio permanente o demonio que dispare la sincronización o el ETL por sí solo, la detección automática de conectividad, la seguridad por fila, la anonimización, HTTPS/TLS, el cifrado en reposo ni los dashboards.** El desarrollo activo continúa en el Capítulo IV, centrado en seguridad, interfaces, aislamiento de datos y analítica del MVP, y todo el trabajo se desarrolla y prueba en un entorno controlado/local, no en comunidades rurales reales.
 
 ## Roadmap general
 
@@ -555,7 +573,12 @@ otro.
 La tabla que sostiene todo esto llega en una migración, así que la base tiene
 que estar en el `head` de Alembic —el mismo `alembic upgrade head` del §1—. Y lo
 de siempre: **solo datos simulados**, y solo en el entorno local o de pruebas.
-Este endpoint no tiene autenticación y no es apto para producción.
+El endpoint exige un token JWT válido y solo el rol PACIENTE puede registrar
+sesiones; ADMIN y MEDICO reciben `403` (ver
+[Autenticación, RBAC y auditoría](#autenticación-rbac-y-auditoría)). Aun así no
+es apto para exposición pública ni para producción: el MVP local todavía no
+implementa HTTPS/TLS, la validación completa de propiedad paciente→embarazo ni el
+aislamiento por fila (SCRUM-71), ni otros controles de despliegue.
 
 ## Nodo edge simulado: captura sin conexión
 
@@ -652,8 +675,10 @@ python scripts/edge_node.py --base data/edge/demo.sqlite3 init
 | `EDGE_BASE_DELAY_SECONDS` | `1.0` | primera espera, en segundos |
 | `EDGE_MAX_DELAY_SECONDS` | `60.0` | techo de la espera |
 | `EDGE_BATCH_LIMIT` | `50` | eventos que toma **una ronda** |
+| `EDGE_API_TOKEN` | *(sin valor)* | token de sesión de una cuenta PACIENTE; solo lo exigen `enviar` y `sincronizar` |
 
-Las cuatro últimas son solo valores por omisión. El límite que gobierna un evento
+`EDGE_MAX_ATTEMPTS`, `EDGE_BASE_DELAY_SECONDS`, `EDGE_MAX_DELAY_SECONDS` y
+`EDGE_BATCH_LIMIT` son solo valores por omisión. El límite que gobierna un evento
 concreto es el que **adoptó** al reclamar su primer intento, guardado en
 `max_intentos_aplicado`: cambiar el entorno alcanza a los eventos que todavía no
 han empezado a sincronizarse, y no reescribe el contrato de los que ya están en
@@ -696,9 +721,17 @@ configuración fuera de rango termina en `Error: ...` por `stderr` y **código 1
 con la base local intacta.
 
 `data/edge/` está en `.gitignore`: la base del nodo es un artefacto local y
-**nunca** se versiona. No hay ninguna variable para credenciales, porque el nodo
-no las necesita: escribe en un archivo local y habla HTTP con un endpoint que
-todavía no tiene autenticación.
+**nunca** se versiona.
+
+`EDGE_API_TOKEN` es la única credencial del nodo, y cargar la configuración no la
+exige: `init`, `capturar`, `estado` y `traza` funcionan sin ella. `enviar` y
+`sincronizar` sí, porque el canal edge → API requiere una credencial PACIENTE
+válida. El token viaja como cabecera `Authorization: Bearer` del cliente HTTP y
+no se guarda en SQLite, ni en la outbox, ni en el paquete, ni en la huella de
+idempotencia, ni en la traza. Antes de reclamar la outbox, los dos comandos hacen
+un preflight contra `GET /api/v1/autenticacion/yo`: una credencial ausente o
+inválida detiene la ejecución sin consumir intentos. Cómo cargar el token sin
+dejarlo en el historial del shell: [El nodo edge](#el-nodo-edge).
 
 ### Estados de la outbox
 
@@ -1119,11 +1152,15 @@ BI corresponden a tickets posteriores y no están implementados aquí.
 
 ### Desarrollo apilado
 
-Durante su desarrollo, este trabajo se construye sobre la rama de la
-sincronización diferida del nodo edge, todavía en revisión: la revisión de
-Alembic del esquema analítico (`60facdbacf51`) se apoya en `87d8ed46686b`. La
-sincronización no cambió PostgreSQL, así que el ETL no depende de su código;
-solo comparte la misma línea base.
+Durante su desarrollo inicial, SCRUM-69 se construyó temporalmente apilado sobre
+la rama de la sincronización diferida del nodo edge (SCRUM-65), que entonces
+seguía en revisión: la revisión de Alembic del esquema analítico
+(`60facdbacf51`) se apoya en `87d8ed46686b`. La sincronización no cambió
+PostgreSQL, así que el ETL no dependía de su código; solo compartía la misma línea
+base. SCRUM-65 se integró después en `main` mediante el Pull Request #13, y
+SCRUM-69 mediante el #14: los dos forman parte de `main`. La estrategia vigente
+vuelve a ser crear cada ticket desde el `main` actualizado, salvo una dependencia
+explícita y documentada (ver [Estrategia de ramas](#estrategia-de-ramas)).
 
 ## Autenticación, RBAC y auditoría
 
@@ -1353,14 +1390,18 @@ Esa suite crea y elimina sus propias bases temporales con prefijo
 
 ## Calidad del proyecto
 
-- **Integración continua:** el workflow [`CI`](.github/workflows/ci.yml) se ejecuta en cada Pull Request hacia `main`, instala el backend con Python 3.12 y corre las pruebas automatizadas. Contra un servicio PostgreSQL 16 efímero se validan las migraciones, la carga idempotente del dataset, el endpoint de ingesta, la idempotencia de reenvíos —concurrencia real incluida—, el ciclo completo del nodo edge simulado hasta PostgreSQL, su sincronización resiliente con reintentos, reconciliación y trazabilidad, y el esquema analítico con su ETL —carga inicial, idempotencia, incrementalidad, rollback, candado y zona horaria— sobre bases temporales propias; el job queda en rojo si alguna de esas pruebas se omite en lugar de ejecutarse. Las pruebas de tiempo no duermen: el reloj y la espera se inyectan.
+- **Integración continua:** el workflow [`CI`](.github/workflows/ci.yml) se ejecuta en cada Pull Request hacia `main`, instala el backend con Python 3.12 y corre las pruebas automatizadas. Contra un servicio PostgreSQL 16 efímero se validan las migraciones, la carga idempotente del dataset, el endpoint de ingesta, la idempotencia de reenvíos —concurrencia real incluida—, el ciclo completo del nodo edge simulado hasta PostgreSQL, su sincronización resiliente con reintentos, reconciliación y trazabilidad, el esquema analítico con su ETL —carga inicial, idempotencia, incrementalidad, rollback, candado y zona horaria— y la autenticación JWT con hashes Argon2id, la matriz RBAC y la auditoría; las suites del ETL y de autenticación trabajan sobre bases temporales propias. También se validan el preflight y la autenticación del nodo edge, y un paso resuelve el modelo de Docker Compose para comprobar que la configuración JWT llega al servicio de la API. Un guardián final exige que las ocho suites de PostgreSQL se ejecuten: el job queda en rojo si alguna de sus pruebas se omite en lugar de ejecutarse. Las pruebas de tiempo no duermen: el reloj y la espera se inyectan.
 - **Criterios de cierre de un ticket:** [Definition of Done](docs/definition_of_done.md).
 
 ## Estrategia de ramas
 
-- `main` — versión estable del proyecto.
-- `develop` — rama de integración de cambios.
-- `feature/...` — una rama por módulo o sprint, creada desde `develop` (por ejemplo, `feature/sprint-4-project-foundation`).
+- `main` — rama de integración estable del proyecto.
+- `feature/...` — una rama por ticket (por ejemplo,
+  `feature/scrum-70-autenticacion-rbac-auditoria`), creada desde el `main`
+  actualizado. Solo se apila sobre otra rama cuando existe una dependencia
+  explícita y documentada.
+- El trabajo vuelve a `main` mediante un Pull Request revisado por la otra autora
+  y con el CI en verde.
 
 ## Autoras
 
