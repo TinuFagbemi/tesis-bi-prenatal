@@ -32,6 +32,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.api.v1.cuentas import RUTAS_CON_CREDENCIALES_DE_CUENTAS
 from app.api.dependencias import (
     CONTEXTO_AUTENTICACION,
     DESAFIO_SIN_CREDENCIAL,
@@ -56,8 +57,12 @@ router = APIRouter(prefix="/api/v1/autenticacion", tags=["autenticacion"])
 MENSAJE_CREDENCIALES_INVALIDAS = "Credenciales invalidas."
 
 # Rutas cuyo cuerpo lleva una credencial. El manejador de abajo les quita el eco
-# del valor rechazado; ninguna otra ruta cambia de comportamiento.
-RUTAS_CON_CREDENCIALES = frozenset({f"{router.prefix}/token"})
+# del valor rechazado; ninguna otra ruta cambia de comportamiento. Desde SCRUM-97
+# incluye las dos rutas de provision de cuentas, cuyo cuerpo lleva una
+# contrasena inicial.
+RUTAS_CON_CREDENCIALES = frozenset(
+    {f"{router.prefix}/token", *RUTAS_CON_CREDENCIALES_DE_CUENTAS}
+)
 
 # Clave que Pydantic usa para devolver el valor que no paso la validacion.
 CAMPO_DE_ECO = "input"

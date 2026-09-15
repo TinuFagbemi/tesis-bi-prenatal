@@ -9,7 +9,8 @@ immutability and **not** non-repudiation: anybody with administrative
 privileges on PostgreSQL can alter the table, and nothing here pretends
 otherwise.
 
-**The catalogue is closed.** Four actions, listed in :class:`AccionAuditada`.
+**The catalogue is closed.** Eight actions, listed in :class:`AccionAuditada`:
+the four of SCRUM-70 and the four of the account life cycle added by SCRUM-97.
 Deliberately absent:
 
 * a row per rejected token -- the bearer of an invalid token has no identified
@@ -18,6 +19,11 @@ Deliberately absent:
   reach the sanitised application log instead.
 * a row per idempotent replay -- no business row is created, and the replay path
   rolls its transaction back by contract.
+* a row for an account state change that changed nothing -- deactivating an
+  account that is already inactive is answered, not recorded as a second
+  deactivation.
+* a row for a refused provisioning -- a duplicate email or an already linked
+  profile writes nothing, so there is nothing whose success could be claimed.
 
 **The transaction boundary is not uniform, and it cannot be.** Two shapes:
 
@@ -76,6 +82,12 @@ class AccionAuditada(str, enum.Enum):
     LOGIN_FALLIDO = "LOGIN_FALLIDO"
     ACCESO_DENEGADO_ROL = "ACCESO_DENEGADO_ROL"
     SESION_MONITOREO_REGISTRADA = "SESION_MONITOREO_REGISTRADA"
+    # Account life cycle (SCRUM-97). The actor is the ADMIN in ``id_usuario``;
+    # the target is ``usuario`` + its id. Written inside the business transaction.
+    CUENTA_PACIENTE_PROVISIONADA = "CUENTA_PACIENTE_PROVISIONADA"
+    CUENTA_MEDICO_PROVISIONADA = "CUENTA_MEDICO_PROVISIONADA"
+    CUENTA_DESACTIVADA = "CUENTA_DESACTIVADA"
+    CUENTA_REACTIVADA = "CUENTA_REACTIVADA"
 
 
 # Physical names of the entities an entry can point at. Table names, not HTTP

@@ -78,12 +78,17 @@ def sesion() -> SesionDeAuditoria:
 # ---------------------------------------------------------------------------
 
 
-def test_el_catalogo_tiene_exactamente_cuatro_acciones():
+def test_el_catalogo_tiene_exactamente_ocho_acciones():
+    """Las cuatro de SCRUM-70 y las cuatro del ciclo de cuentas de SCRUM-97."""
     assert {a.value for a in AccionAuditada} == {
         "LOGIN_EXITOSO",
         "LOGIN_FALLIDO",
         "ACCESO_DENEGADO_ROL",
         "SESION_MONITOREO_REGISTRADA",
+        "CUENTA_PACIENTE_PROVISIONADA",
+        "CUENTA_MEDICO_PROVISIONADA",
+        "CUENTA_DESACTIVADA",
+        "CUENTA_REACTIVADA",
     }
 
 
