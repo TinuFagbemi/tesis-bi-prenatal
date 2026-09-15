@@ -101,7 +101,8 @@ jobs:
             --ignore=tests/test_edge_postgresql.py \
             --ignore=tests/test_edge_sincronizacion_postgresql.py \
             --ignore=tests/test_etl_postgresql.py \
-            --ignore=tests/test_autenticacion_postgresql.py
+            --ignore=tests/test_autenticacion_postgresql.py \
+            --ignore=tests/test_cuentas_postgresql.py
 
       # Contrato del camino .env/shell -> docker-compose.yml -> entorno del
       # contenedor de la API. Las pruebas de Python reciben JWT_SECRET_KEY
@@ -376,10 +377,27 @@ jobs:
           SCRUM70_TEST_DATABASE_URL: postgresql+psycopg://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
         run: python -m pytest -q -rs tests/test_autenticacion_postgresql.py --junitxml=pytest-scrum70.xml
 
+      # Decima capa: aprovisionamiento y ciclo de vida de cuentas. Como las dos
+      # anteriores, usa el servicio solo como conexion de mantenimiento y crea
+      # bases temporales propias (prefijo scrum97_tmp_): migra una base limpia y
+      # una existente con las 37 cuentas, comprueba el CHECK de correo y el
+      # trigger diferido rol/vinculo, provisiona con commits reales, desactiva y
+      # reactiva, y lanza carreras con conexiones independientes. Los perfiles
+      # sin cuenta que necesita se crean solo dentro de esas bases. Elimina
+      # unicamente las bases que ella misma creo.
+      #
+      # Va la ultima y en serie, como todas: sus carreras toman candados
+      # explicitos y no deben compartir el servidor con otra suite a la vez.
+      - name: Pruebas de cuentas contra PostgreSQL (SCRUM-97)
+        working-directory: backend
+        env:
+          SCRUM97_TEST_DATABASE_URL: postgresql+psycopg://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
+        run: python -m pytest -q -rs tests/test_cuentas_postgresql.py --junitxml=pytest-scrum97.xml
+
       # La variable de entorno de cada capa es lo único que evita que su archivo
       # quede omitido, y pytest devuelve 0 aunque se salte todo. Por eso los
       # reportes JUnit se revisan después: un solo <skipped> en cualquiera de
-      # los ocho tumba el job.
+      # los nueve tumba el job.
       #
       # El guardián detecta **omisiones**. Los fallos y los errores los detecta
       # el código de salida de pytest, en el step que los produce. Son dos
@@ -401,6 +419,7 @@ jobs:
               "pytest-scrum65.xml": "SCRUM65_TEST_DATABASE_URL",
               "pytest-scrum69.xml": "SCRUM69_TEST_DATABASE_URL",
               "pytest-scrum70.xml": "SCRUM70_TEST_DATABASE_URL",
+              "pytest-scrum97.xml": "SCRUM97_TEST_DATABASE_URL",
           }
 
           fallo = False
