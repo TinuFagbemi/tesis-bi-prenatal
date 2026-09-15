@@ -105,7 +105,7 @@ Para representar el comportamiento de zonas rurales con conectividad inestable, 
 - **Autenticación mediante JWT**, con algoritmo fijado por el servidor y expiración efectiva.
 - **Autorización basada en roles (RBAC)** para los perfiles ADMIN, MEDICO y PACIENTE.
 - **Hash de contraseñas con Argon2id.** Un hash no es un cifrado: protege credenciales de forma irreversible y no protege ningún dato clínico, ni en tránsito ni en reposo.
-- **Auditoría en `auditoria_log`** de los accesos y acciones definidos, sin credenciales, tokens ni datos personales.
+- **Auditoría en `auditoria_log`** de los accesos y acciones definidos. No persiste contraseñas, hashes, tokens, la cabecera `Authorization`, el correo introducido en un `LOGIN_FALLIDO` ni payload clínico; sí conserva los identificadores técnicos y la `ip_origen` que prevé el modelo de auditoría.
 
 **Todavía no implementado:**
 
@@ -186,7 +186,9 @@ heredada: sin ella, el resumen final del generador no puede imprimir el símbolo
 correctamente el dataset.
 
 Los archivos quedan en `data/generated/`, que **no se versiona**: son
-reproducibles ejecutando de nuevo el generador con su semilla fija.
+reproducibles ejecutando de nuevo el generador con su semilla fija, **salvo
+`password_hash`**, que cambia en cada ejecución (ver
+[Regenerar el dataset no es repetir la carga](#regenerar-el-dataset-no-es-repetir-la-carga)).
 
 ### 4. Cargar el dataset
 
@@ -234,6 +236,30 @@ Nada cambia. La segunda corrida reporta **0 registros insertados** y 2.270
 registros existentes sin cambios, los conteos siguen siendo 732 sesiones y 1.180
 lecturas, y las secuencias no se mueven.
 
+### Regenerar el dataset no es repetir la carga
+
+La idempotencia se refiere al **mismo artefacto** de entrada:
+
+- `generate → load → load` — idempotente: la segunda carga no inserta nada.
+- `generate → load → generate → load` — **puede detenerse con un conflicto en
+  `usuario.password_hash`**.
+
+Desde SCRUM-70 cada cuenta simulada guarda un digest Argon2id con salt
+aleatorio, así que cada ejecución del generador produce digests distintos para
+la misma contraseña ficticia. El resto del dataset se reproduce idéntico, pero
+un archivo regenerado ya es otro artefacto, y el cargador le aplica su regla de
+siempre: una fila existente con contenido distinto es un conflicto, la carga se
+revierte completa y nada se sobrescribe. `password_hash` no se ignora ni se
+actualiza en silencio.
+
+Una base local simulada cargada antes de SCRUM-70 —cuyo `password_hash` era un
+marcador de posición— se **reconstruye una sola vez**: se parte de una base
+vacía, se aplica `alembic upgrade head` y se carga el dataset actual. Si esa
+base vive en el volumen de Docker del proyecto, `docker compose down -v` lo
+elimina, **con todos los datos de esa base local**. Es aceptable porque todos
+los datos son sintéticos y viven en un entorno controlado; no es un
+procedimiento de migración y no existe ninguna migración para ello.
+
 ### Qué pasa ante un conflicto o un error
 
 El comando escribe el motivo en la salida de error y termina con un código
@@ -248,10 +274,12 @@ Primera entrada vertical de la aplicación: una solicitud HTTP llega, Pydantic l
 valida, se comprueban las referencias, se persiste con SQLAlchemy y se responde
 con un contrato tipado. Todos los datos son simulados y ficticios.
 
-> **Este endpoint no es apto para producción.** No tiene autenticación ni
-> control de acceso: JWT y RBAC corresponden a un ticket posterior. Se ejecuta
-> únicamente en el entorno controlado de desarrollo y pruebas, nunca expuesto a
-> una red pública.
+> **Este endpoint no es apto para producción.** Exige un token JWT válido y solo
+> el rol PACIENTE puede ejecutar la ingesta: ADMIN y MEDICO reciben `403` (ver
+> [Autenticación, RBAC y auditoría](#autenticación-rbac-y-auditoría)). Todavía
+> **no** valida que la gestante autenticada sea la dueña del `id_embarazo` que
+> envía: ese aislamiento corresponde a SCRUM-71. Se ejecuta únicamente en el
+> entorno controlado de desarrollo y pruebas, nunca expuesto a una red pública.
 
 ### 1. Preparar la base y levantar la API
 
@@ -273,7 +301,9 @@ La documentación interactiva queda en `http://localhost:8000/docs`, generada
 automáticamente a partir de los schemas.
 
 Alternativa: `docker compose up -d` levanta la base y la API juntas, y el
-contenedor ya ejecuta ese mismo `uvicorn`.
+contenedor ya ejecuta ese mismo `uvicorn`. Esa API necesita `JWT_SECRET_KEY` en
+el `.env` (ver [Configurar la firma](#configurar-la-firma)); sin un valor válido
+el contenedor no arranca. `docker compose up -d db` no la necesita.
 
 ### 2. Ruta y método
 
@@ -388,12 +418,17 @@ tantos identificadores como lecturas traía el paquete, en ese mismo orden.
 
 | Código | Cuándo |
 | --- | --- |
-| `201` | La sesión y todas sus lecturas quedaron registradas, o ya lo estaban por una solicitud anterior con la misma clave. |
+| `201` | Con un token válido de rol PACIENTE: la sesión y todas sus lecturas quedaron registradas, o ya lo estaban por una solicitud anterior con la misma clave. |
 | `400` | Falta la cabecera `Idempotency-Key` o su formato no es válido. No se registró nada. |
+| `401` | Falta la credencial o no es `Bearer`, o el token no verifica, expiró o pertenece a una cuenta inexistente o desactivada. Lleva `WWW-Authenticate`. No se registró nada. |
+| `403` | La identidad es válida, pero su rol (ADMIN o MEDICO) no permite la operación. No se registró ninguna sesión ni lectura; el rechazo queda en `auditoria_log` como `ACCESO_DENEGADO_ROL`. |
 | `404` | Alguna referencia del paquete no existe todavía. |
 | `409` | Conflicto. O la clave ya identifica un paquete con contenido distinto, o una referencia dejó de existir mientras se procesaba el paquete. La solicitud en conflicto no agrega ni modifica datos, y la operación que ya estuviera almacenada bajo esa clave permanece intacta. |
 | `422` | El cuerpo no cumple el contrato, o rompe una regla del dominio o una restricción de validez de la base. |
 | `500` | Error interno. La transacción completa fue revertida. |
+
+El detalle de `401` y `403` está en
+[Semántica `401` y `403`](#semántica-401-y-403).
 
 Ningún mensaje de error incluye la URL de conexión, contraseñas, SQL, nombres de
 restricción ni trazas. El diagnóstico técnico queda en el log del servidor,
@@ -1116,6 +1151,15 @@ documenta la variable **vacía** a propósito: un ejemplo que funcionara acabar�
 reutilizado. Una variable vacía o con solo espacios cuenta como no definida.
 `JWT_EXPIRATION_MINUTES` es opcional, acepta entre 1 y 1440 y vale 30 si no se
 define.
+
+Con Docker Compose el camino es explícito: el `.env` documenta y guarda el
+material, y `docker-compose.yml` pasa `JWT_SECRET_KEY` y `JWT_EXPIRATION_MINUTES`
+—30 si falta— al servicio `api`, y a ningún otro. Si la clave falta o no es
+válida, el contenedor de la API se detiene al importar `app.main` con
+`ConfiguracionJWTInvalida`, en vez de arrancar sin poder autenticar. Compose no
+la declara obligatoria a propósito: `docker compose up -d db` debe seguir
+funcionando sin ella. `EDGE_API_TOKEN` es del nodo edge y el contenedor de la API
+no la recibe.
 
 Alembic, el ETL y el cargador del dataset **no** necesitan esta variable: no
 emiten ni verifican tokens, y hacerlos depender de una credencial que no usan

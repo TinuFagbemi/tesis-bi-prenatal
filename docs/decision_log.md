@@ -2095,6 +2095,47 @@ no encontraba ese archivo y terminaba con código 4 sin ejecutar ninguna prueba.
 bash y falla si a pytest le llega un argumento que no es una opción, o si alguna
 suite `*_postgresql.py` no está excluida del bloque sin servidor.
 
+#### Docker Compose y el material de firma
+
+La segunda revisión del PR encontró que `docker-compose.yml` pasaba al servicio
+`api` solo `APP_NAME`, `APP_ENV` y `DATABASE_URL`. Como `app.main` falla cerrado
+sin `JWT_SECRET_KEY`, `docker compose up -d` dejaba una API que no arrancaba. El
+CI no lo veía: sus pruebas reciben la variable directamente del entorno del job
+y nunca recorren el camino `.env` → Compose → contenedor.
+
+- `JWT_SECRET_KEY` sigue siendo **opcional en `Settings`**, que comparten
+  Alembic, el cargador y el ETL, y **obligatoria al arrancar FastAPI**.
+- Compose pasa de forma explícita `JWT_SECRET_KEY: "${JWT_SECRET_KEY:-}"` y
+  `JWT_EXPIRATION_MINUTES: "${JWT_EXPIRATION_MINUTES:-30}"` al servicio `api`, y
+  a ningún otro. Nada de `env_file: .env`: la API recibe solo lo que usa, y
+  `EDGE_API_TOKEN` no llega al contenedor.
+- **No se usa `${JWT_SECRET_KEY:?…}`.** Haría que procesar el modelo de Compose
+  o levantar solo `db` dependiera de una credencial que la base, las
+  migraciones, el cargador y el ETL no usan. Una clave ausente llega vacía, y es
+  `app.main` quien se niega a arrancar con `ConfiguracionJWTInvalida`.
+- **No hay secreto funcional por omisión**, ni en Compose ni en `.env.example`.
+
+Un step del CI resuelve el modelo con `docker compose config --format json` en
+un entorno controlado, sin imprimirlo, y comprueba que la clave llega intacta,
+que la expiración vale 30 si falta y el valor configurado si existe, que el
+proyecto se resuelve sin clave y que el servicio `api` no recibe
+`EDGE_API_TOKEN` ni otras variables.
+
+#### Dataset regenerado frente al cargador idempotente
+
+- La reproducibilidad funcional del generador excluye **únicamente** el digest
+  Argon2id, que lleva salt aleatorio de la biblioteca. No se usan salts
+  deterministas.
+- El cargador es idempotente respecto del **mismo artefacto**: cargar dos veces
+  el mismo JSON inserta cero filas la segunda vez.
+- Regenerar el dataset produce **otro artefacto**, con otros `password_hash`.
+  Cargarlo sobre una base ya sembrada puede terminar en `ConflictoDeDatos` sobre
+  `usuario.password_hash`, que es exactamente el contrato *no-overwrite* de
+  SCRUM-61: ni se ignora el campo ni se actualiza la fila en silencio.
+- Una base local simulada creada antes de SCRUM-70 se **reconstruye y se vuelve
+  a sembrar una vez**. No se migra ni se sobrescribe, y no existe una migración
+  para ello: todos los datos son sintéticos y viven en un entorno controlado.
+
 ### Lo que SCRUM-70 deliberadamente no hace
 
 RLS de PostgreSQL, aislamiento por paciente, médico o clínica, seudonimización o
