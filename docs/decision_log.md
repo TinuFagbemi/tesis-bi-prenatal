@@ -2169,3 +2169,198 @@ job, distinta de `POSTGRES_PASSWORD` porque la aplicación rechaza que coincidan
 No se retiró ningún paso, no se paralelizó nada, y no se actualizaron httpx,
 anyio, TestClient ni las actions: esos avisos vienen de antes y su actualización
 no pertenece a un ticket de seguridad.
+
+## SCRUM-97 — Aprovisionamiento controlado y ciclo de vida de cuentas
+
+Subtarea de SCRUM-71. Completa el ciclo de identidad del MVP: un ADMIN crea la
+cuenta de un perfil clínico existente, la desactiva y la reactiva, reutilizando
+la autenticación, Argon2id, JWT, RBAC y auditoría de SCRUM-70. Todo con datos
+simulados.
+
+La rama `feature/scrum-97-aprovisionamiento-ciclo-cuentas` se creó desde
+`3ca311531cab9ce470fd276e25849055ba139926`, el `HEAD` del Pull Request #15 de
+SCRUM-70, que todavía no está integrado en `main`. La integración es secuencial:
+primero SCRUM-70 y después SCRUM-97.
+
+### Decisiones aprobadas
+
+#### Perfil clínico, cuenta y embarazo son entidades distintas
+
+`Paciente` y `Medico` son personas simuladas que existen antes de cualquier
+cuenta y la sobreviven. `Usuario` es la identidad digital que se autentica.
+`UsuarioPaciente` y `UsuarioMedico` son el único vínculo entre ambas. `Embarazo`
+es un episodio: una segunda gestación es otro `Embarazo` del mismo
+`id_paciente`, nunca otra paciente, cuenta o vínculo. Una asignación de
+dispositivo es temporal y no define identidad. Se conservan los dos bridges; no
+se sustituyen por otro modelo.
+
+#### El rol objetivo sale de la ruta
+
+`POST /api/v1/cuentas/pacientes/{id_paciente}` crea PACIENTE y
+`POST /api/v1/cuentas/medicos/{id_medico}` crea MEDICO. El cuerpo
+—`{"email", "password"}` con `extra="forbid"`— no admite `rol`, `activo`,
+`id_usuario`, `password_hash` ni campos clínicos. Ningún camino crea ADMIN: las
+dos cuentas ADMIN del dataset son semilla. Se descartó un contrato genérico con
+un campo de rol, aunque fuera un enumerado cerrado, porque traslada al cliente
+una decisión que la ruta ya expresa.
+
+#### Solo ADMIN, y antes de revelar nada
+
+Las tres rutas dependen de `exigir_roles(NombreRol.ADMIN, entidad="usuario")`.
+FastAPI resuelve esa dependencia antes de validar la ruta y el cuerpo, así que
+PACIENTE y MEDICO reciben el mismo `403` con un identificador existente que con
+uno inexistente, y la denegación queda como `ACCESO_DENEGADO_ROL`. No existe
+`GET` de cuentas.
+
+#### Correo canónico: una sola regla
+
+`email.strip().lower()`, rechazando vacío y espacios internos, con el límite de
+120 medido después del `strip()`. Vive en `app/services/correo.py` y lo usan la
+provisión, el cuerpo del login (el mismo tipo `EmailDeAcceso`) y
+`autenticar()`. Aplicarla solo al provisionar habría guardado
+`paciente31@example.com` y rechazado `Paciente31@Example.com` en el login.
+
+SCRUM-70 comparaba el correo exactamente y no lo normalizaba; ese supuesto del
+handoff no se cumplía y se corrigió aquí de forma explícita. Las 37 cuentas del
+dataset ya eran canónicas, así que el cambio no altera ninguna.
+
+En PostgreSQL, `ck_usuario_email_canonico` exige
+`email <> '' AND email = lower(email) AND email !~ '\s'`, y se conserva
+`uq_usuario_email`: sobre valores canónicos ya es la unicidad sin distinción de
+mayúsculas. No se añadió `citext`, ninguna extensión ni un índice funcional. Se
+escribe `\s` y no `[[:space:]]` porque SQLAlchemy interpreta `:space` dentro de
+un texto SQL como parámetro enlazado; en PostgreSQL ambas clases son la misma.
+
+No se usa `EmailStr` ni una dependencia nueva: el sistema no envía correos y una
+validación sintáctica solo añadiría respuestas distintas para direcciones con
+mala forma.
+
+#### Coherencia rol ↔ vínculo en PostgreSQL
+
+| Rol | `usuario_paciente` | `usuario_medico` |
+| --- | ---: | ---: |
+| PACIENTE | exactamente 1 | 0 |
+| MEDICO | 0 | exactamente 1 |
+| ADMIN | 0 | 0 |
+
+SCRUM-70 no garantizaba en base que una cuenta no estuviera en ambos bridges, ni
+que el rol coincidiera con su vínculo, ni que una cuenta clínica tuviera uno.
+Como la regla abarca tres tablas, no cabe en un CHECK: una función
+`operacional.validar_rol_vinculo_usuario()` y tres *constraint triggers*
+`DEFERRABLE INITIALLY DEFERRED` —en `usuario` al fijar rol o clave, y en cada
+bridge al insertar, actualizar o borrar— la evalúan al confirmar, contra las
+filas de ese momento. Diferidos para poder insertar la cuenta y luego su vínculo
+en la misma transacción. El rol se resuelve por `rol.nombre_rol`.
+
+La función toma `FOR NO KEY UPDATE` sobre la cuenta antes de contar: dos
+transacciones sobre los vínculos de la misma cuenta se validan en serie. `NO KEY`
+y no `FOR UPDATE` porque insertar un vínculo ya toma `FOR KEY SHARE` sobre la
+cuenta y `FOR UPDATE` convertiría esa carrera en un *deadlock*. El error se
+reporta con SQLSTATE `23514` y nombre de restricción `rol_vinculo_coherente`, que
+es como la API lo reconoce sin leer el mensaje del driver.
+
+#### Migración `54053d46abd6`
+
+Sobre `60facdbacf51`, con una sola cabeza. Bloquea las tres tablas de cuentas,
+verifica los correos existentes —vacíos, espacios internos, demasiado largos o
+colisiones tras normalizar— y aborta con un conteo, sin mostrar direcciones ni
+elegir cuál conservar; normaliza; añade el CHECK; verifica la coherencia rol ↔
+vínculo de las cuentas existentes y aborta si alguna falla, sin corregir
+asociaciones; crea la función y los triggers. El *downgrade* retira triggers,
+función y CHECK sin `CASCADE` ni `IF EXISTS`, y no restaura mayúsculas: los
+valores canónicos son válidos también en la revisión anterior.
+
+#### Transacción y dueño del commit
+
+Mismo patrón que SCRUM-70: el servicio `app/services/cuentas.py` implementa
+reglas, consultas, `add()` y `flush()`, y nunca confirma ni revierte. El router
+`app/api/v1/cuentas.py` escribe la auditoría con `auditoria.registrar()` dentro
+de la transacción de negocio y hace el único `commit`, o el `rollback` en
+cualquier otro camino. Provisión: bloqueo del perfil `FOR NO KEY UPDATE`,
+comprobaciones, rol por nombre, hash, `Usuario`, `flush`, vínculo, auditoría,
+`commit`. Un fallo en cualquier punto no deja cuenta huérfana, vínculo parcial
+ni auditoría de éxito. No se usa `Idempotency-Key`: repetir una provisión es
+`409`.
+
+#### Semántica HTTP
+
+`201` provisión; `200` transición o repetición del estado actual; `401` sin
+token, token inválido o actor inactivo; `403` rol distinto de ADMIN; `404`
+perfil o cuenta inexistente; `409` correo en uso, perfil vinculado, cuenta ADMIN
+—incluida la propia—, incoherencia rol/vínculo o carrera resuelta por PostgreSQL
+(`uq_usuario_email`, `uq_usuario_paciente_id_paciente`,
+`uq_usuario_medico_id_medico`, `rol_vinculo_coherente`, `40001`, `40P01`);
+`422` identificador fuera del rango `INTEGER`, cuerpo o campo extra inválido;
+`500` genérico para todo lo demás. Un error no clasificado no se convierte en
+`409`. Las dos rutas de provisión se añadieron a las rutas cuyo `422` no devuelve
+el valor rechazado, porque su cuerpo lleva una contraseña.
+
+#### Desactivar sin borrar; reactivar la misma identidad
+
+`PATCH /api/v1/cuentas/{id_usuario}/estado` con `{"activo": bool}` —solo
+booleanos JSON— cambia `Usuario.activo` bajo `FOR NO KEY UPDATE` de la cuenta.
+No elimina cuenta, digest, vínculo, perfil, embarazos, sesiones, lecturas,
+hechos analíticos ni auditoría. Reactivar actualiza la misma fila: mismo
+`id_usuario`, mismo hash, mismo vínculo. Repetir el estado actual responde `200`,
+revierte y no audita otra transición.
+
+#### Token emitido antes de desactivar
+
+No hizo falta ningún mecanismo nuevo: `resolver_principal()` relee la cuenta en
+PostgreSQL en cada petición protegida, así que el token anterior recibe `401` en
+su siguiente uso. No se introdujo lista de revocación, `jti`, `token_version`,
+*refresh token* ni rotación de secreto.
+
+**Limitación aceptada:** si la cuenta se reactiva antes de que ese token expire,
+vuelve a servir, porque la autoridad es el estado actual de la cuenta. Queda
+documentada y fijada en una prueba; resolverla amplía el alcance.
+
+#### Catálogo de auditoría
+
+Se añadieron `CUENTA_PACIENTE_PROVISIONADA`, `CUENTA_MEDICO_PROVISIONADA`,
+`CUENTA_DESACTIVADA` y `CUENTA_REACTIVADA`, sin cambio físico en
+`auditoria_log`: actor ADMIN en `id_usuario`, objetivo `usuario` + id. Se
+reutiliza `ACCESO_DENEGADO_ROL`. No se auditan los no-op ni los rechazos de
+provisión, y no se guarda correo, contraseña, hash, token, nombre, cédula ni
+teléfono.
+
+#### Datos de prueba
+
+El dataset canónico no deja perfiles libres. Las pruebas crean una paciente y un
+médico ficticios adicionales solo dentro de bases temporales `scrum97_tmp_*`,
+provisionan `paciente31@example.com` y `medico06@example.com` y eliminan las
+bases. No se borraron vínculos canónicos ni se modificó el generador.
+
+#### Pruebas heredadas adaptadas
+
+La revisión y la invariante nuevas cambian hechos que algunas pruebas anteriores
+fijaban. Se adaptaron sin retirar ni debilitar ninguna, conservando su
+intención:
+
+- `test_auditoria.py`: el catálogo cerrado pasa de cuatro a ocho acciones.
+- `test_migrations.py`: cuatro revisiones, 31 CHECK, y las restricciones que una
+  revisión posterior añade a una tabla existente cuentan como parte de esa tabla.
+- `test_etl_esquema.py`: la revisión analítica ya no es el *head*, pero sigue en
+  la cadena lineal sobre SCRUM-63.
+- `test_etl_postgresql.py`: el *downgrade* que retira el esquema analítico baja
+  hasta la revisión anterior a la analítica, no un paso desde el *head*.
+- `test_autenticacion_postgresql.py`: el cambio de rol PACIENTE → ADMIN y el
+  borrado de una cuenta MEDICO retiran el vínculo en la misma transacción; la
+  prueba de Alembic comprueba que SCRUM-70 no añadió revisión.
+- `test_ingestion_idempotency_postgresql.py`: las pruebas concurrentes, las
+  únicas que confirman, crean la identidad PACIENTE de la suite ya vinculada a la
+  paciente ficticia de su propio entorno.
+
+### Frontera con SCRUM-98
+
+SCRUM-97 decide cómo se crea, vincula, activa y desactiva una cuenta. No decide
+qué filas puede ver: aislamiento por paciente, médico o clínica, RLS,
+autorización paciente → embarazo, seudonimización, anonimización y protección
+analítica pertenecen a SCRUM-98, que reutilizará estos vínculos. Terminar
+SCRUM-97 no cierra SCRUM-71.
+
+### Integración continua
+
+Décima capa en serie: `tests/test_cuentas_postgresql.py` con
+`SCRUM97_TEST_DATABASE_URL`, reporte `pytest-scrum97.xml`, excluida del bloque
+offline, y el guardián de omitidas pasa de ocho a nueve reportes.

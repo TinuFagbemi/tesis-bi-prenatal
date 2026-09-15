@@ -107,6 +107,12 @@ Para representar el comportamiento de zonas rurales con conectividad inestable, 
 - **Hash de contraseñas con Argon2id.** Un hash no es un cifrado: protege credenciales de forma irreversible y no protege ningún dato clínico, ni en tránsito ni en reposo.
 - **Auditoría en `auditoria_log`** de los accesos y acciones definidos. No persiste contraseñas, hashes, tokens, la cabecera `Authorization`, el correo introducido en un `LOGIN_FALLIDO` ni payload clínico; sí conserva los identificadores técnicos y la `ip_origen` que prevé el modelo de auditoría.
 
+**Ya implementado (SCRUM-97):**
+
+- **Aprovisionamiento controlado de cuentas** PACIENTE y MEDICO para perfiles clínicos existentes, solo por ADMIN, sin registro público ni autoservicio.
+- **Desactivación y reactivación** de la misma cuenta, sin borrar perfiles ni historia clínica.
+- **Correo de acceso canónico** (`strip().lower()`) y **coherencia rol ↔ vínculo clínico** garantizadas también por PostgreSQL. Ver [Cuentas: aprovisionamiento y ciclo de vida](#cuentas-aprovisionamiento-y-ciclo-de-vida).
+
 **Todavía no implementado:**
 
 - **HTTPS/TLS.** Corresponde a un escenario de despliegue y no a una capacidad de este código. El MVP local habla HTTP contra `http://127.0.0.1:8000`; un token Bearer no debe circular fuera de ese entorno controlado sin HTTPS/TLS, y un JWT firmado **no** es un JWT cifrado.
@@ -150,7 +156,7 @@ tesis-bi-prenatal/
 
 ## Estado actual del proyecto
 
-El repositorio se encuentra en una etapa temprana. Lo que ya existe y funciona es el esquema operacional en PostgreSQL con sus migraciones, el generador del dataset simulado, su carga idempotente, el endpoint que recibe una sesión de monitoreo con sus lecturas biométricas —con su contrato de idempotencia—, el nodo edge simulado, que captura paquetes sin conexión y los entrega después sin duplicarlos, con reintentos de espera incremental, agotamiento controlado y trazabilidad de extremo a extremo, y el esquema analítico (Star Schema) con su ETL reproducible, idempotente e incremental. A partir de SCRUM-70 existen además autenticación con JWT, autorización por rol y auditoría de accesos: el endpoint de ingesta ya no es público. **Aún no existen un servicio permanente o demonio que dispare la sincronización o el ETL por sí solo, la detección automática de conectividad, la seguridad por fila, la anonimización, HTTPS/TLS, el cifrado en reposo ni los dashboards.** El desarrollo activo continúa en el Capítulo IV, centrado en seguridad, interfaces, aislamiento de datos y analítica del MVP, y todo el trabajo se desarrolla y prueba en un entorno controlado/local, no en comunidades rurales reales.
+El repositorio se encuentra en una etapa temprana. Lo que ya existe y funciona es el esquema operacional en PostgreSQL con sus migraciones, el generador del dataset simulado, su carga idempotente, el endpoint que recibe una sesión de monitoreo con sus lecturas biométricas —con su contrato de idempotencia—, el nodo edge simulado, que captura paquetes sin conexión y los entrega después sin duplicarlos, con reintentos de espera incremental, agotamiento controlado y trazabilidad de extremo a extremo, y el esquema analítico (Star Schema) con su ETL reproducible, idempotente e incremental. A partir de SCRUM-70 existen además autenticación con JWT, autorización por rol y auditoría de accesos: el endpoint de ingesta ya no es público. SCRUM-97 añade el aprovisionamiento administrativo de cuentas para perfiles clínicos existentes y su desactivación y reactivación. **Aún no existen un servicio permanente o demonio que dispare la sincronización o el ETL por sí solo, la detección automática de conectividad, la seguridad por fila, la anonimización, HTTPS/TLS, el cifrado en reposo ni los dashboards.** El desarrollo activo continúa en el Capítulo IV, centrado en seguridad, interfaces, aislamiento de datos y analítica del MVP, y todo el trabajo se desarrolla y prueba en un entorno controlado/local, no en comunidades rurales reales.
 
 ## Roadmap general
 
@@ -1060,7 +1066,7 @@ contiene ningún dato personal):
 ```text
 ETL analítico FetalAlert
 resultado=SUCCESS
-revision_alembic=60facdbacf51
+revision_alembic=54053d46abd6
 version_umbrales=SIM-1.0
 dim_paciente: insertadas=30 actualizadas=0 sin_cambios=0
 bridge_embarazo_factor_riesgo: insertadas=23 actualizadas=0 sin_cambios=0
@@ -1245,6 +1251,9 @@ una diferencia trivial de tiempo que confirme qué correos existen.
 | `POST /api/v1/autenticacion/token` | Obtener un token | Público | n/a | n/a | n/a |
 | `GET /api/v1/autenticacion/yo` | Identidad técnica | Protegido | ✔ | ✔ | ✔ |
 | `POST /api/v1/sesiones-monitoreo` | Registrar sesión y lecturas | Protegido | **403** | **403** | **✔ 201** |
+| `POST /api/v1/cuentas/pacientes/{id_paciente}` | Provisionar cuenta PACIENTE (SCRUM-97) | Protegido | **✔ 201** | **403** | **403** |
+| `POST /api/v1/cuentas/medicos/{id_medico}` | Provisionar cuenta MEDICO (SCRUM-97) | Protegido | **✔ 201** | **403** | **403** |
+| `PATCH /api/v1/cuentas/{id_usuario}/estado` | Desactivar o reactivar (SCRUM-97) | Protegido | **✔ 200** | **403** | **403** |
 | `GET /health` | Sonda de salud | Público | ✔ | ✔ | ✔ |
 | `GET /docs`, `/redoc`, `/openapi.json` | Documentación local | Público | ✔ | ✔ | ✔ |
 
@@ -1254,8 +1263,9 @@ credencial administrativa no sirve de atajo hacia datos clínicos.
 
 `GET /api/v1/autenticacion/yo` devuelve exactamente `id_usuario` y `rol`. Sirve
 para verificar identidad técnica —el nodo edge lo usa— y **no** es evidencia de
-permisos de negocio diferenciados: la API tiene una sola operación de negocio, y
-esa limitación se documenta en vez de disimularse ampliándola.
+permisos de negocio diferenciados. Al cierre de SCRUM-70 la API tenía una sola
+operación de negocio; SCRUM-97 añade las tres rutas administrativas de cuentas,
+exclusivas de ADMIN.
 
 ### Semántica `401` y `403`
 
@@ -1272,14 +1282,19 @@ cambia nada, porque nadie lo lee.
 
 ### Auditoría
 
-Cuatro acciones, y ninguna más:
+Ocho acciones, y ninguna más: las cuatro de SCRUM-70 y las cuatro del ciclo de
+cuentas de SCRUM-97.
 
 | Acción | Actor | Entidad | Cuándo |
 | --- | --- | --- | --- |
 | `LOGIN_EXITOSO` | la cuenta | `usuario` | credenciales válidas |
 | `LOGIN_FALLIDO` | `NULL` | — | cuenta inexistente, contraseña incorrecta o cuenta inactiva |
-| `ACCESO_DENEGADO_ROL` | la cuenta | `sesion_monitoreo` | identidad válida, rol sin permiso |
+| `ACCESO_DENEGADO_ROL` | la cuenta | `sesion_monitoreo` o `usuario` | identidad válida, rol sin permiso |
 | `SESION_MONITOREO_REGISTRADA` | la cuenta | `sesion_monitoreo` | paquete creado de verdad |
+| `CUENTA_PACIENTE_PROVISIONADA` | el ADMIN | `usuario` + id de la cuenta creada | cuenta PACIENTE creada y vinculada |
+| `CUENTA_MEDICO_PROVISIONADA` | el ADMIN | `usuario` + id de la cuenta creada | cuenta MEDICO creada y vinculada |
+| `CUENTA_DESACTIVADA` | el ADMIN | `usuario` + id de la cuenta | transición activa → inactiva |
+| `CUENTA_REACTIVADA` | el ADMIN | `usuario` + id de la cuenta | transición inactiva → activa |
 
 Decisiones que conviene leer explícitas:
 
@@ -1388,9 +1403,178 @@ $env:SCRUM70_TEST_DATABASE_URL = "postgresql+psycopg://<usuario>:<clave>@127.0.0
 Esa suite crea y elimina sus propias bases temporales con prefijo
 `scrum70_tmp_`, y solo elimina las que ella misma creó.
 
+## Cuentas: aprovisionamiento y ciclo de vida
+
+Desde SCRUM-97 un ADMIN puede crear la cuenta de acceso de un perfil clínico que
+ya existe, y desactivarla o reactivarla. No hay registro público, autoservicio,
+invitaciones, envío de credenciales, cambio o recuperación de contraseña, ni
+creación de cuentas ADMIN: las dos cuentas ADMIN del dataset son cuentas semilla.
+Todo es simulado.
+
+### Perfil clínico, cuenta y embarazo no son lo mismo
+
+| Entidad | Qué es | Ciclo de vida |
+| --- | --- | --- |
+| `Paciente` / `Medico` | Persona clínica simulada | Existe antes de la cuenta y la sobrevive |
+| `Usuario` | Identidad digital que se autentica | Se activa y desactiva; nunca se recrea por embarazo |
+| `UsuarioPaciente` / `UsuarioMedico` | El único vínculo entre esa cuenta y ese perfil | Uno por perfil y uno por cuenta |
+| `Embarazo` | Un episodio gestacional | Varios por paciente |
+| Asignación de dispositivo | Préstamo temporal del flujo edge | No define identidad |
+
+Un segundo embarazo es un segundo `Embarazo` del mismo `id_paciente`: la
+paciente conserva su perfil, su cuenta y su vínculo, y el historial anterior
+queda intacto.
+
+### Rutas
+
+Las tres exigen un token de una cuenta **ADMIN activa**. La comprobación ocurre
+antes de mirar si el perfil o la cuenta existen: un PACIENTE o un MEDICO reciben
+el mismo `403` con un identificador existente que con uno inexistente, y queda
+auditado como `ACCESO_DENEGADO_ROL`. No existe ningún `GET` de cuentas.
+
+```text
+POST  /api/v1/cuentas/pacientes/{id_paciente}
+POST  /api/v1/cuentas/medicos/{id_medico}
+PATCH /api/v1/cuentas/{id_usuario}/estado
+```
+
+Provisión (cuerpo idéntico para ambas rutas; `extra="forbid"`):
+
+```json
+{"email": "paciente31@example.com", "password": "<credencial simulada>"}
+```
+
+El **rol sale de la ruta**: `/pacientes/...` crea PACIENTE y `/medicos/...` crea
+MEDICO. El cuerpo no admite `rol`, `activo`, `id_usuario`, `password_hash` ni
+campos clínicos; cualquiera de ellos es `422`. La contraseña viaja como
+`SecretStr`, se guarda solo como digest Argon2id con el mismo servicio de
+SCRUM-70 y nunca se devuelve ni se registra; un `422` de estas rutas no incluye
+el valor rechazado.
+
+Respuestas `201`:
+
+```json
+{"id_usuario": 137, "id_paciente": 130, "rol": "PACIENTE", "activo": true}
+{"id_usuario": 138, "id_medico": 105, "rol": "MEDICO", "activo": true}
+```
+
+Cambio de estado:
+
+```json
+{"activo": false}
+```
+
+Solo acepta booleanos JSON. Responde `{"id_usuario": 137, "rol": "PACIENTE", "activo": false}`.
+
+| Situación | Código |
+| --- | --- |
+| Cuenta provisionada | `201` |
+| Transición activa ↔ inactiva, o repetición del estado que ya tenía | `200` |
+| Sin token, token inválido o ADMIN desactivado | `401` |
+| Rol distinto de ADMIN | `403` |
+| Perfil o cuenta inexistente | `404` |
+| Correo ya en uso, perfil ya vinculado, cuenta ADMIN (incluida la propia), incoherencia rol/vínculo o carrera perdida | `409` |
+| Identificador, cuerpo o campo extra inválido | `422` |
+| Error interno (incluido un fallo de auditoría) | `500`, mensaje genérico |
+
+Repetir una provisión ya hecha no es idempotente a propósito: es un `409`.
+
+### Correo canónico
+
+Hay **una sola regla**, aplicada en la provisión, en el login y en la búsqueda
+interna de la cuenta: `email.strip().lower()`; vacío o con espacios internos se
+rechaza, y el límite de 120 caracteres se mide después de quitar los espacios
+exteriores. `Paciente31@Example.com` inicia sesión en la cuenta guardada como
+`paciente31@example.com`, y no puede crearse una segunda cuenta con esa
+variante. No se usa `EmailStr` ni ninguna dependencia nueva.
+
+PostgreSQL lo garantiza por su cuenta: `ck_usuario_email_canonico` solo admite
+valores canónicos y el `uq_usuario_email` existente, sobre valores canónicos, ya
+es la unicidad sin distinción de mayúsculas. No se añadió `citext`, ninguna
+extensión ni un índice funcional.
+
+### Coherencia rol ↔ vínculo
+
+| Rol | `usuario_paciente` | `usuario_medico` |
+| --- | ---: | ---: |
+| PACIENTE | exactamente 1 | 0 |
+| MEDICO | 0 | exactamente 1 |
+| ADMIN | 0 | 0 |
+
+La regla abarca tres tablas, así que no es un CHECK: la función
+`operacional.validar_rol_vinculo_usuario()` y tres *constraint triggers*
+`DEFERRABLE INITIALLY DEFERRED` la evalúan **al confirmar** cada transacción.
+Eso permite insertar la cuenta y después su vínculo dentro de la misma
+transacción, y rechaza cualquier estado incoherente aunque se escriba
+directamente en SQL. El rol se resuelve por `rol.nombre_rol`, nunca por un id
+numérico.
+
+### Atomicidad y auditoría
+
+Una provisión es una sola transacción: bloqueo del perfil, comprobaciones, hash,
+`Usuario`, vínculo, auditoría de éxito y un único `commit`. Si algo falla no
+queda cuenta huérfana, ni vínculo parcial, ni auditoría de éxito falsa. El
+servicio (`app/services/cuentas.py`) no confirma ni revierte: lo hace el router.
+
+Las cuatro acciones del ciclo (`CUENTA_PACIENTE_PROVISIONADA`,
+`CUENTA_MEDICO_PROVISIONADA`, `CUENTA_DESACTIVADA`, `CUENTA_REACTIVADA`) guardan
+al ADMIN como actor y `usuario` + el id de la cuenta como objetivo. No guardan
+correo, contraseña, hash, token, nombre, cédula ni teléfono. Repetir el estado que
+la cuenta ya tenía no se audita como otra transición, y un rechazo de provisión
+no escribe ninguna fila de éxito.
+
+### Desactivar no borra, reactivar no recrea
+
+Desactivar cambia `Usuario.activo`. La cuenta, su digest, su vínculo, el perfil,
+los embarazos, las sesiones, las lecturas, los hechos analíticos y la auditoría
+quedan exactamente como estaban. Reactivar vuelve a poner `activo = true` en la
+**misma** fila: mismo `id_usuario`, mismo hash, mismo vínculo.
+
+Como la API relee la cuenta en PostgreSQL en cada petición protegida, **un token
+emitido antes de desactivar se rechaza con `401` en su siguiente uso**, sin lista
+de revocación, `jti`, `token_version` ni *refresh token*.
+
+> **Limitación aceptada.** Si la cuenta se reactiva antes de que ese token
+> anterior expire (30 minutos por omisión), el token vuelve a servir, porque la
+> autoridad es el estado actual de la cuenta y no hay revocación por token. Está
+> documentada y fijada en una prueba; resolverla queda fuera del alcance.
+
+### Probar con datos simulados
+
+Las 30 pacientes y los 5 médicos del dataset ya tienen su cuenta, así que no hay
+perfiles libres que provisionar. Las pruebas crean una paciente y un médico
+ficticios adicionales **solo dentro de bases temporales** (`scrum97_tmp_*`) y
+eliminan esas bases al terminar; el dataset canónico, su generador y sus conteos
+no cambian.
+
+Sin servidor PostgreSQL, desde `backend/`:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_cuentas.py
+```
+
+Con PostgreSQL 16:
+
+```powershell
+$env:SCRUM97_TEST_DATABASE_URL = "postgresql+psycopg://<usuario>:<clave>@127.0.0.1:<puerto>/<base>"
+.\.venv\Scripts\python.exe -m pytest tests/test_cuentas_postgresql.py -v
+```
+
+La migración `54053d46abd6` valida antes de cambiar nada: si una cuenta existente
+tuviera un correo vacío, con espacios internos o que colisione al normalizarse, o
+un rol sin su vínculo exacto, se detiene con un conteo —sin mostrar correos— y no
+corrige ni elimina nada.
+
+### Lo que SCRUM-97 no hace
+
+No decide **qué datos** puede ver cada cuenta: el aislamiento por paciente,
+médico o clínica, RLS, la seudonimización y la protección analítica pertenecen a
+SCRUM-98. SCRUM-97 deja listos los vínculos de identidad que ese trabajo
+necesitará.
+
 ## Calidad del proyecto
 
-- **Integración continua:** el workflow [`CI`](.github/workflows/ci.yml) se ejecuta en cada Pull Request hacia `main`, instala el backend con Python 3.12 y corre las pruebas automatizadas. Contra un servicio PostgreSQL 16 efímero se validan las migraciones, la carga idempotente del dataset, el endpoint de ingesta, la idempotencia de reenvíos —concurrencia real incluida—, el ciclo completo del nodo edge simulado hasta PostgreSQL, su sincronización resiliente con reintentos, reconciliación y trazabilidad, el esquema analítico con su ETL —carga inicial, idempotencia, incrementalidad, rollback, candado y zona horaria— y la autenticación JWT con hashes Argon2id, la matriz RBAC y la auditoría; las suites del ETL y de autenticación trabajan sobre bases temporales propias. También se validan el preflight y la autenticación del nodo edge, y un paso resuelve el modelo de Docker Compose para comprobar que la configuración JWT llega al servicio de la API. Un guardián final exige que las ocho suites de PostgreSQL se ejecuten: el job queda en rojo si alguna de sus pruebas se omite en lugar de ejecutarse. Las pruebas de tiempo no duermen: el reloj y la espera se inyectan.
+- **Integración continua:** el workflow [`CI`](.github/workflows/ci.yml) se ejecuta en cada Pull Request hacia `main`, instala el backend con Python 3.12 y corre las pruebas automatizadas. Contra un servicio PostgreSQL 16 efímero se validan las migraciones, la carga idempotente del dataset, el endpoint de ingesta, la idempotencia de reenvíos —concurrencia real incluida—, el ciclo completo del nodo edge simulado hasta PostgreSQL, su sincronización resiliente con reintentos, reconciliación y trazabilidad, el esquema analítico con su ETL —carga inicial, idempotencia, incrementalidad, rollback, candado y zona horaria— y la autenticación JWT con hashes Argon2id, la matriz RBAC y la auditoría, y el aprovisionamiento y ciclo de vida de cuentas —migración, restricciones, trigger diferido y carreras reales incluidos—; las suites del ETL, de autenticación y de cuentas trabajan sobre bases temporales propias. También se validan el preflight y la autenticación del nodo edge, y un paso resuelve el modelo de Docker Compose para comprobar que la configuración JWT llega al servicio de la API. Un guardián final exige que las nueve suites de PostgreSQL se ejecuten: el job queda en rojo si alguna de sus pruebas se omite en lugar de ejecutarse. Las pruebas de tiempo no duermen: el reloj y la espera se inyectan.
 - **Criterios de cierre de un ticket:** [Definition of Done](docs/definition_of_done.md).
 
 ## Estrategia de ramas
