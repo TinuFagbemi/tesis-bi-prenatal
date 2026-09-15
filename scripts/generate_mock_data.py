@@ -3,10 +3,19 @@ from __future__ import annotations
 import csv
 import json
 import random
+import sys
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+RAIZ_DEL_REPOSITORIO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(RAIZ_DEL_REPOSITORIO / "backend"))
+
+# El hash lo produce el mismo servicio que la API usa para verificarlo, y no una
+# copia local: si el algoritmo o sus parametros cambian alguna vez, cambian en un
+# solo sitio y el dataset sigue siendo verificable.
+from app.services.passwords import hashear  # noqa: E402  -- tras ajustar sys.path
 
 
 # ============================================================
@@ -14,6 +23,23 @@ from typing import Any
 # ============================================================
 
 SEMILLA = 20260810
+
+# ============================================================
+# CREDENCIAL FICTICIA DEL DATASET ACADÉMICO
+# ============================================================
+#
+# NO ES UN SECRETO. Es la contraseña que comparten las 37 cuentas simuladas de
+# este dataset, escrita aquí a propósito para que las pruebas puedan iniciar
+# sesión con ellas. No protege absolutamente nada: las cuentas son ficticias, el
+# dataset generado no se versiona (``data/generated/`` está en .gitignore) y este
+# proyecto no tiene despliegue. Nunca debe reutilizarse fuera de aquí ni
+# presentarse como una contraseña válida para ningún uso real.
+#
+# Lo que SÍ es real es el hash: cada cuenta guarda un digest Argon2id auténtico,
+# producido por ``app.services.passwords.hashear`` con el salt aleatorio de la
+# biblioteca. El dataset demuestra el mecanismo de verdad; solo la contraseña de
+# partida es pública, y tiene que serlo para que las pruebas existan.
+PASSWORD_SIMULADA = "FetalAlert-Dataset-Simulado-2026"
 
 # PK enteras determinísticas: cada tabla reinicia su numeración en 100
 # (alineado con Integer autoincrement en SQLAlchemy real; aquí se fija
@@ -610,7 +636,7 @@ def generar_usuarios_administradores(
             "email":
                 f"admin{i:02d}@example.com",
             "password_hash":
-                "HASH_SIMULADO_NO_USAR_EN_PRODUCCION",
+                hashear(PASSWORD_SIMULADA),
             "id_rol":
                 id_rol_admin,
             "activo":
@@ -645,7 +671,7 @@ def generar_usuarios_medicos(
             "email":
                 medico["email_med"],
             "password_hash":
-                "HASH_SIMULADO_NO_USAR_EN_PRODUCCION",
+                hashear(PASSWORD_SIMULADA),
             "id_rol":
                 id_rol_medico,
             "activo":
@@ -681,7 +707,7 @@ def generar_usuarios_pacientes(
             "email":
                 paciente["email_pac"],
             "password_hash":
-                "HASH_SIMULADO_NO_USAR_EN_PRODUCCION",
+                hashear(PASSWORD_SIMULADA),
             "id_rol":
                 id_rol_paciente,
             "activo":

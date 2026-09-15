@@ -100,31 +100,57 @@ Para representar el comportamiento de zonas rurales con conectividad inestable, 
 
 ## Seguridad, auditoría y anonimización
 
-*(Todo lo siguiente está previsto para el diseño; nada de esto está implementado todavía.)*
+**Ya implementado (SCRUM-70):**
 
-- Autenticación mediante JWT y autorización basada en roles (RBAC).
-- **Hash de contraseñas** con Argon2id (distinto del cifrado de datos: el hash protege credenciales de forma irreversible; no se usa para proteger datos en tránsito o en reposo).
-- **HTTPS/TLS** para proteger los datos en tránsito entre los componentes del sistema.
-- `AuditoriaLog` como mecanismo previsto para registrar acciones relevantes del sistema (auditoría).
-- Anonimización aplicada sobre la información ficticia de pacientes utilizada en pruebas, para validar que el mecanismo funciona correctamente.
-- Controles alineados con los requisitos de la Ley 81 de 2019 de Panamá (Protección de Datos Personales).
+- **Autenticación mediante JWT**, con algoritmo fijado por el servidor y expiración efectiva.
+- **Autorización basada en roles (RBAC)** para los perfiles ADMIN, MEDICO y PACIENTE.
+- **Hash de contraseñas con Argon2id.** Un hash no es un cifrado: protege credenciales de forma irreversible y no protege ningún dato clínico, ni en tránsito ni en reposo.
+- **Auditoría en `auditoria_log`** de los accesos y acciones definidos. No persiste contraseñas, hashes, tokens, la cabecera `Authorization`, el correo introducido en un `LOGIN_FALLIDO` ni payload clínico; sí conserva los identificadores técnicos y la `ip_origen` que prevé el modelo de auditoría.
 
-## Estructura prevista del repositorio
+**Todavía no implementado:**
+
+- **HTTPS/TLS.** Corresponde a un escenario de despliegue y no a una capacidad de este código. El MVP local habla HTTP contra `http://127.0.0.1:8000`; un token Bearer no debe circular fuera de ese entorno controlado sin HTTPS/TLS, y un JWT firmado **no** es un JWT cifrado.
+- **Cifrado de datos en reposo.** La arquitectura de la tesis lo contempla, pero el código no lo demuestra y no pertenece a SCRUM-70. Ni Argon2id, ni RBAC, ni el JWT son evidencia de ello.
+- **Aislamiento por fila y anonimización** (SCRUM-71).
+
+> **RBAC limita operaciones por rol, pero todavía no implementa aislamiento por fila ni anonimización.**
+
+Controles alineados con los requisitos de la Ley 81 de 2019 de Panamá (Protección de Datos Personales). `auditoria_log` es *append-only por diseño de la aplicación* —el código solo inserta, y su clave foránea `ON DELETE RESTRICT` impide borrar una cuenta con historial— y aporta **trazabilidad y atribución técnica**. No constituye inmutabilidad criptográfica ni no repudio: quien tenga privilegios de administración sobre PostgreSQL puede alterar la tabla.
+
+## Estructura del repositorio
+
+Vista general; no lista todos los archivos.
 
 ```
 tesis-bi-prenatal/
-├── data/        # Datos simulados y fixtures sintéticos de prueba
-├── docs/        # Documentación de decisiones, arquitectura y modelos de datos
-├── scripts/     # Scripts de generación de datos simulados y utilidades
-├── README.md
-└── .gitignore
+├── .github/workflows/   # CI: pruebas sin servidor, contrato de Compose y suites PostgreSQL
+├── backend/
+│   ├── app/
+│   │   ├── api/         # rutas FastAPI y dependencias de autenticación y RBAC
+│   │   ├── db/          # bases declarativas y sesión de SQLAlchemy
+│   │   ├── edge/        # nodo edge simulado: SQLite, outbox, sincronización y traza
+│   │   ├── etl/         # ETL del esquema operacional al analítico
+│   │   ├── loader/      # carga idempotente del dataset simulado
+│   │   ├── models/      # modelos SQLAlchemy del esquema operacional
+│   │   ├── schemas/     # contratos Pydantic
+│   │   ├── services/    # ingesta, idempotencia, tokens, contraseñas y auditoría
+│   │   ├── config.py
+│   │   └── main.py      # aplicación FastAPI
+│   ├── alembic/         # migraciones
+│   ├── tests/           # pruebas pytest, sin servidor y contra PostgreSQL
+│   ├── Dockerfile
+│   └── requirements.txt
+├── data/                # datasets y bases locales generados; no se versionan
+├── docs/                # decision log, Definition of Done y especificaciones
+├── scripts/             # comandos: generador, cargador, ETL y nodo edge
+├── docker-compose.yml   # PostgreSQL y API para el entorno local
+├── .env.example
+└── README.md
 ```
-
-*(Esta estructura se ampliará conforme avancen los sprints: backend, simulación del nodo edge, ETL y pruebas tendrán sus propios directorios.)*
 
 ## Estado actual del proyecto
 
-El repositorio se encuentra en una etapa temprana. Lo que ya existe y funciona es el esquema operacional en PostgreSQL con sus migraciones, el generador del dataset simulado, su carga idempotente, el endpoint que recibe una sesión de monitoreo con sus lecturas biométricas —con su contrato de idempotencia—, el nodo edge simulado, que captura paquetes sin conexión y los entrega después sin duplicarlos, con reintentos de espera incremental, agotamiento controlado y trazabilidad de extremo a extremo, y el esquema analítico (Star Schema) con su ETL reproducible, idempotente e incremental. **Aún no existen un servicio permanente o demonio que dispare la sincronización o el ETL por sí solo, la detección automática de conectividad, la autenticación y autorización, la seguridad por fila ni los dashboards**, y el endpoint disponible todavía no tiene control de acceso. El desarrollo activo se encuentra actualmente en el Sprint 4, y todo el trabajo se desarrolla y prueba en un entorno controlado/local, no en comunidades rurales reales.
+El repositorio se encuentra en una etapa temprana. Lo que ya existe y funciona es el esquema operacional en PostgreSQL con sus migraciones, el generador del dataset simulado, su carga idempotente, el endpoint que recibe una sesión de monitoreo con sus lecturas biométricas —con su contrato de idempotencia—, el nodo edge simulado, que captura paquetes sin conexión y los entrega después sin duplicarlos, con reintentos de espera incremental, agotamiento controlado y trazabilidad de extremo a extremo, y el esquema analítico (Star Schema) con su ETL reproducible, idempotente e incremental. A partir de SCRUM-70 existen además autenticación con JWT, autorización por rol y auditoría de accesos: el endpoint de ingesta ya no es público. **Aún no existen un servicio permanente o demonio que dispare la sincronización o el ETL por sí solo, la detección automática de conectividad, la seguridad por fila, la anonimización, HTTPS/TLS, el cifrado en reposo ni los dashboards.** El desarrollo activo continúa en el Capítulo IV, centrado en seguridad, interfaces, aislamiento de datos y analítica del MVP, y todo el trabajo se desarrolla y prueba en un entorno controlado/local, no en comunidades rurales reales.
 
 ## Roadmap general
 
@@ -178,7 +204,9 @@ heredada: sin ella, el resumen final del generador no puede imprimir el símbolo
 correctamente el dataset.
 
 Los archivos quedan en `data/generated/`, que **no se versiona**: son
-reproducibles ejecutando de nuevo el generador con su semilla fija.
+reproducibles ejecutando de nuevo el generador con su semilla fija, **salvo
+`password_hash`**, que cambia en cada ejecución (ver
+[Regenerar el dataset no es repetir la carga](#regenerar-el-dataset-no-es-repetir-la-carga)).
 
 ### 4. Cargar el dataset
 
@@ -226,6 +254,30 @@ Nada cambia. La segunda corrida reporta **0 registros insertados** y 2.270
 registros existentes sin cambios, los conteos siguen siendo 732 sesiones y 1.180
 lecturas, y las secuencias no se mueven.
 
+### Regenerar el dataset no es repetir la carga
+
+La idempotencia se refiere al **mismo artefacto** de entrada:
+
+- `generate → load → load` — idempotente: la segunda carga no inserta nada.
+- `generate → load → generate → load` — **puede detenerse con un conflicto en
+  `usuario.password_hash`**.
+
+Desde SCRUM-70 cada cuenta simulada guarda un digest Argon2id con salt
+aleatorio, así que cada ejecución del generador produce digests distintos para
+la misma contraseña ficticia. El resto del dataset se reproduce idéntico, pero
+un archivo regenerado ya es otro artefacto, y el cargador le aplica su regla de
+siempre: una fila existente con contenido distinto es un conflicto, la carga se
+revierte completa y nada se sobrescribe. `password_hash` no se ignora ni se
+actualiza en silencio.
+
+Una base local simulada cargada antes de SCRUM-70 —cuyo `password_hash` era un
+marcador de posición— se **reconstruye una sola vez**: se parte de una base
+vacía, se aplica `alembic upgrade head` y se carga el dataset actual. Si esa
+base vive en el volumen de Docker del proyecto, `docker compose down -v` lo
+elimina, **con todos los datos de esa base local**. Es aceptable porque todos
+los datos son sintéticos y viven en un entorno controlado; no es un
+procedimiento de migración y no existe ninguna migración para ello.
+
 ### Qué pasa ante un conflicto o un error
 
 El comando escribe el motivo en la salida de error y termina con un código
@@ -240,10 +292,12 @@ Primera entrada vertical de la aplicación: una solicitud HTTP llega, Pydantic l
 valida, se comprueban las referencias, se persiste con SQLAlchemy y se responde
 con un contrato tipado. Todos los datos son simulados y ficticios.
 
-> **Este endpoint no es apto para producción.** No tiene autenticación ni
-> control de acceso: JWT y RBAC corresponden a un ticket posterior. Se ejecuta
-> únicamente en el entorno controlado de desarrollo y pruebas, nunca expuesto a
-> una red pública.
+> **Este endpoint no es apto para producción.** Exige un token JWT válido y solo
+> el rol PACIENTE puede ejecutar la ingesta: ADMIN y MEDICO reciben `403` (ver
+> [Autenticación, RBAC y auditoría](#autenticación-rbac-y-auditoría)). Todavía
+> **no** valida que la gestante autenticada sea la dueña del `id_embarazo` que
+> envía: ese aislamiento corresponde a SCRUM-71. Se ejecuta únicamente en el
+> entorno controlado de desarrollo y pruebas, nunca expuesto a una red pública.
 
 ### 1. Preparar la base y levantar la API
 
@@ -265,7 +319,9 @@ La documentación interactiva queda en `http://localhost:8000/docs`, generada
 automáticamente a partir de los schemas.
 
 Alternativa: `docker compose up -d` levanta la base y la API juntas, y el
-contenedor ya ejecuta ese mismo `uvicorn`.
+contenedor ya ejecuta ese mismo `uvicorn`. Esa API necesita `JWT_SECRET_KEY` en
+el `.env` (ver [Configurar la firma](#configurar-la-firma)); sin un valor válido
+el contenedor no arranca. `docker compose up -d db` no la necesita.
 
 ### 2. Ruta y método
 
@@ -380,12 +436,17 @@ tantos identificadores como lecturas traía el paquete, en ese mismo orden.
 
 | Código | Cuándo |
 | --- | --- |
-| `201` | La sesión y todas sus lecturas quedaron registradas, o ya lo estaban por una solicitud anterior con la misma clave. |
+| `201` | Con un token válido de rol PACIENTE: la sesión y todas sus lecturas quedaron registradas, o ya lo estaban por una solicitud anterior con la misma clave. |
 | `400` | Falta la cabecera `Idempotency-Key` o su formato no es válido. No se registró nada. |
+| `401` | Falta la credencial o no es `Bearer`, o el token no verifica, expiró o pertenece a una cuenta inexistente o desactivada. Lleva `WWW-Authenticate`. No se registró nada. |
+| `403` | La identidad es válida, pero su rol (ADMIN o MEDICO) no permite la operación. No se registró ninguna sesión ni lectura; el rechazo queda en `auditoria_log` como `ACCESO_DENEGADO_ROL`. |
 | `404` | Alguna referencia del paquete no existe todavía. |
 | `409` | Conflicto. O la clave ya identifica un paquete con contenido distinto, o una referencia dejó de existir mientras se procesaba el paquete. La solicitud en conflicto no agrega ni modifica datos, y la operación que ya estuviera almacenada bajo esa clave permanece intacta. |
 | `422` | El cuerpo no cumple el contrato, o rompe una regla del dominio o una restricción de validez de la base. |
 | `500` | Error interno. La transacción completa fue revertida. |
+
+El detalle de `401` y `403` está en
+[Semántica `401` y `403`](#semántica-401-y-403).
 
 Ningún mensaje de error incluye la URL de conexión, contraseñas, SQL, nombres de
 restricción ni trazas. El diagnóstico técnico queda en el log del servidor,
@@ -512,7 +573,12 @@ otro.
 La tabla que sostiene todo esto llega en una migración, así que la base tiene
 que estar en el `head` de Alembic —el mismo `alembic upgrade head` del §1—. Y lo
 de siempre: **solo datos simulados**, y solo en el entorno local o de pruebas.
-Este endpoint no tiene autenticación y no es apto para producción.
+El endpoint exige un token JWT válido y solo el rol PACIENTE puede registrar
+sesiones; ADMIN y MEDICO reciben `403` (ver
+[Autenticación, RBAC y auditoría](#autenticación-rbac-y-auditoría)). Aun así no
+es apto para exposición pública ni para producción: el MVP local todavía no
+implementa HTTPS/TLS, la validación completa de propiedad paciente→embarazo ni el
+aislamiento por fila (SCRUM-71), ni otros controles de despliegue.
 
 ## Nodo edge simulado: captura sin conexión
 
@@ -609,8 +675,10 @@ python scripts/edge_node.py --base data/edge/demo.sqlite3 init
 | `EDGE_BASE_DELAY_SECONDS` | `1.0` | primera espera, en segundos |
 | `EDGE_MAX_DELAY_SECONDS` | `60.0` | techo de la espera |
 | `EDGE_BATCH_LIMIT` | `50` | eventos que toma **una ronda** |
+| `EDGE_API_TOKEN` | *(sin valor)* | token de sesión de una cuenta PACIENTE; solo lo exigen `enviar` y `sincronizar` |
 
-Las cuatro últimas son solo valores por omisión. El límite que gobierna un evento
+`EDGE_MAX_ATTEMPTS`, `EDGE_BASE_DELAY_SECONDS`, `EDGE_MAX_DELAY_SECONDS` y
+`EDGE_BATCH_LIMIT` son solo valores por omisión. El límite que gobierna un evento
 concreto es el que **adoptó** al reclamar su primer intento, guardado en
 `max_intentos_aplicado`: cambiar el entorno alcanza a los eventos que todavía no
 han empezado a sincronizarse, y no reescribe el contrato de los que ya están en
@@ -653,9 +721,17 @@ configuración fuera de rango termina en `Error: ...` por `stderr` y **código 1
 con la base local intacta.
 
 `data/edge/` está en `.gitignore`: la base del nodo es un artefacto local y
-**nunca** se versiona. No hay ninguna variable para credenciales, porque el nodo
-no las necesita: escribe en un archivo local y habla HTTP con un endpoint que
-todavía no tiene autenticación.
+**nunca** se versiona.
+
+`EDGE_API_TOKEN` es la única credencial del nodo, y cargar la configuración no la
+exige: `init`, `capturar`, `estado` y `traza` funcionan sin ella. `enviar` y
+`sincronizar` sí, porque el canal edge → API requiere una credencial PACIENTE
+válida. El token viaja como cabecera `Authorization: Bearer` del cliente HTTP y
+no se guarda en SQLite, ni en la outbox, ni en el paquete, ni en la huella de
+idempotencia, ni en la traza. Antes de reclamar la outbox, los dos comandos hacen
+un preflight contra `GET /api/v1/autenticacion/yo`: una credencial ausente o
+inválida detiene la ejecución sin consumir intentos. Cómo cargar el token sin
+dejarlo en el historial del shell: [El nodo edge](#el-nodo-edge).
 
 ### Estados de la outbox
 
@@ -908,7 +984,10 @@ No hay servicio permanente, ni demonio, ni detección automática de conectivida
 ni orquestación de varios nodos, ni métricas operativas, ni purga de la outbox.
 `sincronizar` es un comando que empieza, hace su trabajo y termina; quien decida
 ejecutarlo periódicamente es trabajo posterior y no debe darse por implementado.
-Tampoco hay autenticación: el endpoint al que entrega todavía no la tiene.
+
+Desde SCRUM-70 el endpoint al que entrega **sí** exige autenticación, y el nodo
+presenta una credencial de sesión: ver «Autenticación, RBAC y auditoría». La
+renovación del token es manual en este MVP.
 
 ## Esquema analítico y ETL
 
@@ -1073,22 +1152,256 @@ BI corresponden a tickets posteriores y no están implementados aquí.
 
 ### Desarrollo apilado
 
-Durante su desarrollo, este trabajo se construye sobre la rama de la
-sincronización diferida del nodo edge, todavía en revisión: la revisión de
-Alembic del esquema analítico (`60facdbacf51`) se apoya en `87d8ed46686b`. La
-sincronización no cambió PostgreSQL, así que el ETL no depende de su código;
-solo comparte la misma línea base.
+Durante su desarrollo inicial, SCRUM-69 se construyó temporalmente apilado sobre
+la rama de la sincronización diferida del nodo edge (SCRUM-65), que entonces
+seguía en revisión: la revisión de Alembic del esquema analítico
+(`60facdbacf51`) se apoya en `87d8ed46686b`. La sincronización no cambió
+PostgreSQL, así que el ETL no dependía de su código; solo compartía la misma línea
+base. SCRUM-65 se integró después en `main` mediante el Pull Request #13, y
+SCRUM-69 mediante el #14: los dos forman parte de `main`. La estrategia vigente
+vuelve a ser crear cada ticket desde el `main` actualizado, salvo una dependencia
+explícita y documentada (ver [Estrategia de ramas](#estrategia-de-ramas)).
+
+## Autenticación, RBAC y auditoría
+
+Desde SCRUM-70 la API tiene identidad. El endpoint de ingesta ya no es público:
+exige una credencial de sesión válida y el rol PACIENTE.
+
+> **RBAC limita operaciones por rol, pero todavía no implementa aislamiento por
+> fila ni anonimización.** En concreto: SCRUM-70 comprueba que *el rol* PACIENTE
+> puede registrar una sesión de monitoreo, y **no** comprueba todavía que esa
+> usuaria sea la dueña del `id_embarazo` que envía. Esa correlación
+> (`usuario_paciente → paciente → embarazo`) pertenece a SCRUM-71.
+
+### Configurar la firma
+
+El material de firma viene de la variable `JWT_SECRET_KEY` y **no tiene valor por
+omisión**: la API se niega a arrancar sin él. Debe aportar al menos 32 bytes de
+material aleatorio y no puede repetir la contraseña de PostgreSQL.
+
+```powershell
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+El valor generado va en el `.env` local, que no se versiona. `.env.example`
+documenta la variable **vacía** a propósito: un ejemplo que funcionara acabaría
+reutilizado. Una variable vacía o con solo espacios cuenta como no definida.
+`JWT_EXPIRATION_MINUTES` es opcional, acepta entre 1 y 1440 y vale 30 si no se
+define.
+
+Con Docker Compose el camino es explícito: el `.env` documenta y guarda el
+material, y `docker-compose.yml` pasa `JWT_SECRET_KEY` y `JWT_EXPIRATION_MINUTES`
+—30 si falta— al servicio `api`, y a ningún otro. Si la clave falta o no es
+válida, el contenedor de la API se detiene al importar `app.main` con
+`ConfiguracionJWTInvalida`, en vez de arrancar sin poder autenticar. Compose no
+la declara obligatoria a propósito: `docker compose up -d db` debe seguir
+funcionando sin ella. `EDGE_API_TOKEN` es del nodo edge y el contenedor de la API
+no la recibe.
+
+Alembic, el ETL y el cargador del dataset **no** necesitan esta variable: no
+emiten ni verifican tokens, y hacerlos depender de una credencial que no usan
+rompería las migraciones por un motivo ajeno.
+
+### Obtener un token
+
+```text
+POST /api/v1/autenticacion/token
+Content-Type: application/json
+
+{"email": "paciente01@example.com", "password": "<credencial simulada>"}
+```
+
+Respuesta:
+
+```json
+{
+  "access_token": "<redactado>",
+  "token_type": "bearer",
+  "expires_in": 1800
+}
+```
+
+La respuesta no lleva nada más: ni identificador, ni rol, ni correo, ni hash, ni
+*refresh token*. Las credenciales de las 37 cuentas simuladas las produce
+`scripts/generate_mock_data.py`, que guarda un digest Argon2id auténtico con salt
+aleatorio de la biblioteca; la contraseña de partida está declarada allí como
+credencial ficticia del dataset académico y no protege nada.
+
+Un token se presenta como `Authorization: Bearer <token>`. En Swagger
+(`/docs`), el botón **Authorize** acepta pegarlo.
+
+### Credenciales inválidas
+
+Una cuenta inexistente, una contraseña incorrecta y una cuenta desactivada
+producen **la misma respuesta**: mismo `401`, mismo cuerpo, misma cabecera. Las
+tres pasan además por una verificación Argon2id —la del usuario inexistente
+contra un digest ficticio construido una sola vez al arrancar— para que no haya
+una diferencia trivial de tiempo que confirme qué correos existen.
+
+### Rutas públicas y protegidas
+
+| Método y ruta | Operación | Público/protegido | ADMIN | MEDICO | PACIENTE |
+| --- | --- | --- | --- | --- | --- |
+| `POST /api/v1/autenticacion/token` | Obtener un token | Público | n/a | n/a | n/a |
+| `GET /api/v1/autenticacion/yo` | Identidad técnica | Protegido | ✔ | ✔ | ✔ |
+| `POST /api/v1/sesiones-monitoreo` | Registrar sesión y lecturas | Protegido | **403** | **403** | **✔ 201** |
+| `GET /health` | Sonda de salud | Público | ✔ | ✔ | ✔ |
+| `GET /docs`, `/redoc`, `/openapi.json` | Documentación local | Público | ✔ | ✔ | ✔ |
+
+El médico consulta información clínica y el administrador es responsable
+técnico; por mínimo privilegio, ninguno de los dos crea sesiones clínicas, y una
+credencial administrativa no sirve de atajo hacia datos clínicos.
+
+`GET /api/v1/autenticacion/yo` devuelve exactamente `id_usuario` y `rol`. Sirve
+para verificar identidad técnica —el nodo edge lo usa— y **no** es evidencia de
+permisos de negocio diferenciados: la API tiene una sola operación de negocio, y
+esa limitación se documenta en vez de disimularse ampliándola.
+
+### Semántica `401` y `403`
+
+| Código | Significado | Cabecera |
+| --- | --- | --- |
+| `401` | Falta la credencial, o su esquema no es Bearer | `WWW-Authenticate: Bearer` |
+| `401` | El token no verifica, expiró, o la cuenta ya no existe o está desactivada | `WWW-Authenticate: Bearer error="invalid_token"` |
+| `403` | La identidad es válida y su rol no puede ejecutar la operación | *(sin desafío)* |
+
+El rol **no viaja dentro del token**: se lee de PostgreSQL en cada petición, así
+que desactivar una cuenta o cambiarle el rol surte efecto en la petición
+siguiente y no al expirar el token. Un claim `rol` inyectado en un token no
+cambia nada, porque nadie lo lee.
+
+### Auditoría
+
+Cuatro acciones, y ninguna más:
+
+| Acción | Actor | Entidad | Cuándo |
+| --- | --- | --- | --- |
+| `LOGIN_EXITOSO` | la cuenta | `usuario` | credenciales válidas |
+| `LOGIN_FALLIDO` | `NULL` | — | cuenta inexistente, contraseña incorrecta o cuenta inactiva |
+| `ACCESO_DENEGADO_ROL` | la cuenta | `sesion_monitoreo` | identidad válida, rol sin permiso |
+| `SESION_MONITOREO_REGISTRADA` | la cuenta | `sesion_monitoreo` | paquete creado de verdad |
+
+Decisiones que conviene leer explícitas:
+
+- **Un token rechazado no escribe ninguna fila.** No tiene actor que atribuir, y
+  el endpoint es alcanzable sin autenticarse: persistirlo entregaría a cualquiera
+  una escritura sin autenticar en la tabla de auditoría. El rechazo queda en el
+  log de aplicación saneado.
+- **Un *replay* idempotente tampoco.** No se creó ninguna fila de negocio, y ese
+  camino revierte su transacción por contrato.
+- **La auditoría de una creación viaja dentro de la transacción del paquete**,
+  antes del único `commit`. Así la entrada y la sesión se confirman juntas o no
+  se confirma ninguna, y un rollback de negocio no puede dejar atrás un éxito
+  falso. No se añadió ningún `commit` intermedio.
+- **El login y la denegación usan una transacción propia**, porque no hay
+  transacción de negocio a la que unirse.
+- **Fallo cerrado:** si la auditoría de un login exitoso no se puede escribir, no
+  se emite token.
+- `ip_origen` sale de `request.client.host`, o de un literal técnico fijo cuando
+  el servidor no observa cliente o el valor no cabe en la columna. **No** se lee
+  `X-Forwarded-For`: no hay proxy de confianza en este MVP. Una dirección IP
+  puede considerarse dato personal bajo la Ley 81; la columna es una decisión
+  heredada del modelo de SCRUM-51, no de este ticket.
+- El correo introducido en un intento fallido **no se guarda** en ninguna parte.
+
+### El nodo edge
+
+La sincronización del nodo edge exige ahora una credencial. Conviene distinguir
+dos canales que la arquitectura mantiene separados:
+
+- **Consulta local de la gestante:** no necesita cuenta central, ni token, ni
+  conectividad. Corresponde al prototipo original y este repositorio no la
+  implementa.
+- **Sincronización edge → API:** sí requiere identidad autenticada ante el
+  backend.
+
+La captura sin conexión sigue sin necesitar nada: `init`, `capturar`, `estado` y
+`traza` funcionan sin `EDGE_API_TOKEN`. Solo los comandos que usan la red
+—`enviar` y `sincronizar`— la exigen; una variable vacía o con solo espacios
+cuenta como no definida, y el comando se detiene sin construir ninguna petición.
+
+El token se carga en la variable de entorno **sin que quede en el historial del
+shell**:
+
+```powershell
+$credencial = Read-Host "Pega el token del nodo edge" -AsSecureString
+$puntero = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($credencial)
+try {
+    $env:EDGE_API_TOKEN = [Runtime.InteropServices.Marshal]::PtrToStringAuto($puntero)
+} finally {
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($puntero)
+}
+```
+
+El valor es respuesta a un prompt, no parte del comando que PSReadLine almacena.
+No hay ninguna opción de línea de comandos para pasarlo, a propósito.
+
+El token se inyecta como cabecera del cliente HTTP, y ese punto es la razón de
+que el diseño funcione: **no** entra en el paquete, ni en su forma canónica, ni
+en la huella de idempotencia, ni en la `Idempotency-Key`, ni en SQLite, ni en la
+outbox, ni en la traza, ni en los logs.
+
+#### Preflight, y por qué existe
+
+Antes de reclamar un solo evento, `enviar` y `sincronizar` preguntan por su
+identidad en `GET /api/v1/autenticacion/yo`. El motivo es concreto: el
+almacenamiento local incrementa el contador de intentos de un evento **antes**
+de enviarlo, así que una ejecución con la credencial equivocada gastaría un
+intento de cada paquete de la cola solo para descubrir un `401`, y repetirla
+agotaría el presupuesto de paquetes que nunca estuvieron mal.
+
+Solo un resultado autoriza empezar: `200`, cuerpo válido y rol PACIENTE.
+Cualquier otro —token ausente, `401`, `403`, `5xx`, redirección, `2xx`
+inesperado, cuerpo ilegible o fallo de transporte— detiene la ejecución **sin
+abrir la outbox**, de modo que la cola conserva intacto su presupuesto.
+
+Es una comprobación preventiva, no el control de autorización: el backend sigue
+siendo la autoridad y `POST /api/v1/sesiones-monitoreo` exige PACIENTE por su
+propia dependencia pase lo que pase en el preflight.
+
+Si el token expira en la ventana entre el preflight y el envío, el evento queda
+`FALLIDO` y **reintentable**, con su clave y su paquete intactos y sin
+programación, y la corrida se detiene para no gastar el presupuesto del resto.
+Corregida la credencial, una nueva invocación lo entrega con la misma clave, así
+que no hay duplicados. Si ese envío excepcional coincidía con el último intento
+del presupuesto, se aplica la regla de agotamiento de siempre: saltársela sería
+subir el límite en silencio.
+
+`sincronizar` devuelve el código de salida `4` cuando la credencial es el
+problema.
+
+### Ejecutar las pruebas de este bloque
+
+Desde `backend/`, sin servidor PostgreSQL:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_passwords.py tests/test_tokens.py tests/test_autenticacion_api.py tests/test_rbac.py tests/test_auditoria.py tests/test_config_secretos.py tests/test_autenticacion_endurecimiento.py tests/test_edge_preflight.py tests/test_edge_cli_preflight.py
+```
+
+Con PostgreSQL 16:
+
+```powershell
+$env:SCRUM70_TEST_DATABASE_URL = "postgresql+psycopg://<usuario>:<clave>@127.0.0.1:<puerto>/<base>"
+.\.venv\Scripts\python.exe -m pytest tests/test_autenticacion_postgresql.py -v
+```
+
+Esa suite crea y elimina sus propias bases temporales con prefijo
+`scrum70_tmp_`, y solo elimina las que ella misma creó.
 
 ## Calidad del proyecto
 
-- **Integración continua:** el workflow [`CI`](.github/workflows/ci.yml) se ejecuta en cada Pull Request hacia `main`, instala el backend con Python 3.12 y corre las pruebas automatizadas. Contra un servicio PostgreSQL 16 efímero se validan las migraciones, la carga idempotente del dataset, el endpoint de ingesta, la idempotencia de reenvíos —concurrencia real incluida—, el ciclo completo del nodo edge simulado hasta PostgreSQL, su sincronización resiliente con reintentos, reconciliación y trazabilidad, y el esquema analítico con su ETL —carga inicial, idempotencia, incrementalidad, rollback, candado y zona horaria— sobre bases temporales propias; el job queda en rojo si alguna de esas pruebas se omite en lugar de ejecutarse. Las pruebas de tiempo no duermen: el reloj y la espera se inyectan.
+- **Integración continua:** el workflow [`CI`](.github/workflows/ci.yml) se ejecuta en cada Pull Request hacia `main`, instala el backend con Python 3.12 y corre las pruebas automatizadas. Contra un servicio PostgreSQL 16 efímero se validan las migraciones, la carga idempotente del dataset, el endpoint de ingesta, la idempotencia de reenvíos —concurrencia real incluida—, el ciclo completo del nodo edge simulado hasta PostgreSQL, su sincronización resiliente con reintentos, reconciliación y trazabilidad, el esquema analítico con su ETL —carga inicial, idempotencia, incrementalidad, rollback, candado y zona horaria— y la autenticación JWT con hashes Argon2id, la matriz RBAC y la auditoría; las suites del ETL y de autenticación trabajan sobre bases temporales propias. También se validan el preflight y la autenticación del nodo edge, y un paso resuelve el modelo de Docker Compose para comprobar que la configuración JWT llega al servicio de la API. Un guardián final exige que las ocho suites de PostgreSQL se ejecuten: el job queda en rojo si alguna de sus pruebas se omite en lugar de ejecutarse. Las pruebas de tiempo no duermen: el reloj y la espera se inyectan.
 - **Criterios de cierre de un ticket:** [Definition of Done](docs/definition_of_done.md).
 
 ## Estrategia de ramas
 
-- `main` — versión estable del proyecto.
-- `develop` — rama de integración de cambios.
-- `feature/...` — una rama por módulo o sprint, creada desde `develop` (por ejemplo, `feature/sprint-4-project-foundation`).
+- `main` — rama de integración estable del proyecto.
+- `feature/...` — una rama por ticket (por ejemplo,
+  `feature/scrum-70-autenticacion-rbac-auditoria`), creada desde el `main`
+  actualizado. Solo se apila sobre otra rama cuando existe una dependencia
+  explícita y documentada.
+- El trabajo vuelve a `main` mediante un Pull Request revisado por la otra autora
+  y con el CI en verde.
 
 ## Autoras
 

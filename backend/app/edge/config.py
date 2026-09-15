@@ -10,12 +10,24 @@ time. They are read with the same mechanism the backend already uses --
 ``EDGE_`` prefix and in a class of their own, so the edge cannot accidentally
 inherit, override or leak the backend's ``database_url``.
 
-**No credentials, ever.** The edge talks HTTP to a public endpoint and writes to
-a local file; neither needs a secret. There is deliberately no field for one, so
-a password cannot be introduced by configuration alone. Authentication, JWT and
-RBAC are **not** part of SCRUM-65 either -- that ticket is deferred
-synchronisation, retries and traceability -- and adding a token here before there
-is an endpoint to send it to would be speculation.
+**One credential, and only for the network (SCRUM-70).** Until SCRUM-70 the
+ingestion endpoint was open and this class said, correctly for its time, that the
+edge needed no secret at all. The endpoint now requires an authenticated PACIENTE
+account, so ``EDGE_API_TOKEN`` exists -- and nothing else does. There is still no
+field for a password, a database URL or a signing secret: the edge exchanges no
+credentials of its own and never talks to PostgreSQL.
+
+The field is **optional**, and that is not laxity. ``cargar_settings_edge`` runs
+for every command, including ``init``, ``capturar``, ``estado`` and ``traza``,
+none of which touch the network. Making the token mandatory here would make
+offline capture -- the one operation that must work with no API, no connectivity
+and no account -- depend on a credential it never uses. The requirement is
+enforced where the HTTP client is built, and nowhere else.
+
+It is a ``SecretStr``: its ``repr`` is masked, so the token cannot reach a log, a
+traceback or a settings dump by being printed. It is never written to SQLite,
+never part of a payload, never part of the idempotency fingerprint, and never a
+command-line argument.
 
 **Why a separate class instead of extending ``app.config.Settings``.** The
 backend's settings carry ``database_url``, and the edge must never open a
@@ -42,8 +54,9 @@ All data handled by this node is fictitious and simulated.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.edge.politica import (
@@ -99,6 +112,33 @@ class EdgeSettings(BaseSettings):
     api_base_url: str = URL_API_POR_OMISION
     http_timeout: float = TIMEOUT_HTTP_POR_OMISION
     busy_timeout_ms: int = ESPERA_DE_BLOQUEO_POR_OMISION
+
+    # Session token of the simulated PACIENTE account the node synchronises as.
+    # Optional on purpose -- see the module docstring -- and demanded only by the
+    # commands that open an HTTP client.
+    api_token: SecretStr | None = None
+
+    @field_validator("api_token", mode="before")
+    @classmethod
+    def _en_blanco_es_ausente(cls, valor: Any) -> Any:
+        """``EDGE_API_TOKEN=`` or a value of only whitespace means *no token*.
+
+        ``.env.example`` ships the variable empty, so a copied file yields an
+        empty string rather than ``None``. Left as is, the network commands would
+        build ``Authorization: Bearer `` and spend a request on ``/yo`` just to be
+        told 401. Treated as absent, they stop at ``_cliente_http`` with the
+        configuration error, before any request exists.
+
+        Written here and not imported from ``app.config``: importing that module
+        builds the backend's ``Settings``, and this package must read nothing and
+        fail at nothing when it is imported. A non-blank value is returned
+        **untouched** -- stripping it would send a credential different from the
+        one configured.
+        """
+        texto = valor.get_secret_value() if isinstance(valor, SecretStr) else valor
+        if isinstance(texto, str) and not texto.strip():
+            return None
+        return valor
 
     # Total attempts per event, **the first one included**.
     max_attempts: int = MAX_ATTEMPTS_POR_OMISION

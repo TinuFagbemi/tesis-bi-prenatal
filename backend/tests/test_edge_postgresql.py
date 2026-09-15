@@ -54,6 +54,11 @@ from app.edge import outbox
 from app.edge.cliente import CABECERA_IDEMPOTENCIA, CABECERA_REPLAY, ClienteEdge
 from app.edge.emisor import ejecutar_pasada
 from app.edge.estados import EstadoEntrega
+# La identidad PACIENTE de la suite se define una sola vez, en el modulo
+# de SCRUM-62, junto a la transaccion revertida de la que depende.
+from tests.test_ingestion_api_postgresql import (  # noqa: F401
+    identidad_de_la_suite,
+)
 from app.main import app
 from app.models.idempotencia import IdempotenciaSolicitud
 from app.models.monitoreo import LecturaBiometrica, SesionMonitoreo

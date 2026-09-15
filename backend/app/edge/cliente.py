@@ -93,6 +93,7 @@ import httpx
 from pydantic import ValidationError
 
 from app.edge.estados import ResultadoEntrega
+from app.schemas.autenticacion import IdentidadActual
 from app.schemas.monitoreo import SesionMonitoreoCreada
 
 # Route and headers of the contract merged in SCRUM-63. They are written here
@@ -108,6 +109,26 @@ REPLAY_NO = "false"
 
 CODIGO_CREADO = 201
 
+# Route of the identity endpoint, used only by the preflight. Same reasoning
+# as ``RUTA_SESIONES``: written here so the edge never imports the FastAPI
+# application, with a test asserting it matches the server's router.
+RUTA_IDENTIDAD = "/api/v1/autenticacion/yo"
+CABECERA_AUTORIZACION = "Authorization"
+ESQUEMA_BEARER = "Bearer"
+
+# The two answers that mean «this run has no usable credential». They are
+# **not** facts about the package: the same bytes under the same key will be
+# accepted once the credential is fixed, so they must never close an event for
+# review the way a 4xx about its content does.
+CODIGO_NO_AUTENTICADO = 401
+CODIGO_PROHIBIDO = 403
+CODIGOS_DE_CREDENCIAL = frozenset({CODIGO_NO_AUTENTICADO, CODIGO_PROHIBIDO})
+
+# Rol the ingestion endpoint requires. The preflight refuses to start a run
+# with a credential that could not possibly be accepted, which saves the queue
+# from spending attempts to discover it.
+ROL_REQUERIDO = "PACIENTE"
+
 
 # ``ResultadoEntrega`` is declared in :mod:`app.edge.estados` and re-exported
 # here, where every caller already looks for it. The declaration had to move so
@@ -122,8 +143,13 @@ __all__ = [
     "Entrega",
     "ResultadoEntrega",
     "RUTA_SESIONES",
+    "CODIGOS_DE_CREDENCIAL",
+    "ROL_REQUERIDO",
+    "RUTA_IDENTIDAD",
+    "ResultadoPreflight",
     "clasificar",
     "contar_lecturas",
+    "es_rechazo_de_credencial",
     "es_resultado_desconocido",
 ]
 
@@ -138,6 +164,12 @@ class Entrega:
     id_sesion: int | None = None
     ids_lectura: tuple[int, ...] | None = None
     error: str = ""
+    # Never persisted. ``ResultadoEntrega`` renders the CHECK constraint of the
+    # ``resultado`` column, so a fourth member would mean a new SQLite schema
+    # version; this is a fact about the *run*, not about the attempt's stored
+    # outcome, and the stored pair ``REINTENTABLE`` + ``ultimo_http in (401, 403)``
+    # already says the same thing to whoever reads a trace.
+    requiere_credencial: bool = False
 
     @property
     def entregado(self) -> bool:
@@ -162,6 +194,39 @@ def es_resultado_desconocido(entrega: "Entrega") -> bool:
         entrega.resultado is ResultadoEntrega.REINTENTABLE
         and entrega.codigo_http is None
     )
+
+
+def es_rechazo_de_credencial(entrega: "Entrega") -> bool:
+    """Whether the server refused the **credential**, not the package.
+
+    Named for the same reason :func:`es_resultado_desconocido` is: three callers
+    need the distinction -- the round, which must stop instead of spending the
+    queue's attempts on a credential that will keep failing; the failure branch,
+    which keeps the event retryable rather than closing it for review; and the
+    summary, which reports why the run ended. Re-deriving it in three places is
+    how one of them ends up drifting.
+    """
+    return entrega.requiere_credencial
+
+
+@dataclass(frozen=True)
+class ResultadoPreflight:
+    """What the credential check found, before a single event is claimed.
+
+    ``valido`` is true only for the one situation that may start a run: HTTP 200,
+    a body that parses as an identity, and the role the ingestion endpoint
+    requires. Everything else -- no token, 401, 403, 5xx, a redirect, an
+    unexpected 2xx, an unreadable body, a transport failure -- is false, and the
+    run stops without touching the outbox.
+
+    ``motivo`` is text written here. Nothing the server said is interpolated into
+    it, so a remote message cannot travel into the CLI output through this type.
+    """
+
+    valido: bool
+    motivo: str
+    codigo_http: int | None = None
+    rol: str | None = None
 
 
 def contar_lecturas(payload_json: str) -> int:
@@ -247,6 +312,20 @@ def clasificar(respuesta: httpx.Response, *, lecturas_enviadas: int) -> Entrega:
             error=f"error del servidor {codigo}: {_forma_del_detalle(respuesta)}",
         )
 
+    if codigo in CODIGOS_DE_CREDENCIAL:
+        # Before the generic 4xx branch on purpose. A 401 or a 403 says nothing
+        # about the package -- the very same bytes under the very same key are
+        # accepted once the credential is fixed -- so closing the event for
+        # review here, as ``RECHAZADO`` would, is the one outcome that must not
+        # happen. It stays ``REINTENTABLE`` and carries the flag the round reads
+        # to stop the run. The message is a literal: no remote text.
+        return Entrega(
+            resultado=ResultadoEntrega.REINTENTABLE,
+            codigo_http=codigo,
+            error=f"autenticacion rechazada {codigo}",
+            requiere_credencial=True,
+        )
+
     if 400 <= codigo < 500:
         return Entrega(
             resultado=ResultadoEntrega.RECHAZADO,
@@ -327,9 +406,87 @@ class ClienteEdge:
     pool, so closing it is not this class's decision.
     """
 
-    def __init__(self, cliente_http: httpx.Client, *, ruta: str = RUTA_SESIONES) -> None:
+    def __init__(
+        self,
+        cliente_http: httpx.Client,
+        *,
+        ruta: str = RUTA_SESIONES,
+        ruta_identidad: str = RUTA_IDENTIDAD,
+    ) -> None:
         self._http = cliente_http
         self._ruta = ruta
+        self._ruta_identidad = ruta_identidad
+
+    def verificar_credencial(self) -> ResultadoPreflight:
+        """Ask the API who this client is, before any event is claimed.
+
+        **Why this exists.** ``outbox.reclamar_intento`` increments ``intentos``
+        in the same statement that claims the attempt, *before* the request goes
+        out, and eligibility requires ``intentos < max_intentos_aplicado``. So a
+        run started with a bad credential would spend one attempt of every
+        package it touched just to be told 401, and repeating that would exhaust
+        the budget of packages that were never wrong. Asking once, first, costs
+        one request and protects the whole queue.
+
+        **It is a preflight, not an authorisation check.** The backend remains
+        the authority: ``POST /api/v1/sesiones-monitoreo`` requires PACIENTE
+        through its own dependency whatever this returns. This only decides
+        whether starting the run is worth it.
+
+        Success is exactly one situation -- 200, a body that validates as an
+        identity, and the required role. Every other answer is a refusal to
+        start: no token, 401, 403, 5xx, a redirect, an unexpected 2xx, a body
+        that does not parse, or a transport failure. None of them touches the
+        outbox, so none of them can cost an attempt.
+        """
+        try:
+            respuesta = self._http.get(self._ruta_identidad)
+        except httpx.TransportError as error:
+            # Only the class name, never the message: an httpx message can carry
+            # the URL, and a URL is configuration.
+            return ResultadoPreflight(
+                valido=False,
+                motivo=f"no se pudo contactar a la API: {type(error).__name__}",
+            )
+
+        codigo = respuesta.status_code
+        if codigo in CODIGOS_DE_CREDENCIAL:
+            return ResultadoPreflight(
+                valido=False,
+                motivo=f"la credencial fue rechazada por la API ({codigo})",
+                codigo_http=codigo,
+            )
+        if codigo != httpx.codes.OK:
+            return ResultadoPreflight(
+                valido=False,
+                motivo=f"respuesta inesperada al verificar la identidad ({codigo})",
+                codigo_http=codigo,
+            )
+
+        try:
+            identidad = IdentidadActual.model_validate(respuesta.json())
+        except (ValueError, ValidationError):
+            return ResultadoPreflight(
+                valido=False,
+                motivo="la respuesta de identidad no cumple el contrato",
+                codigo_http=codigo,
+            )
+
+        rol = identidad.rol.value
+        if rol != ROL_REQUERIDO:
+            return ResultadoPreflight(
+                valido=False,
+                motivo=(
+                    f"el rol de la credencial es {rol} y la ingesta exige "
+                    f"{ROL_REQUERIDO}"
+                ),
+                codigo_http=codigo,
+                rol=rol,
+            )
+
+        return ResultadoPreflight(
+            valido=True, motivo="credencial valida", codigo_http=codigo, rol=rol
+        )
 
     def enviar(self, *, clave: str, payload_json: str) -> Entrega:
         """One attempt for one package, with the key and body exactly as stored.

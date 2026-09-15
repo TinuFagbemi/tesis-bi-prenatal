@@ -1666,3 +1666,506 @@ escribe sobre la base del servicio.
   sus fronteras, America/Panama, y el comando como mecanismo del batch. El
   diccionario del Capítulo III describe `hr_valor` como frecuencia cardíaca
   fetal; el modelo la define materna.
+
+## SCRUM-70 — Autenticación, RBAC y auditoría de accesos
+
+Hasta SCRUM-69 la API no tenía identidad y el endpoint de ingesta estaba
+documentado como público. Este ticket cambia el límite de confianza: añade
+autenticación, autorización por rol y auditoría, sin tocar la idempotencia, el
+esquema analítico ni el ETL.
+
+### Decisiones aprobadas
+
+#### Biblioteca y algoritmo JWT
+
+**PyJWT** (`>=2.9,<3.0`, MIT), con **HS256**.
+
+Simétrico y no asimétrico porque hay un solo servicio que firma y verifica: no
+hay clave pública que distribuir ni tercero que verifique por su cuenta. El
+algoritmo se fija en una constante que se pasa como `algorithms=[ALGORITMO]` a
+la decodificación, que es exactamente lo que hace que `alg=none` y cualquier
+otro algoritmo se rechacen — la lista blanca es nuestra, y el `alg` de la
+cabecera solo puede coincidir con ella o fallar.
+
+Descartadas: `python-jose`, por mantenimiento irregular y CVEs históricos;
+`authlib`, cuyo alcance (cliente y servidor OAuth completos) excede el ticket.
+
+#### Claims, y los que no están
+
+`sub`, `exp` e `iat`. Los tres son obligatorios y su ausencia se rechaza antes
+de leer un solo valor.
+
+- `sub` es `str(id_usuario)`: el estándar dice que el sujeto es una cadena, no un
+  entero que lo parezca. Al decodificar se exige que sea una cadena **decimal
+  ASCII** antes de convertirla; `str.isdigit()` no vale, porque acepta dígitos
+  Unicode como `U+0661` que `int()` parsearía con gusto.
+- Además, el `sub` tiene que caer en el **dominio de `INTEGER`**, el tipo de
+  `operacional.usuario.id_usuario`: `1 <= id_usuario <= 2147483647`. El patrón
+  admite a lo sumo diez dígitos, así que la conversión no puede fallar, y el
+  rango se comprueba después. Antes del code review, un `sub` de miles de
+  dígitos hacía que `int()` lanzara `ValueError`, y uno por encima de `INTEGER`
+  habría fallado dentro de la consulta: los dos eran un `500`. Ahora son
+  `TokenInvalido`, es decir, `401`. Solo podía provocarlo quien ya tuviera el
+  secreto de firma, así que era robustez y no una escalada.
+- Se exige la **forma canónica, sin ceros iniciales**: `0`, `00` y `0137` se
+  rechazan. `emitir` escribe `str(id_usuario)`, que nunca los produce, y
+  aceptarlos daría a una misma cuenta varias grafías válidas.
+- `nbf`, `iss`, `aud` y `jti` se omiten. No hay caso de uso: un solo emisor, un
+  solo consumidor, y ninguna lista de revocación a la que `jti` pudiera servir.
+  Añadirlos sería decoración.
+
+**Expiración: 30 minutos**, configurable entre 1 y 1440. El suelo evita un token
+nacido expirado; el techo es un día, porque este MVP no implementa revocación y
+una credencial irrevocable no debería sobrevivir mucho a una sesión de trabajo.
+Todo el manejo del tiempo usa `datetime.now(timezone.utc)`, nunca `utcnow()`, y
+la emisión acepta un reloj inyectable para que ninguna prueba tenga que dormir.
+
+#### El rol **no** viaja en el token
+
+Se lee de PostgreSQL en cada petición, resolviendo `sub` contra la cuenta.
+
+La alternativa —firmar el rol y confiar en él hasta que expire— dejaría a una
+cuenta desactivada, borrada o degradada operando con sus privilegios anteriores
+hasta media hora, porque no hay revocación. El coste de la opción elegida es una
+consulta indexada por clave primaria con un `join`, sobre una tabla de 37 filas.
+
+El corolario es lo que hace sólida la decisión: **un claim que no existe no se
+puede falsificar**. Un token al que se le inyecta `rol: ADMIN` devuelve
+exactamente lo mismo que uno sin él, y hay una prueba que lo deja por escrito.
+
+`PrincipalAutenticado` lleva dos campos, `id_usuario` y `rol`, y ninguno más.
+`id_usuario` es además la llave que SCRUM-71 necesitará para resolver
+`usuario_paciente` y `usuario_medico`, así que el aislamiento por fila podrá
+construirse encima sin rediseñar el token.
+
+#### Argon2id con `argon2-cffi`
+
+`argon2-cffi` (`>=23.1,<26.0`, MIT) es el binding de referencia de la
+implementación oficial de Argon2. `PasswordHasher` usa Argon2**id** por omisión y
+sus parámetros no se copian aquí: el digest codificado ya registra los que lo
+produjeron, y una segunda copia solo podría acabar discrepando.
+
+**El salt es aleatorio**, generado por la biblioteca. Se evaluó y se descartó un
+salt determinista derivado de la semilla: habría conservado la comparación
+agregada de reproducibilidad del dataset, pero es indefendible como práctica y no
+merecía perpetuarse en un trabajo que documenta sus decisiones.
+
+`passlib` se descartó: sin *release* desde 2020 y con roturas conocidas frente a
+backends modernos.
+
+#### La verificación no tiene atajos
+
+`verificar(None, password)` —la cuenta no existe— verifica igualmente contra un
+digest ficticio construido **una sola vez al importar el módulo**. No hay retorno
+temprano en ninguna de las tres ramas, y la cuenta inactiva se comprueba
+**después** de verificar el hash, no antes.
+
+Cuenta inexistente, contraseña incorrecta y cuenta desactivada producen el mismo
+`401`, el mismo cuerpo y la misma cabecera. Es una mitigación razonable y
+probada, no una promesa de tiempo constante: lo que se afirma es que no existe
+una rama trivial y observable que confirme qué correos están registrados.
+
+El dummy se construye una vez y no por solicitud: hashear en cada intento de
+usuario desconocido sería una superficie de denegación de servicio propia.
+
+#### Configuración del secreto
+
+`JWT_SECRET_KEY`, sin valor por omisión, tipado como `SecretStr` para que su
+`repr` salga enmascarado.
+
+**Es opcional en la configuración compartida y obligatorio en la API**, y esa
+asimetría es deliberada. `app.config` construye `settings` al importarse, y lo
+importan `alembic/env.py`, el ETL y el cargador del dataset, ninguno de los
+cuales emite o verifica tokens: declararlo obligatorio allí rompería
+`alembic upgrade head` por una credencial que las migraciones no usan. La
+exigencia vive en `app.main`, que solo importa la API, de modo que uvicorn falla
+al arrancar y todo lo demás sigue funcionando. Hay pruebas de las dos
+propiedades, en subprocesos con el entorno limpio.
+
+Reglas: al menos **32 bytes** de UTF-8 —bytes, no caracteres— y distinto de la
+contraseña de PostgreSQL, porque una fuga no debe convertirse en dos. El mensaje
+de rechazo es genérico y no dice cuál de las dos reglas falló: distinguirlas
+pondría en un log una afirmación útil sobre el secreto. La ausencia sí se nombra
+con precisión, porque «no está definida» no revela nada.
+
+**Vacío o en blanco cuenta como ausente**, y lo mismo vale para
+`EDGE_API_TOKEN`. `.env.example` trae las dos variables vacías a propósito, de
+modo que copiarlo tal cual producía una cadena vacía y no `None`: la API se
+negaba a arrancar hablando de un secreto «corto» que nadie había definido, y el
+nodo edge construía `Authorization: Bearer ` y gastaba una petición a `/yo` para
+terminar con «credencial rechazada». Ahora un validador convierte el valor en
+blanco en `None` antes de que nadie lo use: la API informa la ausencia, y el
+nodo se detiene en `_cliente_http` con el error de configuración, sin construir
+ninguna petición. Un valor no vacío **no se recorta**: hacerlo firmaría, o
+enviaría, una credencial distinta de la configurada. El validador del nodo está
+escrito en `app/edge/config.py` y no importado de `app.config`, porque importar
+ese módulo construye la configuración del backend y el paquete del nodo no debe
+leer nada al importarse.
+
+`ConfiguracionJWT` —el objeto ya validado que reciben la emisión y la
+validación— excluye `secreto` de su `repr`. Era un dataclass normal, y
+imprimirlo en un depurador, en un traceback con variables locales o en una línea
+de log mostraba la clave de firma en claro.
+
+#### Un fallo de base de datos no llega sin capturar al servidor
+
+El code review encontró que el login y la resolución del principal no capturaban
+`SQLAlchemyError`. Si PostgreSQL fallaba, la excepción llegaba a uvicorn, que la
+registra con su traceback, y el texto de un error del driver lleva la sentencia
+y sus parámetros: en el login, **el correo tecleado**. La contraseña nunca, porque
+se verifica en Python y no viaja en el SQL; y la respuesta pública ya era un
+`500` genérico.
+
+Ahora los dos caminos revierten la sesión, registran solo el diagnóstico seguro
+de `app.services.errores` —clase de excepción e identificadores de nuestro propio
+esquema, sin sentencia, parámetros, mensaje del driver ni URL— bajo una etiqueta
+fija («autenticacion» o «resolucion del principal», nunca el mensaje de la
+ingesta), sin `exc_info`, y responden `500` con un mensaje genérico propio. No se
+reutiliza el `500` de la ingesta, que dice que no se registró la sesión y que la
+transacción se revirtió: nada de eso es verdad en un login ni en `/yo`. El mismo
+mensaje propio lo usa el `500` por fallo de auditoría del login exitoso. La excepción
+del driver se descarta con `from None`, para que ni siquiera quede adjunta como
+causa. La propia reversión está protegida: sobre una conexión rota también puede
+fallar, y ese segundo error se registra igual de saneado en lugar de escapar.
+
+#### JSON y no formulario OAuth2
+
+El cuerpo del login es un modelo Pydantic. Toda la casa es JSON, el único cliente
+real habla JSON, y un formulario exigiría una dependencia más solo para
+analizarlo. Para Swagger se usa `HTTPBearer`, que permite pegar el token en el
+diálogo *Authorize* sin dependencias adicionales.
+
+JWT es un **formato de token**; emitir uno no convierte este proyecto en un
+proveedor OAuth2, y la documentación no lo afirma.
+
+`EmailStr` se descartó, y no por la dependencia: un correo mal formado devolvería
+`422` mientras uno bien formado y desconocido devuelve `401`, y esa diferencia
+diría qué direcciones vale la pena probar. Una cadena acotada por el ancho real
+de la columna mantiene todas las credenciales malas en el mismo camino.
+
+#### `HTTPBearer(auto_error=False)`
+
+Se comprobó empíricamente que en FastAPI 0.140 `auto_error=True` produce `401`
+con `WWW-Authenticate: Bearer`, de modo que el problema histórico del `403` no se
+da aquí. Aun así se desactiva, por tres razones que no dependen de esa versión:
+el desafío que construye no lleva `error="invalid_token"`, así que no se podría
+honrar el RFC 6750; el cuerpo sería el `Not authenticated` del framework y no un
+mensaje de este proyecto; y un comportamiento que el framework decide puede
+cambiar en una actualización. Con él desactivado, cada `401` de esta aplicación
+lo construye una sola función y está probado.
+
+No se añadió ninguna prueba que fije el comportamiento interno de
+`auto_error=True`: producción no lo usa.
+
+#### Matriz rol–recurso
+
+`POST /api/v1/sesiones-monitoreo` admite **solo PACIENTE**. ADMIN y MEDICO
+reciben `403`.
+
+Las lecturas vienen de un dispositivo asignado a una paciente, así que la cuenta
+que las empuja es la suya. El médico consulta información clínica y el
+administrador es responsable técnico; por mínimo privilegio, una credencial
+administrativa no debe servir de atajo para crear datos clínicos. Para pruebas
+administrativas se usan fixtures y herramientas técnicas, no una ampliación del
+permiso en tiempo de ejecución.
+
+`GET /api/v1/autenticacion/yo` devuelve `id_usuario` y `rol`, y nada más. Existe
+porque el preflight del nodo edge lo necesita y porque hace observable la
+resolución de identidad. **No** se presenta como evidencia de permisos de negocio
+diferenciados.
+
+**Limitación documentada y no disimulada:** la API tiene una sola operación de
+negocio, así que ADMIN y MEDICO no tienen ninguna operación propia en SCRUM-70.
+No se inventó un CRUD de usuarios, roles, dispositivos, pacientes, médicos ni
+clínicas para que el diagrama de la tesis pareciera implementado. La
+diferenciación de los tres perfiles se demuestra en dos planos distintos: el
+funcional, donde PACIENTE obtiene `201` y los otros dos `403`; y el del
+componente, donde `exigir_roles` se prueba con listas blancas independientes
+ADMIN-only, MEDICO-only y PACIENTE-only.
+
+#### Identidad del nodo edge
+
+Una cuenta **PACIENTE** simulada de las 30 que ya existen. No se creó ningún rol
+`DEVICE`, `EDGE` ni `SERVICE`.
+
+`EDGE_API_TOKEN` es `SecretStr | None` y **opcional**, porque
+`cargar_settings_edge` corre para todos los comandos: exigirlo allí haría que la
+captura sin conexión —la operación que debe funcionar sin API, sin conectividad y
+sin cuenta— dependiera de una credencial que no usa. La exigencia vive en
+`_cliente_http`, y solo `enviar` y `sincronizar` lo construyen.
+
+El token se inyecta como cabecera por omisión del `httpx.Client`, y ese punto es
+la razón de que el diseño funcione: `ClienteEdge.enviar` no lo conoce, así que no
+entra en el paquete, ni en su forma canónica, ni en la huella, ni en la
+`Idempotency-Key`, ni en SQLite, ni en la outbox, ni en la traza. Nada lo
+persiste porque nada lo ve.
+
+No hay opción de línea de comandos para pasarlo: un JWT en un argumento acabaría
+en el historial del shell y en la lista de procesos. El README documenta un
+procedimiento con `Read-Host -AsSecureString` que libera el BSTR en `finally`.
+
+Renovación manual en este MVP. Está declarado como limitación.
+
+#### Preflight de credencial, y el defecto que evita
+
+`enviar` y `sincronizar` consultan `GET /api/v1/autenticacion/yo` **antes de
+reclamar un solo evento**.
+
+El motivo es concreto y se puede leer en el código: `outbox.reclamar_intento`
+incrementa `intentos` en la misma sentencia que reclama el intento, *antes* de
+enviar nada, y la elegibilidad exige `intentos < max_intentos_aplicado`. Sin
+preflight, una ejecución con la credencial equivocada gastaría un intento de cada
+paquete de la cola solo para descubrir un `401`, y repetirla agotaría el
+presupuesto de paquetes que nunca estuvieron mal.
+
+Solo `200` con cuerpo válido y rol PACIENTE autoriza empezar. Token ausente,
+`401`, `403`, `5xx`, redirección, `2xx` inesperado, cuerpo ilegible y fallo de
+transporte detienen la ejecución sin abrir la outbox.
+
+**Es una comprobación preventiva, no el control de autorización.** El backend
+sigue siendo la autoridad: el endpoint exige PACIENTE por su propia dependencia
+pase lo que pase en el preflight.
+
+**Consecuencia asumida:** cuando la API está caída, la CLI ahora se detiene en el
+preflight en vez de consumir un intento por evento con errores de transporte. La
+*política* de transporte, `408`, `429` y `5xx` no cambió; lo que cambió es si el
+comando llega a entrar en el bucle. La cola conserva intacto su presupuesto para
+cuando la API vuelva.
+
+#### `401` y `403` a mitad de vuelo
+
+Si el token expira en la ventana entre el preflight y el envío, el evento queda
+`FALLIDO` y **reintentable**, con `proximo_intento_en` en `NULL`, y la corrida se
+detiene al primero para no gastar el presupuesto del resto.
+
+No se programa ninguna demora: esperar no arregla una credencial, y anotar una
+`demora_programada_s` ficticia haría que la traza afirmara que el nodo estaba
+siendo paciente cuando estaba atascado.
+
+La distinción interna se expresó con una función con nombre propio
+—`es_rechazo_de_credencial`— y un campo **en memoria**, siguiendo el precedente
+que SCRUM-65 estableció con `es_resultado_desconocido`. No se añadió un cuarto
+miembro a `ResultadoEntrega`: ese enum genera el `CHECK` de la columna
+`resultado` y habría obligado a una versión v3 del esquema SQLite. En lo
+persistido, `REINTENTABLE` con `ultimo_http` en `{401, 403}` ya es inequívoco: un
+fallo de transporte no lleva código y un fallo de servidor está en `5xx`.
+
+`sincronizar` devuelve el código de salida `4`.
+
+**Si ese envío excepcional coincide con el último intento del presupuesto, se
+aplica la regla de agotamiento de siempre.** Saltársela habría subido el límite
+de intentos en silencio. El evento no se pierde: conserva clave y paquete, y su
+`ultimo_http` dice que fue un `401`.
+
+#### Catálogo de auditoría
+
+`LOGIN_EXITOSO`, `LOGIN_FALLIDO`, `ACCESO_DENEGADO_ROL` y
+`SESION_MONITOREO_REGISTRADA`. Cerrado.
+
+El desenlace viaja **dentro** del código porque `auditoria_log` no tiene columna
+`resultado`: `LOGIN_EXITOSO` y `LOGIN_FALLIDO` son dos códigos, no uno con un
+indicador.
+
+- **No se persiste un token rechazado.** No tiene actor que atribuir, y el
+  endpoint es alcanzable sin autenticarse: una fila por cada `401` entregaría a
+  cualquiera una escritura sin autenticar en la tabla de auditoría. El rechazo
+  queda en el log de aplicación saneado.
+- **No se audita un *replay*.** No se creó ninguna fila de negocio, y ese camino
+  revierte su transacción por contrato.
+- `LOGIN_FALLIDO` usa `id_usuario = NULL`. El modelo lo permite, y el docstring
+  de `AuditoriaLog` ya señalaba este caso como el que motivó la nulabilidad.
+- `ACCESO_DENEGADO_ROL` escribe `nombre_entidad_afectada = "sesion_monitoreo"` e
+  `id_entidad_afectada = NULL`. Un nombre de tabla y no una ruta HTTP: la columna
+  contigua identifica una fila, así que la que la acompaña tiene que nombrar algo
+  a lo que pertenezcan filas.
+- El correo introducido en un intento fallido **no se guarda**. Conservarlo para
+  «saber quién intentó» construiría justamente la lista de direcciones que este
+  endpoint se niega a filtrar.
+
+#### Frontera transaccional
+
+- **Creación de una sesión:** la entrada se escribe en la **misma transacción**
+  del paquete, antes del único `commit`. Así se confirman juntas o no se confirma
+  ninguna, y **un rollback de negocio se lleva la auditoría de éxito**: no hay
+  una segunda transacción donde un éxito falso pudiera sobrevivir, y no hizo
+  falta ninguna compensación.
+- **Login y denegación:** transacción propia que confirma, porque no hay
+  transacción de negocio a la que unirse — la ruta de negocio de una denegación
+  ni siquiera se ejecuta.
+- **No se añadió ningún `commit` intermedio.** La atomicidad del paquete, la
+  reclamación de idempotencia, el *replay*, la resolución de carreras y el
+  rollback completo siguen exactamente como estaban.
+
+#### Política ante fallo de auditoría
+
+Fallo cerrado, y nunca `except Exception: pass`.
+
+- Si falla la auditoría de un login exitoso, **no se emite token** y se responde
+  `500`.
+- En la ingesta el fallo cerrado sale gratis de la estructura: el `INSERT` vive
+  dentro de la transacción de negocio, así que un fallo arrastra todo al rollback
+  y responde `500`.
+- En un login fallido y en una denegación la respuesta ya es la cerrada —`401` y
+  `403`—: se mantiene, y el fallo de auditoría se registra en el canal saneado.
+  Convertir un rechazo correcto en un `500` diría menos al cliente sin conceder
+  nada.
+
+#### `ip_origen`
+
+`request.client.host` cuando el servidor lo observa; un literal técnico fijo
+cuando no, o cuando el valor no cabe en la columna —media dirección no es una
+dirección, y truncarla la haría parecer real—.
+
+**No se consulta `X-Forwarded-For`**: no hay proxy de confianza en este MVP, así
+que esa cabecera es un valor que elige el cliente, y registrar un origen elegido
+por el cliente como si fuera observado haría la columna peor que inútil.
+
+Una dirección IP puede considerarse dato personal bajo la Ley 81. La columna es
+`NOT NULL` desde la migración inicial de SCRUM-51: es una decisión heredada, no
+una introducida por este ticket, y queda anotada como tal.
+
+#### Sin migración de Alembic
+
+El esquema de SCRUM-51/52 ya preveía esto y no hizo falta una sola sentencia DDL:
+
+- `usuario.password_hash` es `VARCHAR(255)` y un digest Argon2id mide 97;
+- `auditoria_log.id_usuario` ya es nullable;
+- `accion` es `VARCHAR(60)` y el código más largo mide 27;
+- `ip_origen` es `VARCHAR(45)` y siempre recibe valor;
+- `rol` ya trae ADMIN, MEDICO y PACIENTE con su `CHECK`;
+- `usuario.activo` y `usuario.email UNIQUE` ya existen.
+
+El `head` sigue siendo `60facdbacf51`, con una sola cabeza. Una prueba de la
+suite PostgreSQL lo comprueba contra la base desplegada.
+
+#### Reproducibilidad del dataset
+
+`test_generador_reproducible` comparaba un único SHA-256 del
+`dataset_fetalalert.json` completo. Un digest Argon2id con salt aleatorio —que es
+la forma correcta de producirlo— hace imposible esa igualdad.
+
+El contrato se separó en dos, y el conjunto resultante es **más fuerte**:
+
+1. todo el contenido funcional sigue siendo idéntico entre ejecuciones, comparado
+   sobre una copia normalizada donde el digest se sustituye por un marcador fijo;
+2. el digest se comprueba por lo que tiene que ser: prefijo `$argon2id$`, la
+   contraseña simulada verifica, una incorrecta falla, **dos hashes de la misma
+   contraseña son distintos**, ambos verifican, y la contraseña en claro no
+   aparece en ningún archivo generado.
+
+El punto de los dos hashes distintos es una garantía que la prueba anterior era
+incapaz de expresar: exigía exactamente lo contrario.
+
+La contraseña simulada está declarada en el generador como credencial ficticia
+del dataset académico, con el mismo criterio que `dev_only_change_me` en
+`.env.example` y `ci_efimero_no_es_secreto` en el CI. `data/generated/` está en
+`.gitignore`, así que ningún hash ni contraseña llega al repositorio versionado.
+
+#### Un `422` que devolvía la contraseña
+
+Pydantic adjunta a cada error de validación el valor que lo provocó, en un campo
+`input`, y FastAPI lo publica tal cual. `SecretStr` enmascara la contraseña una
+vez construido el modelo, así que no protegía nada cuando la validación fallaba
+por otro campo: una petición de login sin `email` devolvía un `422` **con la
+contraseña en claro** dentro del cuerpo de la respuesta, y de ahí podía llegar a
+un log, a una captura o a un reporte de CI.
+
+Lo detectó una prueba de filtración de este mismo ticket. Se corrigió con un
+manejador que retira ese eco **solo en las rutas con credenciales**; el `422` del
+endpoint de ingesta conserva exactamente el contrato que SCRUM-62 definió y sus
+pruebas comprueban.
+
+La primera versión decidía comparando `request.url.path`, y el code review
+demostró que eso falla si la API se sirve con `root_path`: la URL incluye el
+prefijo, la comparación deja de coincidir y la contraseña vuelve a salir. La
+decisión se toma ahora con la **ruta resuelta**, `scope["route"].path`, que es la
+plantilla declarada y no cambia con el prefijo. Si la ruta no estuviera resuelta
+—algo que con las rutas de esta API no ocurre, porque FastAPI lanza el error de
+validación dentro de una ruta ya elegida—, se sanea: en una situación no prevista
+el lado seguro es no devolver valores. Las rutas resueltas que no reciben
+credenciales conservan su `422` intacto.
+
+#### El comando offline del CI
+
+Una edición dejó en `ci.yml` los caracteres barra invertida + `n` donde tenía que
+haber una continuación de línea. El YAML seguía siendo válido, pero bash
+convierte esa secuencia en la letra `n`: pytest recibía un argumento posicional,
+no encontraba ese archivo y terminaba con código 4 sin ejecutar ninguna prueba.
+`tests/test_ci_workflow.py` lee ahora el bloque `run` del step con las reglas de
+bash y falla si a pytest le llega un argumento que no es una opción, o si alguna
+suite `*_postgresql.py` no está excluida del bloque sin servidor.
+
+#### Docker Compose y el material de firma
+
+La segunda revisión del PR encontró que `docker-compose.yml` pasaba al servicio
+`api` solo `APP_NAME`, `APP_ENV` y `DATABASE_URL`. Como `app.main` falla cerrado
+sin `JWT_SECRET_KEY`, `docker compose up -d` dejaba una API que no arrancaba. El
+CI no lo veía: sus pruebas reciben la variable directamente del entorno del job
+y nunca recorren el camino `.env` → Compose → contenedor.
+
+- `JWT_SECRET_KEY` sigue siendo **opcional en `Settings`**, que comparten
+  Alembic, el cargador y el ETL, y **obligatoria al arrancar FastAPI**.
+- Compose pasa de forma explícita `JWT_SECRET_KEY: "${JWT_SECRET_KEY:-}"` y
+  `JWT_EXPIRATION_MINUTES: "${JWT_EXPIRATION_MINUTES:-30}"` al servicio `api`, y
+  a ningún otro. Nada de `env_file: .env`: la API recibe solo lo que usa, y
+  `EDGE_API_TOKEN` no llega al contenedor.
+- **No se usa `${JWT_SECRET_KEY:?…}`.** Haría que procesar el modelo de Compose
+  o levantar solo `db` dependiera de una credencial que la base, las
+  migraciones, el cargador y el ETL no usan. Una clave ausente llega vacía, y es
+  `app.main` quien se niega a arrancar con `ConfiguracionJWTInvalida`.
+- **No hay secreto funcional por omisión**, ni en Compose ni en `.env.example`.
+
+Un step del CI resuelve el modelo con `docker compose config --format json` en
+un entorno controlado, sin imprimirlo, y comprueba que la clave llega intacta,
+que la expiración vale 30 si falta y el valor configurado si existe, que el
+proyecto se resuelve sin clave y que el servicio `api` no recibe
+`EDGE_API_TOKEN` ni otras variables.
+
+#### Dataset regenerado frente al cargador idempotente
+
+- La reproducibilidad funcional del generador excluye **únicamente** el digest
+  Argon2id, que lleva salt aleatorio de la biblioteca. No se usan salts
+  deterministas.
+- El cargador es idempotente respecto del **mismo artefacto**: cargar dos veces
+  el mismo JSON inserta cero filas la segunda vez.
+- Regenerar el dataset produce **otro artefacto**, con otros `password_hash`.
+  Cargarlo sobre una base ya sembrada puede terminar en `ConflictoDeDatos` sobre
+  `usuario.password_hash`, que es exactamente el contrato *no-overwrite* de
+  SCRUM-61: ni se ignora el campo ni se actualiza la fila en silencio.
+- Una base local simulada creada antes de SCRUM-70 se **reconstruye y se vuelve
+  a sembrar una vez**. No se migra ni se sobrescribe, y no existe una migración
+  para ello: todos los datos son sintéticos y viven en un entorno controlado.
+
+### Lo que SCRUM-70 deliberadamente no hace
+
+RLS de PostgreSQL, aislamiento por paciente, médico o clínica, seudonimización o
+anonimización analítica, privilegios de base para consumidores analíticos, MFA,
+*refresh tokens*, revocación distribuida, recuperación de contraseña, registro
+público, SSO/OIDC, *rate limiting*, Redis, broker, TLS, proxy inverso,
+certificados, cifrado clínico en reposo, dashboards ni interfaz web de la
+gestante.
+
+En particular, y por escrito:
+
+> **RBAC limita operaciones por rol, pero todavía no implementa aislamiento por
+> fila ni anonimización.**
+
+Una cuenta PACIENTE cualquiera puede enviar un paquete de cualquier
+`id_embarazo`. Es exactamente el hueco que SCRUM-71 viene a cerrar, y hay una
+prueba que lo documenta para que nadie lea el `201` como una garantía de
+propiedad que no existe.
+
+Ni Argon2id, ni RBAC, ni la futura RLS, ni el JWT son evidencia de cifrado
+clínico en reposo. HTTPS/TLS corresponde a un escenario de despliegue y no a una
+capacidad de este código.
+
+### Integración continua
+
+Novena capa, la última y en serie: `tests/test_autenticacion_postgresql.py` con
+`SCRUM70_TEST_DATABASE_URL`, reporte `pytest-scrum70.xml`, y el guardián de
+omitidas pasa de siete a ocho reportes. `JWT_SECRET_KEY` ficticia y exclusiva del
+job, distinta de `POSTGRES_PASSWORD` porque la aplicación rechaza que coincidan.
+
+No se retiró ningún paso, no se paralelizó nada, y no se actualizaron httpx,
+anyio, TestClient ni las actions: esos avisos vienen de antes y su actualización
+no pertenece a un ticket de seguridad.

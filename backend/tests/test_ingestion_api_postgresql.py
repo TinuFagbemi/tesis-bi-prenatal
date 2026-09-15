@@ -62,14 +62,22 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from fastapi import Depends
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, inspect, insert, select, text
+from sqlalchemy.dialects.postgresql import insert as insert_postgresql
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.orm import Session
 
 from app.api.v1.sesiones import CABECERA_IDEMPOTENCIA
 from app.db.session import get_db
+from app.api.dependencias import usuario_actual
+from app.models.catalogos import Rol
+from app.models.enums import NombreRol
+from app.models.seguridad import Usuario
+from app.services.passwords import hashear
+from app.services.principal import PrincipalAutenticado
 from app.main import app
 from app.models.catalogos import Semaforo, TiempoGestacional
 from app.models.clinico import Clinica, Embarazo, Paciente
@@ -106,6 +114,10 @@ CODIGO_DISPOSITIVO_SIN_ASIGNAR = "SCRUM62-DISP-0002"
 
 # Identificador que no puede existir; cabe en un INTEGER de PostgreSQL.
 ID_INEXISTENTE = 2_000_000_000
+
+# Correo de la cuenta ficticia que la identidad de la suite crea (SCRUM-70).
+# El dominio ``.invalid`` no puede coincidir con ninguna del dataset simulado.
+EMAIL_IDENTIDAD_DE_LA_SUITE = "scrum70.suite@example.invalid"
 
 # El embarazo ficticio del que cuelga todo. Las semanas gestacionales de las
 # ventanas de abajo se derivan de esta fecha, no se eligen a mano.
@@ -853,11 +865,51 @@ def test_a_el_endpoint_no_crea_catalogos_como_efecto_secundario(
     )
 
 
-def test_a_auditoria_log_no_recibe_ninguna_fila(cliente, referencias, conexion_revertida):
+def test_a_auditoria_log_recibe_exactamente_una_fila(
+    cliente, referencias, conexion_revertida, identidad_de_la_suite
+):
+    """Desde SCRUM-70 una creacion si deja rastro, y exactamente uno.
+
+    Esta prueba afirmaba lo contrario hasta SCRUM-70, y tenia razon: el endpoint
+    no auditaba nada porque no habia identidad que atribuir. Ahora la hay, y la
+    fila se escribe **dentro de la misma transaccion** que el paquete -- por eso
+    la cuenta la ve esta conexion, que es la duena de esa transaccion --.
+
+    Una fila, no dos: la sesion creada. Ni el login ni ninguna otra accion pasan
+    por aqui.
+    """
     antes = contar_auditoria(conexion_revertida)
 
-    cliente.post(RUTA, json=paquete_de_signos(referencias))
+    respuesta = cliente.post(RUTA, json=paquete_de_signos(referencias))
+    assert respuesta.status_code == 201
 
+    assert contar_auditoria(conexion_revertida) == antes + 1
+
+    fila = conexion_revertida.execute(
+        select(
+            AuditoriaLog.id_usuario,
+            AuditoriaLog.accion,
+            AuditoriaLog.nombre_entidad_afectada,
+            AuditoriaLog.id_entidad_afectada,
+            AuditoriaLog.ip_origen,
+        ).order_by(AuditoriaLog.id_log.desc()).limit(1)
+    ).one()
+
+    assert fila.accion == "SESION_MONITOREO_REGISTRADA"
+    assert fila.id_usuario == identidad_de_la_suite["principal"].id_usuario
+    assert fila.nombre_entidad_afectada == "sesion_monitoreo"
+    assert fila.id_entidad_afectada == str(respuesta.json()["id_sesion"])
+    assert fila.ip_origen
+
+
+def test_a_un_rechazo_no_deja_auditoria(cliente, referencias, conexion_revertida):
+    """Y el rollback se la lleva: no hay exito falso que sobreviva."""
+    antes = contar_auditoria(conexion_revertida)
+
+    invalido = paquete_de_signos(referencias)
+    invalido["id_embarazo"] = ID_INEXISTENTE
+
+    assert cliente.post(RUTA, json=invalido).status_code == 404
     assert contar_auditoria(conexion_revertida) == antes
 
 
@@ -1740,3 +1792,112 @@ def _referencias_para(conexion) -> Referencias:
         ),
         id_semaforo=_asegurar_semaforo(conexion),
     )
+
+
+# ---------------------------------------------------------------------------
+# Identidad de la suite (SCRUM-70)
+# ---------------------------------------------------------------------------
+
+
+def _asegurar_rol(conexion, nombre: NombreRol) -> int:
+    """Id del rol, creandolo si el catalogo esta vacio. A prueba de carreras."""
+    id_rol = conexion.execute(
+        insert_postgresql(Rol)
+        .values(nombre_rol=nombre)
+        .on_conflict_do_nothing(index_elements=["nombre_rol"])
+        .returning(Rol.id_rol)
+    ).scalar_one_or_none()
+
+    if id_rol is not None:
+        return id_rol
+
+    return conexion.execute(
+        select(Rol.id_rol).where(Rol.nombre_rol == nombre)
+    ).scalar_one()
+
+
+def _crear_usuario(conexion, *, rol: NombreRol, email: str) -> int:
+    """La cuenta ficticia de la suite, creada si no esta y reutilizada si esta.
+
+    ``ON CONFLICT DO NOTHING`` y no un ``SELECT`` previo: las pruebas concurrentes
+    de SCRUM-63 lanzan dos peticiones a la vez sobre conexiones independientes, y
+    un «mira y luego inserta» dejaria a las dos creyendo que les toca insertar.
+    Es el mismo mecanismo que usa la reclamacion de idempotencia en produccion, y
+    por la misma razon: quien decide es PostgreSQL, no este proceso.
+    """
+    id_usuario = conexion.execute(
+        insert_postgresql(Usuario)
+        .values(
+            id_rol=_asegurar_rol(conexion, rol),
+            email=email,
+            password_hash=hashear("clave-simulada-de-la-suite"),
+            activo=True,
+        )
+        .on_conflict_do_nothing(index_elements=["email"])
+        .returning(Usuario.id_usuario)
+    ).scalar_one_or_none()
+
+    if id_usuario is not None:
+        return id_usuario
+
+    return conexion.execute(
+        select(Usuario.id_usuario).where(Usuario.email == email)
+    ).scalar_one()
+
+
+@pytest.fixture(autouse=True)
+def identidad_de_la_suite():
+    """Una identidad PACIENTE **real**, creada la primera vez que se usa.
+
+    Tiene que ser real, y ese detalle no es ceremonia: desde SCRUM-70 el endpoint
+    escribe una fila de ``auditoria_log`` cuyo ``id_usuario`` es una clave
+    foranea con ``ON DELETE RESTRICT``. Un principal inventado pasa en una prueba
+    con dobles y lo rechaza PostgreSQL con un ``23503`` -- precisamente la
+    diferencia que estas suites existen para encontrar --. Asi que la cuenta se
+    inserta en la misma transaccion exterior que la prueba revierte siempre, y
+    desaparece con ella.
+
+    **Se crea al atender la primera peticion, no al montar la fixture**, y esa
+    pereza es deliberada. Pedir ``conexion_revertida`` aqui abriria la
+    transaccion exterior antes que cualquier otra fixture, porque esta es de uso
+    automatico; y ``secuencia_de_sesiones`` exige exactamente lo contrario --
+    montarse antes que ella, para que su ``setval`` de restauracion corra cuando
+    el candado exclusivo ya se solto --. Al no declarar la dependencia, el orden
+    de montaje sigue siendo el que cada prueba pide.
+
+    El correo lleva el prefijo del ticket y el dominio ``.invalid`` para no poder
+    coincidir con ninguna cuenta del dataset simulado. La cache evita chocar con
+    el UNIQUE de ``email`` cuando una prueba hace varias peticiones.
+
+    Lo que se sustituye es la resolucion del token --leer la cabecera, verificar
+    la firma, consultar la cuenta--, que tiene sus propias pruebas en
+    ``test_tokens.py`` y ``test_autenticacion_postgresql.py``. La comprobacion
+    del rol **no** se sustituye: se ejecuta de verdad contra este principal.
+    """
+    visto: dict[str, PrincipalAutenticado] = {}
+
+    def principal_de_la_suite(
+        sesion_bd: Session = Depends(get_db),
+    ) -> PrincipalAutenticado:
+        # Se resuelve en **cada** peticion, y no se cachea entre ellas. Una
+        # peticion que termina en rollback --un 404, un 422-- deshace tambien la
+        # cuenta que esta dependencia creo al atenderla, asi que un principal
+        # guardado apuntaria a una fila que ya no existe y la siguiente peticion
+        # moriria en la clave foranea de la auditoria. Volver a resolverlo es
+        # barato y no puede quedarse obsoleto.
+        principal = PrincipalAutenticado(
+            id_usuario=_crear_usuario(
+                sesion_bd,
+                rol=NombreRol.PACIENTE,
+                email=EMAIL_IDENTIDAD_DE_LA_SUITE,
+            ),
+            rol=NombreRol.PACIENTE,
+        )
+        visto["principal"] = principal
+        return principal
+
+    app.dependency_overrides[usuario_actual] = principal_de_la_suite
+    try:
+        yield visto
+    finally:
+        app.dependency_overrides.pop(usuario_actual, None)

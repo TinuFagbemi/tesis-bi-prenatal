@@ -30,6 +30,7 @@ from app.api.v1.sesiones import CABECERA_IDEMPOTENCIA
 from app.api.v1 import sesiones as modulo_router  # noqa: F401 -- rutas del AST
 from app.services import idempotencia as modulo_idempotencia
 from app.db.session import get_db
+from tests.conftest import identidad_simulada
 from app.main import app
 from app.services.errores import (
     MENSAJE_CHECK,
@@ -188,6 +189,10 @@ class SesionFalsa:
         self.filas_completadas = filas_completadas
         self.commits = 0
         self.rollbacks = 0
+        self.flushes = 0
+        # Entidades que el router paso por ``add``: desde SCRUM-70, la fila de
+        # auditoria del paquete creado.
+        self.agregados: list = []
         self.selects = 0
         self.inserts = 0
         self.updates = 0
@@ -219,6 +224,21 @@ class SesionFalsa:
             return ResultadoFalso(None, rowcount=self.filas_completadas)
         raise AssertionError(f"sentencia inesperada: {type(sentencia).__name__}")
 
+    def add(self, entidad) -> None:
+        """Registra la entrada de auditoria que el router anade al paquete.
+
+        Desde SCRUM-70 el endpoint inserta una fila de ``auditoria_log`` dentro
+        de la misma transaccion, antes del unico commit. El doble la guarda en
+        lugar de descartarla, para que una prueba pueda afirmar que se escribio
+        --y, sobre todo, que **no** se escribio cuando hubo rollback.
+        """
+        self.agregados.append(entidad)
+        self.pasos.append("add")
+
+    def flush(self) -> None:
+        self.flushes += 1
+        self.pasos.append("flush")
+
     def commit(self) -> None:
         self.commits += 1
         self.pasos.append("commit")
@@ -247,16 +267,24 @@ def sesion_falsa() -> SesionFalsa:
 
 @pytest.fixture
 def cliente(sesion_falsa) -> TestClient:
-    """Cliente con una ``Idempotency-Key`` válida en todas sus peticiones.
+    """Cliente con una ``Idempotency-Key`` válida y una identidad PACIENTE.
 
     La cabecera es obligatoria desde SCRUM-63, así que enviarla por omisión deja
     intactas las pruebas heredadas: siguen ejerciendo exactamente lo que
     ejercían. Su ausencia y su formato se prueban en ``test_idempotencia_api.py``,
     que construye sus clientes a mano.
+
+    La identidad la instala ``identidad_simulada`` desde SCRUM-70, porque la ruta
+    dejó de ser pública. Sustituye la resolución del token --leer la cabecera,
+    verificar la firma, consultar PostgreSQL--, que tiene sus propias pruebas, y
+    **no** la comprobación del rol, que sigue ejecutándose de verdad. Lo que
+    estas pruebas ejercen es el flujo del paquete, y sigue siendo exactamente el
+    mismo.
     """
     app.dependency_overrides[get_db] = lambda: sesion_falsa
     try:
-        yield TestClient(app, headers={CABECERA_IDEMPOTENCIA: CLAVE_VALIDA})
+        with identidad_simulada(app):
+            yield TestClient(app, headers={CABECERA_IDEMPOTENCIA: CLAVE_VALIDA})
     finally:
         app.dependency_overrides.clear()
 

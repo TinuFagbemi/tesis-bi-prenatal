@@ -52,8 +52,12 @@ sys.path.insert(0, str(RAIZ_DEL_REPOSITORIO / "backend"))
 import httpx  # noqa: E402  -- tras ajustar sys.path
 
 from app.edge import (  # noqa: E402
+    CABECERA_AUTORIZACION,
     CODIGO_ANOMALIA,
+    CODIGO_CREDENCIAL,
     CODIGO_REVISION,
+    ESQUEMA_BEARER,
+    RUTA_IDENTIDAD,
     ClienteEdge,
     ConfiguracionInvalida,
     ErrorDeAlmacenamiento,
@@ -77,6 +81,19 @@ from app.edge.almacenamiento import VERSION_ANTERIOR  # noqa: E402
 
 CODIGO_DE_EXITO = 0
 CODIGO_DE_ERROR = 1
+
+# The credential could not be used, or could not be verified, so the run never
+# started. Its own code because the queue is not in trouble: no event was
+# claimed, no attempt was spent, and the packages are exactly as they were.
+CODIGO_DE_CREDENCIAL = CODIGO_CREDENCIAL
+
+MENSAJE_SIN_TOKEN = (
+    "Falta EDGE_API_TOKEN. Desde SCRUM-70 la ingesta de la API exige una "
+    "credencial de sesion del rol PACIENTE. Obten una con POST "
+    "/api/v1/autenticacion/token y cargala en la variable de entorno sin que "
+    "quede en el historial del shell; el README explica como. Los comandos "
+    "que no usan la red -- init, capturar, estado y traza -- no la necesitan."
+)
 
 
 def entero_positivo(texto: str) -> int:
@@ -307,18 +324,79 @@ def orden_estado(ruta: Path, settings: EdgeSettings) -> int:
 
 
 def _cliente_http(settings: EdgeSettings):
+    """El cliente HTTP del nodo, ya autenticado.
+
+    La credencial se inyecta **aqui**, como cabecera por omision del
+    ``httpx.Client``, y ese lugar es la razon de que el diseno funcione:
+    ``ClienteEdge.enviar`` no la conoce, asi que el token no entra en el paquete,
+    ni en su forma canonica, ni en la huella de idempotencia, ni en SQLite, ni en
+    la outbox, ni en la traza. Nada lo persiste porque nada lo ve.
+
+    La exigencia vive aqui y en ningun otro sitio. ``cargar_settings_edge`` corre
+    para todos los comandos, y ``init``, ``capturar``, ``estado`` y ``traza`` no
+    tocan la red: pedirles un token seria hacer que la captura sin conexion
+    --justo la operacion que debe funcionar sin API y sin cuenta-- dependiera de
+    una credencial que no usa.
+    """
+    if settings.api_token is None:
+        raise ConfiguracionInvalida(MENSAJE_SIN_TOKEN)
+
     return httpx.Client(
-        base_url=settings.api_base_url, timeout=settings.http_timeout
+        base_url=settings.api_base_url,
+        timeout=settings.http_timeout,
+        headers={
+            CABECERA_AUTORIZACION: (
+                f"{ESQUEMA_BEARER} {settings.api_token.get_secret_value()}"
+            )
+        },
     )
+
+
+def _credencial_utilizable(cliente: ClienteEdge) -> bool:
+    """Comprueba la credencial **antes** de reclamar un solo evento.
+
+    Existe por una propiedad concreta del almacenamiento: ``reclamar_intento``
+    incrementa ``intentos`` en la misma sentencia que reclama el intento, antes
+    de enviar nada, y la elegibilidad exige ``intentos < max_intentos_aplicado``.
+    Sin esta comprobacion, una ejecucion con una credencial equivocada gastaria
+    un intento de cada paquete que tocara solo para descubrir un 401, y repetirla
+    agotaria el presupuesto de paquetes que nunca estuvieron mal.
+
+    Es una comprobacion **preventiva**, no el control de autorizacion. La
+    autoridad sigue siendo el backend: ``POST /api/v1/sesiones-monitoreo`` exige
+    PACIENTE por su propia dependencia pase lo que pase aqui.
+
+    Cualquier resultado que no sea 200 con identidad valida y rol PACIENTE
+    --token ausente, 401, 403, 5xx, redireccion, 2xx inesperado, cuerpo ilegible
+    o fallo de transporte-- detiene la ejecucion sin abrir la outbox, de modo que
+    ninguno de esos casos puede costar un intento.
+    """
+    resultado = cliente.verificar_credencial()
+    if resultado.valido:
+        return True
+
+    print(f"No se inicio la ejecucion: {resultado.motivo}.", file=sys.stderr)
+    print(
+        "No se reclamo ningun evento: la cola queda intacta y conserva su "
+        "presupuesto de intentos.",
+        file=sys.stderr,
+    )
+    return False
 
 
 def orden_enviar(ruta: Path, limite: int, settings: EdgeSettings) -> int:
     politica = settings.politica()
-    with _abrir(ruta, settings) as conexion:
-        inicializar(conexion)
-        with _cliente_http(settings) as http:
+    # El preflight va primero, y el almacenamiento local ni siquiera se abre
+    # hasta que la credencial sirve.
+    with _cliente_http(settings) as http:
+        cliente = ClienteEdge(http)
+        if not _credencial_utilizable(cliente):
+            return CODIGO_DE_CREDENCIAL
+
+        with _abrir(ruta, settings) as conexion:
+            inicializar(conexion)
             pasada = ejecutar_pasada(
-                conexion, ClienteEdge(http), limite=limite, politica=politica
+                conexion, cliente, limite=limite, politica=politica
             )
 
     print("Ronda de envio terminada.")
@@ -334,6 +412,14 @@ def orden_enviar(ruta: Path, limite: int, settings: EdgeSettings) -> int:
             "  La ronda se detuvo: la API no esta accesible. Los eventos "
             "conservan su clave y pueden reintentarse."
         )
+    if pasada.detenida_por_credencial:
+        print(
+            "  La ronda se detuvo: la API rechazo la credencial durante el "
+            "envio. El evento conserva su clave y su paquete, sigue siendo "
+            "reintentable y no quedo programado: corrige EDGE_API_TOKEN y "
+            "vuelve a ejecutar."
+        )
+        return CODIGO_DE_CREDENCIAL
     return CODIGO_DE_EXITO
 
 
@@ -353,10 +439,14 @@ def orden_sincronizar(
         http_timeout=settings.http_timeout,
     )
 
-    with _abrir(ruta, settings) as conexion:
-        inicializar(conexion)
-        with _cliente_http(settings) as http:
-            informe = sincronizar(conexion, ClienteEdge(http), politica=politica)
+    with _cliente_http(settings) as http:
+        cliente = ClienteEdge(http)
+        if not _credencial_utilizable(cliente):
+            return CODIGO_DE_CREDENCIAL
+
+        with _abrir(ruta, settings) as conexion:
+            inicializar(conexion)
+            informe = sincronizar(conexion, cliente, politica=politica)
 
     censo = informe.censo
     print("Sincronizacion terminada.")
@@ -384,6 +474,14 @@ def orden_sincronizar(
         print(
             "Quedan eventos que necesitan una revision humana. Consulta "
             "'traza <clave>' para ver que ocurrio con cada uno."
+        )
+    elif informe.codigo_de_salida == CODIGO_CREDENCIAL:
+        print(
+            "La API rechazo la credencial despues de haberla verificado: el "
+            "token expiro durante la ejecucion. Los eventos conservan su clave "
+            "y su paquete y siguen siendo elegibles. Corrige EDGE_API_TOKEN y "
+            "vuelve a ejecutar 'sincronizar'.",
+            file=sys.stderr,
         )
     elif informe.codigo_de_salida == CODIGO_ANOMALIA:
         print(

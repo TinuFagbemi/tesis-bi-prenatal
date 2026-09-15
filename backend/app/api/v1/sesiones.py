@@ -27,8 +27,26 @@ decides who got it. Three consequences worth stating plainly:
   key is free again and a corrected retry works. The key is never poisoned by a
   request that did not finish.
 
-Not in this ticket, on purpose: authentication. This endpoint has none and is
-**not production-ready**.
+**Authentication and authorisation (SCRUM-70).** This endpoint is no longer
+open. It requires a valid session token and the **PACIENTE** role: readings come
+from a device assigned to a patient, so the account that pushes them is hers. A
+physician consults clinical information and an administrator is a technical
+responsible; neither creates monitoring sessions, and admitting either would
+turn an administrative credential into a bypass into clinical data. Both are
+answered 403.
+
+What SCRUM-70 does **not** check, and must not be read as checking: that the
+authenticated patient owns the ``id_embarazo`` the package names. RBAC limits
+operations by role; the correlation ``usuario_paciente -> paciente -> embarazo``
+is row-level isolation and belongs to SCRUM-71.
+
+**The audit entry rides the business transaction.** A created package is
+recorded with ``SESION_MONITOREO_REGISTRADA`` *inside* the same transaction,
+before the single commit, so the entry and the session are confirmed together or
+neither is. Every rollback path below therefore discards the entry along with the
+rows -- there is no second transaction where a false success could survive, and
+no intermediate commit was added to make room for one. A replay writes no entry:
+nothing was created, and that path rolls back by contract.
 """
 
 from http import HTTPStatus
@@ -37,8 +55,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.api.dependencias import exigir_roles
 from app.db.session import get_db
+from app.models.enums import NombreRol
 from app.schemas.monitoreo import SesionMonitoreoCreada, SesionMonitoreoEntrada
+from app.services import auditoria
+from app.services.auditoria import AccionAuditada
+from app.services.principal import PrincipalAutenticado
 from app.services.errores import (
     MENSAJE_INESPERADO,
     clasificar_error_de_base,
@@ -107,6 +130,13 @@ PARAMETRO_DE_LA_CLAVE = {
     },
 }
 
+# The allowlist of this operation, built once. Declaring it at module level
+# rather than inline in the decorator keeps the guard visible next to the
+# contract it enforces, and lets a test import exactly what production uses.
+EXIGIR_PACIENTE = exigir_roles(
+    NombreRol.PACIENTE, entidad=auditoria.ENTIDAD_SESION_MONITOREO
+)
+
 CABECERA_REPLAY_DOCUMENTADA = {
     CABECERA_REPLAY: {
         "description": (
@@ -165,6 +195,19 @@ def exigir_clave_de_idempotencia(peticion: Request) -> str:
                 "No se registró nada."
             )
         },
+        HTTPStatus.UNAUTHORIZED: {
+            "description": (
+                "Falta la credencial de sesión, su esquema no es Bearer, el "
+                "token no es válido o la cuenta ya no existe o está "
+                "desactivada. No se registró nada."
+            )
+        },
+        HTTPStatus.FORBIDDEN: {
+            "description": (
+                "La identidad es válida pero su rol no puede registrar sesiones "
+                "de monitoreo. Solo PACIENTE puede hacerlo. No se registró nada."
+            )
+        },
         HTTPStatus.NOT_FOUND: {
             "description": "Alguna referencia del paquete no existe todavía."
         },
@@ -187,6 +230,8 @@ def exigir_clave_de_idempotencia(peticion: Request) -> str:
 def registrar_sesion_de_monitoreo(
     entrada: SesionMonitoreoEntrada,
     respuesta: Response,
+    peticion: Request,
+    principal: PrincipalAutenticado = Depends(EXIGIR_PACIENTE),
     clave: str = Depends(exigir_clave_de_idempotencia),
     sesion_bd: Session = Depends(get_db),
 ) -> SesionMonitoreoCreada:
@@ -198,8 +243,24 @@ def registrar_sesion_de_monitoreo(
     the package -- claim first, then references, then rows -- belongs to
     ``procesar_ingesta_idempotente`` and is documented there.
 
-    All data is fictitious and simulated. This endpoint has no authentication
-    yet and is **not production-ready**.
+    ``principal`` is the authenticated PACIENTE account, already verified against
+    PostgreSQL by ``app.api.dependencias``. It is used for one thing: attributing
+    the audit entry. It is **not** used to filter or validate ``id_embarazo`` --
+    that correlation is SCRUM-71 and is not implemented here.
+
+    ``principal`` is also **not** part of the idempotency fingerprint. The
+    fingerprint describes the package, and adding the caller to it would make the
+    same package sent by a different account a different package, breaking every
+    replay that already works.
+
+    **The order of the parameters is the order of the answers**, because FastAPI
+    resolves dependencies as it finds them: authorisation first, then the
+    idempotency key, then the body. So a caller with no credential is told 401
+    and learns nothing about the ``Idempotency-Key`` contract or the shape of the
+    body -- both of which are facts about an endpoint it has not been allowed to
+    reach. 401, then 400, then 422, and never the other way round.
+
+    All data is fictitious and simulated.
     """
     try:
         procesado = procesar_ingesta_idempotente(
@@ -213,6 +274,20 @@ def registrar_sesion_de_monitoreo(
                 RECURSO_SESIONES_MONITOREO, clave, procesado.resultado.id_sesion
             )
         else:
+            # Inside the business transaction and before the only commit, so the
+            # entry and the session it describes share one fate. If this insert
+            # fails, the ``SQLAlchemyError`` handler below rolls everything back
+            # and answers 500: no session is stored and no success is claimed.
+            auditoria.registrar(
+                sesion_bd,
+                AccionAuditada.SESION_MONITOREO_REGISTRADA,
+                id_usuario=principal.id_usuario,
+                ip_origen=auditoria.direccion_de_origen(
+                    peticion.client.host if peticion.client else None
+                ),
+                nombre_entidad=auditoria.ENTIDAD_SESION_MONITOREO,
+                id_entidad=str(procesado.resultado.id_sesion),
+            )
             sesion_bd.commit()
     except ColisionDeIdempotencia as error:
         sesion_bd.rollback()

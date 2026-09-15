@@ -54,6 +54,11 @@ from app.edge import sincronizacion as sincro
 from app.edge.cliente import CABECERA_REPLAY, ClienteEdge
 from app.edge.estados import EstadoEntrega, MotivoRevision
 from app.edge.politica import PoliticaDeReintentos
+# La identidad PACIENTE de la suite se define una sola vez, en el modulo
+# de SCRUM-62, junto a la transaccion revertida de la que depende.
+from tests.test_ingestion_api_postgresql import (  # noqa: F401
+    identidad_de_la_suite,
+)
 from app.main import app
 from app.models.idempotencia import IdempotenciaSolicitud
 from tests.test_edge_sincronizacion import RelojFalso, Sleeper

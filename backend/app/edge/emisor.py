@@ -46,7 +46,11 @@ from datetime import datetime, timedelta
 
 from app.edge import outbox
 from app.edge.almacenamiento import transaccion
-from app.edge.cliente import ClienteEdge, es_resultado_desconocido
+from app.edge.cliente import (
+    ClienteEdge,
+    es_rechazo_de_credencial,
+    es_resultado_desconocido,
+)
 from app.edge.estados import MotivoRevision, ResultadoEntrega
 from app.edge.politica import BATCH_LIMIT_POR_OMISION, PoliticaDeReintentos
 
@@ -71,6 +75,10 @@ class ResumenPasada:
     anomalias: int
     detenida_por_transporte: bool
     pausa_hasta: datetime | None
+    # The run stopped because the API refused the credential. Distinct from
+    # ``detenida_por_transporte``: that one schedules a pause, because waiting
+    # may well help; this one does not, because waiting never fixed a token.
+    detenida_por_credencial: bool = False
 
     @property
     def intentados(self) -> int:
@@ -119,6 +127,7 @@ def ejecutar_pasada(
     ya_entregados = tardios = anomalias = 0
     pausa_hasta: datetime | None = None
     detenida = False
+    sin_credencial = False
 
     for evento in elegibles:
         momento = reloj()
@@ -150,9 +159,18 @@ def ejecutar_pasada(
         # --- 3. Resultado ---
         momento = reloj()
         quedan = reclamacion.numero < reclamacion.max_intentos_aplicado
+        credencial = es_rechazo_de_credencial(entrega)
         demora = (
             politica.demora(reclamacion.numero)
-            if entrega.resultado is ResultadoEntrega.REINTENTABLE and quedan
+            # A credential rejection is excluded on purpose. Scheduling a backoff
+            # for it would write a ``demora_programada_s`` describing a wait
+            # nobody is going to benefit from -- the next attempt fails exactly
+            # the same way until a person replaces the token -- and the trace
+            # would then claim the edge was being patient when it was being
+            # stuck. The event is left immediately eligible instead.
+            if entrega.resultado is ResultadoEntrega.REINTENTABLE
+            and quedan
+            and not credencial
             else None
         )
 
@@ -202,6 +220,28 @@ def ejecutar_pasada(
                 )
                 rechazados += aplicado
                 ya_entregados += not aplicado
+            elif credencial and quedan:
+                # Retryable, with no schedule: ``proximo_intento_en`` stays NULL
+                # so a run launched right after the credential is corrected picks
+                # the event up at once. The payload and the key are untouched, so
+                # that later attempt is a replay the server already knows how to
+                # deduplicate.
+                #
+                # ``quedan`` is not negotiable here. When this was the last
+                # attempt of the budget the event falls through to the exhaustion
+                # branch below like any other, because stepping over the limit for
+                # this one case would raise it silently.
+                aplicado = outbox.marcar_fallido(
+                    conexion,
+                    evento.id_outbox,
+                    reintentable=True,
+                    codigo_http=entrega.codigo_http,
+                    error=entrega.error,
+                    momento=momento,
+                    proximo_intento_en=None,
+                )
+                reintentables += aplicado
+                ya_entregados += not aplicado
             elif demora is not None:
                 aplicado = outbox.marcar_fallido(
                     conexion,
@@ -235,6 +275,14 @@ def ejecutar_pasada(
         # distingue "la API respondio mal" de "no se pudo llegar a la API". La
         # pausa se calcula con la misma formula, este el evento reprogramado o
         # agotado: habla de la API, no del evento.
+        if credencial:
+            # The whole run stops at the first one, and this is what keeps a bad
+            # credential from costing the queue one attempt per package: only the
+            # event already claimed paid for the discovery. No pause is scheduled
+            # -- the fix is a new token, not more waiting.
+            sin_credencial = True
+            break
+
         if es_resultado_desconocido(entrega):
             detenida = True
             pausa_hasta = momento + timedelta(
@@ -254,4 +302,5 @@ def ejecutar_pasada(
         anomalias=anomalias,
         detenida_por_transporte=detenida,
         pausa_hasta=pausa_hasta,
+        detenida_por_credencial=sin_credencial,
     )

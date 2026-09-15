@@ -3,11 +3,18 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import sys
 from collections import Counter
 from datetime import date, datetime
 from pathlib import Path
 
 import pytest
+
+DIRECTORIO_BACKEND = Path(__file__).resolve().parents[1]
+if str(DIRECTORIO_BACKEND) not in sys.path:
+    sys.path.insert(0, str(DIRECTORIO_BACKEND))
+
+from app.services.passwords import PREFIJO_ARGON2ID, verificar  # noqa: E402
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -31,21 +38,32 @@ def cargar_generador():
 
 gm = cargar_generador()
 
+TOTAL_USUARIOS = (
+    gm.TOTAL_ADMINISTRADORES + gm.TOTAL_MEDICOS + gm.TOTAL_GESTANTES
+)
 
-@pytest.fixture
-def dataset(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        gm,
-        "CARPETA_SALIDA",
-        tmp_path,
-    )
 
-    gm.main()
+@pytest.fixture(scope="module")
+def dataset(tmp_path_factory):
+    """El dataset simulado completo, generado una sola vez para este modulo.
 
-    ruta = tmp_path / "dataset_fetalalert.json"
+    De alcance ``module`` desde SCRUM-70. Antes era de alcance funcion, y era
+    barato: el generador escribia un marcador de posicion en ``password_hash``.
+    Ahora escribe 37 digests Argon2id autenticos, y la lentitud de Argon2id es
+    exactamente la propiedad por la que la arquitectura lo exige --encarecer un
+    ataque por fuerza bruta--, asi que no se rebaja para que las pruebas corran
+    antes. Lo que se evita es pagarla veintitres veces para observar veintitres
+    copias identicas del mismo dataset.
+
+    Ninguna prueba de este modulo modifica lo que recibe; todas leen y afirman.
+    """
+    carpeta = tmp_path_factory.mktemp("dataset")
+    with pytest.MonkeyPatch.context() as parche:
+        parche.setattr(gm, "CARPETA_SALIDA", carpeta)
+        gm.main()
 
     return json.loads(
-        ruta.read_text(encoding="utf-8")
+        (carpeta / "dataset_fetalalert.json").read_text(encoding="utf-8")
     )
 
 
@@ -771,41 +789,189 @@ def test_datetime_offset_aware(dataset):
             assert "T" not in embarazo["fecha_cierre"]
 
 
-def test_generador_reproducible(
-    tmp_path,
-    monkeypatch,
-):
-    salida_1 = tmp_path / "run_1"
-    salida_2 = tmp_path / "run_2"
+# ---------------------------------------------------------------------------
+# Reproducibilidad y credenciales simuladas (SCRUM-70)
+# ---------------------------------------------------------------------------
+#
+# Hasta SCRUM-70 la reproducibilidad se comprobaba con un unico SHA-256 del
+# ``dataset_fetalalert.json`` completo. Esa comparacion agregada no podia
+# distinguir lo que es determinista por diseno de lo que no debe serlo, y desde
+# que ``password_hash`` lleva un digest Argon2id con salt **aleatorio** --que es
+# la forma correcta de producirlo-- dos ejecuciones ya no pueden dar el mismo
+# archivo.
+#
+# El contrato se separa en dos, y el conjunto es mas fuerte que el anterior:
+#
+# 1. todo el contenido funcional --usuarios, identificadores, correos, roles,
+#    relaciones y el resto del dataset-- sigue siendo identico entre ejecuciones,
+#    comparado sobre una copia normalizada donde el digest se sustituye por un
+#    marcador fijo;
+# 2. el digest se comprueba por lo que tiene que ser: Argon2id autentico,
+#    verificable, irrepetible entre ejecuciones y sin la contrasena en claro en
+#    ningun archivo generado.
+#
+# El penultimo caso --dos hashes de la misma contrasena son distintos-- es una
+# garantia que la prueba anterior era incapaz de expresar: exigia exactamente lo
+# contrario.
 
-    monkeypatch.setattr(
-        gm,
-        "CARPETA_SALIDA",
-        salida_1,
+MARCADOR_DE_HASH = "<password_hash normalizado para comparar>"
+
+
+def _normalizar_hashes(dataset: dict) -> dict:
+    """Copia del dataset con cada ``password_hash`` sustituido por un marcador.
+
+    Toca exclusivamente esa clave. Cualquier otra diferencia entre dos
+    ejecuciones sigue rompiendo la comparacion, que es justo lo que la prueba
+    tiene que detectar.
+    """
+    copia = json.loads(json.dumps(dataset))
+    for seccion in ("usuarios", "usuarios_administradores"):
+        for registro in copia.get(seccion, []):
+            if "password_hash" in registro:
+                registro["password_hash"] = MARCADOR_DE_HASH
+    return copia
+
+
+def _generar_en(carpeta, monkeypatch) -> dict:
+    monkeypatch.setattr(gm, "CARPETA_SALIDA", carpeta)
+    gm.main()
+    return json.loads(
+        (carpeta / "dataset_fetalalert.json").read_text(encoding="utf-8")
     )
 
-    gm.main()
 
-    hash_1 = hashlib.sha256(
-        (
-            salida_1
-            / "dataset_fetalalert.json"
-        ).read_bytes()
+@pytest.fixture(scope="module")
+def dos_ejecuciones(tmp_path_factory):
+    """El mismo generador, dos veces, en carpetas distintas.
+
+    De alcance ``module`` a proposito. Generar el dataset cuesta segundos --son
+    37 hashes Argon2id, y su lentitud es precisamente la propiedad por la que se
+    eligio el algoritmo-- y las pruebas de abajo solo lo leen: ninguna lo
+    modifica, asi que repetir la generacion por cada una seria pagar ese coste
+    una decena de veces para observar exactamente los mismos dos datasets.
+
+    ``pytest.MonkeyPatch.context()`` en lugar de la fixture ``monkeypatch``,
+    que es de alcance funcion y no puede usarse desde aqui; el contexto deshace
+    el parche sobre ``CARPETA_SALIDA`` igual que ella.
+    """
+    raiz = tmp_path_factory.mktemp("reproducibilidad")
+    with pytest.MonkeyPatch.context() as parche:
+        primera = _generar_en(raiz / "run_1", parche)
+        segunda = _generar_en(raiz / "run_2", parche)
+    return primera, segunda, raiz
+
+
+def test_el_contenido_funcional_es_reproducible(dos_ejecuciones):
+    """Mismo input funcional, mismo dataset, salvo el digest no determinista."""
+    primera, segunda, _ = dos_ejecuciones
+
+    huella_1 = hashlib.sha256(
+        json.dumps(_normalizar_hashes(primera), sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    huella_2 = hashlib.sha256(
+        json.dumps(_normalizar_hashes(segunda), sort_keys=True).encode("utf-8")
     ).hexdigest()
 
-    monkeypatch.setattr(
-        gm,
-        "CARPETA_SALIDA",
-        salida_2,
-    )
+    assert huella_1 == huella_2
 
-    gm.main()
 
-    hash_2 = hashlib.sha256(
-        (
-            salida_2
-            / "dataset_fetalalert.json"
-        ).read_bytes()
-    ).hexdigest()
+def test_usuarios_identicos_salvo_el_digest(dos_ejecuciones):
+    """Identificadores, correos, roles y estado no cambian entre ejecuciones."""
+    primera, segunda, _ = dos_ejecuciones
 
-    assert hash_1 == hash_2
+    def sin_digest(dataset):
+        return [
+            {k: v for k, v in usuario.items() if k != "password_hash"}
+            for usuario in dataset["usuarios"]
+        ]
+
+    assert sin_digest(primera) == sin_digest(segunda)
+    assert len(primera["usuarios"]) == TOTAL_USUARIOS
+
+
+def test_las_relaciones_de_perfil_son_reproducibles(dos_ejecuciones):
+    primera, segunda, _ = dos_ejecuciones
+
+    assert primera["usuario_paciente"] == segunda["usuario_paciente"]
+    assert primera["usuario_medico"] == segunda["usuario_medico"]
+    assert primera["roles"] == segunda["roles"]
+
+
+def test_cada_hash_es_argon2id(dos_ejecuciones):
+    """El algoritmo acordado es el que realmente se uso, no uno equivalente."""
+    primera, _, _ = dos_ejecuciones
+
+    for usuario in primera["usuarios"]:
+        assert usuario["password_hash"].startswith(PREFIJO_ARGON2ID)
+
+
+def test_la_contrasena_simulada_verifica(dos_ejecuciones):
+    primera, _, _ = dos_ejecuciones
+
+    for usuario in primera["usuarios"]:
+        assert verificar(usuario["password_hash"], gm.PASSWORD_SIMULADA)
+
+
+def test_una_contrasena_incorrecta_no_verifica(dos_ejecuciones):
+    primera, _, _ = dos_ejecuciones
+
+    for usuario in primera["usuarios"]:
+        assert not verificar(usuario["password_hash"], "no-es-la-contrasena")
+
+
+def test_dos_hashes_de_la_misma_contrasena_son_distintos(dos_ejecuciones):
+    """El salt es aleatorio, y esto es lo que lo demuestra.
+
+    Dos ejecuciones producen, para la misma cuenta y la misma contrasena, dos
+    digests distintos. Era imposible afirmarlo con la comparacion agregada
+    anterior, que exigia exactamente lo contrario.
+    """
+    primera, segunda, _ = dos_ejecuciones
+
+    pares = list(zip(primera["usuarios"], segunda["usuarios"], strict=True))
+    assert pares
+
+    for usuario_1, usuario_2 in pares:
+        assert usuario_1["id_usuario"] == usuario_2["id_usuario"]
+        assert usuario_1["password_hash"] != usuario_2["password_hash"]
+
+    de_una_ejecucion = [u["password_hash"] for u in primera["usuarios"]]
+    assert len(set(de_una_ejecucion)) == len(de_una_ejecucion)
+
+
+def test_ambos_hashes_verifican(dos_ejecuciones):
+    """Distintos, y los dos correctos: el salt viaja dentro del digest."""
+    primera, segunda, _ = dos_ejecuciones
+
+    for usuario_1, usuario_2 in zip(
+        primera["usuarios"], segunda["usuarios"], strict=True
+    ):
+        assert verificar(usuario_1["password_hash"], gm.PASSWORD_SIMULADA)
+        assert verificar(usuario_2["password_hash"], gm.PASSWORD_SIMULADA)
+
+
+def test_ninguna_contrasena_en_claro_en_los_archivos_generados(dos_ejecuciones):
+    """La credencial ficticia no viaja en ningun archivo del dataset.
+
+    El generador la conoce porque tiene que producir el digest; lo que sale de
+    el es unicamente el digest. ``data/generated/`` esta ademas en .gitignore, de
+    modo que nada de esto llega al repositorio versionado.
+    """
+    _, _, raiz = dos_ejecuciones
+
+    generados = [
+        archivo
+        for archivo in raiz.rglob("*")
+        if archivo.is_file() and archivo.suffix in {".json", ".csv"}
+    ]
+    assert generados
+
+    for archivo in generados:
+        assert gm.PASSWORD_SIMULADA not in archivo.read_text(encoding="utf-8")
+
+
+def test_la_credencial_simulada_esta_declarada_como_ficticia():
+    """La constante existe, esta documentada y no aparenta ser un secreto real."""
+    assert isinstance(gm.PASSWORD_SIMULADA, str)
+    assert gm.PASSWORD_SIMULADA
+    assert "Simulado" in gm.PASSWORD_SIMULADA

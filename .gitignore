@@ -214,3 +214,7 @@ data/generated/
 # Nodo edge simulado: base SQLite local de demostracion y sus archivos
 # auxiliares (-wal, -shm). Es un artefacto local, nunca contenido versionado.
 data/edge/
+
+# Reportes JUnit que generan localmente las suites de pytest (--junitxml).
+# Son artefactos de una ejecucion, nunca contenido versionado.
+pytest-*.xml

@@ -156,7 +156,7 @@ Estos registros son maestros/relacionales y no forman parte del conteo de 1,180 
 - 30 relaciones UsuarioPaciente (1:1 con cada gestante)
 - 5 relaciones UsuarioMedico (1:1 con cada médico)
 
-Los correos y los hashes de contraseña utilizados son completamente sintéticos y no representan credenciales válidas de producción.
+Los correos son completamente sintéticos. Desde SCRUM-70, el `password_hash` de cada una de las 37 cuentas es un digest Argon2id real de una única credencial exclusivamente ficticia del dataset académico, declarada como tal en el generador; no corresponde a ninguna credencial de un entorno real. Cada digest lleva un salt aleatorio, de modo que `password_hash` no es reproducible byte a byte por diseño (ver «Reglas de integridad de los datos»).
 
 ### Información de contacto
 
@@ -181,11 +181,11 @@ Los nombres de clínica y las direcciones específicas son completamente sintét
 
 ### AuditoriaLog
 
-No se generan filas ficticias en esta muestra. Los registros de auditoría se producirán posteriormente mediante acciones reales durante las pruebas funcionales del sistema.
+No se generan filas ficticias en esta muestra, y el cargador no escribe en `auditoria_log`. Las filas de auditoría las producen las acciones de la API implementadas en SCRUM-70: inicio de sesión exitoso o fallido, denegación por rol y registro de una sesión de monitoreo.
 
 ### Alineación técnica con SQLAlchemy (SCRUM-51)
 
-Los modelos SQLAlchemy reales existen en la rama `feature/sprint-4-sqlalchemy-models` (aún no fusionada a esta rama). El dataset se validó y ajustó contra ese modelo:
+Los modelos SQLAlchemy del esquema operacional forman parte del repositorio (`backend/app/models/`) y el esquema se despliega con las migraciones de Alembic. El dataset se validó y ajustó contra esos modelos:
 
 - `tipo_contacto` usa exactamente `CELULAR`, `TELEFONO_DOMICILIO` y `CORREO_ALTERNO` (el valor `FIJO` fue eliminado deliberadamente del enum real y ya no se genera).
 - `Clinica.direccion_fisica` es el nombre físico real de la columna de dirección (antes se generaba como `calle`).
@@ -193,7 +193,7 @@ Los modelos SQLAlchemy reales existen en la rama `feature/sprint-4-sqlalchemy-mo
 - `origen_dato` usa `DISPOSITIVO` (el enum real solo admite `DISPOSITIVO` o `CSV`; no admite `API`).
 - `SesionMonitoreo.fecha_inicio/fecha_fin`, `LecturaBiometrica.fecha_hora_captura/fecha_hora_sincronizacion` y `Dispositivo.fecha_registro` son `DateTime` con zona horaria; el dataset genera estos campos en UTC offset-aware (ej. `2026-03-01T14:30:00+00:00`).
 - El modelo real permite `fecha_hora_sincronizacion = NULL` para representar una lectura aún no sincronizada. El dataset actual no genera ese caso: representa registros que finalmente sí se sincronizan (algunos de forma inmediata, otros de forma diferida).
-- Las tablas operacionales viven en el schema PostgreSQL `operacional` (relevante para cuando exista un script de carga física).
+- Las tablas operacionales viven en el schema PostgreSQL `operacional`, que es donde `scripts/load_mock_data.py` carga el dataset.
 - Los IDs físicos de la muestra son enteros determinísticos, alineados con las PK `Integer` reales, y comienzan en 100 dentro de cada entidad (ej. `id_paciente = 100..129`). Los códigos legibles se conservan únicamente donde existe una columna de negocio real en el modelo (`cedula`, `ruc`, `codigo_dispositivo`).
 
 La cardinalidad `SesionMonitoreo` → `LecturaBiometrica` es **1:N**: `LecturaBiometrica.id_sesion` no está restringido como único y `SesionMonitoreo.lecturas` se maneja como una colección. La muestra de SCRUM-54 conserva 5 lecturas procesadas representativas por sesión HR/SpO₂ (112 sesiones × 5 lecturas = 560); ese valor es la granularidad elegida para esta muestra técnica y no representa un límite máximo de cardinalidad del modelo.
@@ -223,12 +223,26 @@ Esta distribución se utiliza únicamente para fines de validación técnica y n
 - Los códigos de los dispositivos deberán ser únicos
 - Cada embarazo conserva su relación histórica con un dispositivo: mientras el embarazo está ACTIVO, la asignación permanece vigente; al pasar a FINALIZADO o SUSPENDIDO, la asignación se cierra con `fecha_fin = fecha_cierre` y el dispositivo vuelve a estado DISPONIBLE
 - El generador deberá utilizar una semilla aleatoria fija
-- La ejecución del generador utilizando la misma semilla deberá producir el mismo dataset
+- Con la misma semilla, el generador produce los mismos datos funcionales: identificadores, relaciones, roles, correos, sesiones, lecturas y el resto del contenido son deterministas
+- `password_hash` es la única excepción, y es intencional: cada digest Argon2id usa un salt aleatorio, así que dos ejecuciones producen hashes distintos y el artefacto no es idéntico byte a byte; la credencial ficticia del dataset verifica contra cada uno de ellos. No se usan salts deterministas
 
 ## Restricción actual de implementación
 
-El dataset generado se exporta en formato JSON y/o CSV.
+El generador exporta el dataset en JSON y CSV. La carga en PostgreSQL consume únicamente el JSON (`data/generated/dataset_fetalalert.json` por omisión, o una ruta alternativa); los CSV sirven para inspección.
 
-La carga física del dataset en PostgreSQL continúa pendiente de integración y validación en el flujo correspondiente. Antes de la carga definitiva deben validarse físicamente los nombres de columnas, tipos de datos, claves primarias, claves foráneas, restricciones `NULL`, restricciones de unicidad y demás reglas implementadas en el esquema desplegado.
+La carga física está implementada y validada desde SCRUM-61 con `scripts/load_mock_data.py`, en una única transacción:
 
-El dataset se comparó campo por campo contra los modelos SQLAlchemy reales del esquema operacional (ver sección "Alineación técnica con SQLAlchemy" arriba) y se ajustó donde correspondía una corrección legítima del lado del generador.
+- exige PostgreSQL con la base en el `head` de Alembic y no crea el esquema;
+- antes de escribir valida el dataset: columnas exactas de cada tabla según los modelos, llaves primarias únicas, referencias entre tablas y reglas de las lecturas;
+- inserta las filas ausentes y conserva sin cambios las ya presentes e idénticas;
+- una fila con la misma llave primaria y contenido distinto es un `ConflictoDeDatos`: la carga se detiene, informa la tabla, la llave y los campos que difieren, no sobrescribe nada y revierte la transacción completa;
+- una violación de `UNIQUE` o `CHECK` detectada por PostgreSQL también revierte toda la carga;
+- sobre el mismo artefacto, la segunda carga inserta 0 filas.
+
+Nombres de columnas, tipos, llaves y restricciones ya no son una validación pendiente: los fija el esquema desplegado por Alembic, cuyo ciclo `upgrade → downgrade → upgrade → alembic check` contra PostgreSQL confirma que coincide con los modelos, y los ejercita la suite PostgreSQL del cargador.
+
+Un dataset regenerado puede diferir en `password_hash` (ver «Reglas de integridad de los datos»), así que cargarlo sobre una base ya sembrada puede terminar en `ConflictoDeDatos` en `usuario.password_hash`. Una base simulada creada antes de SCRUM-70 se reconstruye y se vuelve a sembrar una sola vez; no se migra artificialmente ni se sobrescribe.
+
+Limitaciones que siguen vigentes en esta muestra: no genera filas de `auditoria_log` ni lecturas con `fecha_hora_sincronizacion = NULL`.
+
+El dataset se comparó campo por campo contra los modelos SQLAlchemy del esquema operacional (ver sección "Alineación técnica con SQLAlchemy" arriba) y se ajustó donde correspondía una corrección legítima del lado del generador.

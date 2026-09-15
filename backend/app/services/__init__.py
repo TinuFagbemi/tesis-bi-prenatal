@@ -5,6 +5,13 @@ status code, no request object. That is what lets the same functions be tested
 directly, and what keeps the routers thin.
 """
 
+from app.services.auditoria import (
+    AccionAuditada,
+    FalloDeAuditoria,
+    direccion_de_origen,
+    registrar,
+    registrar_con_commit,
+)
 from app.services.errores import (
     DiagnosticoSeguro,
     RespuestaDeError,
@@ -27,6 +34,19 @@ from app.services.idempotencia import (
     huella_del_paquete,
     procesar_ingesta_idempotente,
 )
+from app.services.passwords import hashear, verificar
+from app.services.principal import (
+    PrincipalAutenticado,
+    autenticar,
+    resolver_principal,
+)
+from app.services.tokens import (
+    ALGORITMO,
+    TokenDeSesion,
+    TokenInvalido,
+    emitir,
+    validar,
+)
 from app.services.ingesta import (
     ErrorDeIngesta,
     ReferenciaInexistente,
@@ -37,6 +57,23 @@ from app.services.ingesta import (
 )
 
 __all__ = [
+    # Auditoría
+    "AccionAuditada",
+    "FalloDeAuditoria",
+    "direccion_de_origen",
+    "registrar",
+    "registrar_con_commit",
+    # Contraseñas, tokens e identidad
+    "ALGORITMO",
+    "PrincipalAutenticado",
+    "TokenDeSesion",
+    "TokenInvalido",
+    "autenticar",
+    "emitir",
+    "hashear",
+    "resolver_principal",
+    "validar",
+    "verificar",
     # Traducción de errores
     "DiagnosticoSeguro",
     "RespuestaDeError",
