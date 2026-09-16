@@ -2177,10 +2177,29 @@ cuenta de un perfil clínico existente, la desactiva y la reactiva, reutilizando
 la autenticación, Argon2id, JWT, RBAC y auditoría de SCRUM-70. Todo con datos
 simulados.
 
-La rama `feature/scrum-97-aprovisionamiento-ciclo-cuentas` se creó desde
-`3ca311531cab9ce470fd276e25849055ba139926`, el `HEAD` del Pull Request #15 de
-SCRUM-70, que todavía no está integrado en `main`. La integración es secuencial:
-primero SCRUM-70 y después SCRUM-97.
+### Base de la rama: contexto original y resultado posterior
+
+**Contexto original.** La rama `feature/scrum-97-aprovisionamiento-ciclo-cuentas`
+se creó desde `3ca311531cab9ce470fd276e25849055ba139926` **porque SCRUM-70
+todavía no estaba integrado en `main`**: ese era el `HEAD` aprobado del Pull
+Request #15, entonces abierto. Partir de `main` habría dejado el ticket sin la
+autenticación, el RBAC y la auditoría que reutiliza, y habría obligado a
+reimplementarlos o a esperar. La integración se planificó secuencial —primero
+SCRUM-70, después SCRUM-97— y, mientras aquel PR siguiera abierto, el de
+SCRUM-97 debía apuntar a la rama de SCRUM-70 para que su diff no arrastrara
+commits ajenos.
+
+**Resultado posterior.** SCRUM-70 se integró en `main` mediante el Pull Request
+#15 y el merge commit `f6235032c67b7fc6f86b55f234f713448a3bc0ee`. Se comprobó
+que fue un merge commit real —dos padres, el segundo es el `HEAD`
+`3ca3115`— y no un squash ni un rebase, así que `main` contiene ese historial
+exacto y `3ca3115` es su ancestro. Por eso no hizo falta rebase ni cherry-pick:
+el Pull Request de SCRUM-97, el **#16**, quedó dirigido a `main`, la comparación
+contra `main` contiene únicamente los cambios de SCRUM-97 —5 commits, 24
+archivos— y el CI remoto validó el *merge ref* del propio PR contra `main`.
+
+La aprobación humana sobre el `HEAD` final sigue siendo un control externo,
+anterior al merge, que no se registra en este documento.
 
 ### Decisiones aprobadas
 

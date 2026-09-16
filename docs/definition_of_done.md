@@ -110,11 +110,17 @@ considera terminado si además:
 Evidencia local previa al Pull Request. **No sustituye la ejecución remota de CI
 ni la revisión de la otra autora.**
 
-La rama `feature/scrum-97-aprovisionamiento-ciclo-cuentas` depende de SCRUM-70,
-que todavía no está en `main`: parte exactamente de
-`3ca311531cab9ce470fd276e25849055ba139926`, el `HEAD` del Pull Request #15, y
-mientras ese PR siga abierto su propio Pull Request debe apuntar a
-`feature/scrum-70-autenticacion-rbac-auditoria` y no a `main`.
+La rama `feature/scrum-97-aprovisionamiento-ciclo-cuentas` se creó desde
+`3ca311531cab9ce470fd276e25849055ba139926`, que era el `HEAD` aprobado de
+SCRUM-70 mientras el Pull Request #15 seguía abierto.
+
+SCRUM-70 se integró después en `main` mediante el merge commit
+`f6235032c67b7fc6f86b55f234f713448a3bc0ee`, que conserva ese `HEAD` en la
+historia. Por eso el Pull Request de SCRUM-97, el **#16**, está abierto contra
+`main` —no contra la rama de SCRUM-70— y su comparación contra `main` contiene
+únicamente el trabajo de SCRUM-97. El CI remoto del Pull Request se ejecuta
+sobre el *merge ref* del propio PR contra `main`, así que valida la integración
+y no solo la rama aislada.
 
 ### Comprobado
 
@@ -157,12 +163,28 @@ mientras ese PR siga abierto su propio Pull Request debe apuntar a
 
 ### Verificaciones externas requeridas para cerrar SCRUM-97
 
+El estado de estas verificaciones cambia fuera del contenido versionado: se
+comprueba en GitHub y en Jira, no en este documento.
+
+Ya hecho:
+
+- SCRUM-70 quedó integrado en `main` (merge commit
+  `f6235032c67b7fc6f86b55f234f713448a3bc0ee`) y esta rama desciende del `HEAD`
+  que ese merge incorporó, así que no hizo falta rebase ni cherry-pick;
+- el Pull Request #16 está abierto contra `main` y su diff contiene
+  exclusivamente los cambios de SCRUM-97.
+
 Pendiente:
 
-- [ ] Integración de SCRUM-70 en `main` y alineación verificada de esta rama.
-- [ ] CI remoto en verde sobre el último commit del Pull Request.
-- [ ] Aprobación de la otra autora sobre ese commit.
-- [ ] SCRUM-71 sigue abierto hasta que SCRUM-98 también esté terminado.
+- [ ] CI remoto en verde **sobre el `HEAD` final** del Pull Request. Cada commit
+      nuevo lo vuelve a poner en duda: lo que vale es el último, comprobado en
+      GitHub Actions.
+- [ ] Aprobación de la otra autora sobre ese mismo `HEAD` final, dada de forma
+      humana en el Pull Request. Es un control externo y este documento no puede
+      darlo por obtenido.
+- [ ] Comentarios de su revisión resueltos, si los hubiera.
+- [ ] SCRUM-71 sigue abierto hasta que SCRUM-98 también esté terminado: cerrar
+      SCRUM-97 no cierra su ticket padre.
 
 ## Estado verificado localmente de SCRUM-70
 
@@ -220,7 +242,9 @@ Ya hecho:
 
 - el trabajo está confirmado en commits firmados y la rama
   `feature/scrum-70-autenticacion-rbac-auditoria` está publicada en GitHub;
-- el Pull Request #15 está abierto contra `main`;
+- el Pull Request #15 **fue fusionado** en `main` mediante el merge commit
+  `f6235032c67b7fc6f86b55f234f713448a3bc0ee`, que incorpora el `HEAD`
+  `3ca311531cab9ce470fd276e25849055ba139926`;
 - **GitHub Actions terminó correctamente** sobre el commit
   `b4af89dfc5eb25a2b240c760349ae1814e49e36f`, en la ejecución `34999415238`
   del workflow `CI`, con conclusión `success`:
@@ -240,14 +264,14 @@ Ya hecho:
 
   El guardián JUnit validó los 8 reportes: ninguna prueba de PostgreSQL quedó
   omitida.
-- a la fecha de este registro, el Pull Request #15 no tiene hilos de revisión
-  abiertos.
+- a la fecha de este registro, el Pull Request #15 no tenía hilos de revisión
+  abiertos;
+- la integración en `main` **ya ocurrió**: merge commit
+  `f6235032c67b7fc6f86b55f234f713448a3bc0ee`, con dos padres, de modo que el
+  historial de la rama quedó incorporado tal cual, sin squash ni rebase.
 
-Pendiente:
-
-- [ ] Aprobación de la otra autora en el Pull Request.
-- [ ] Comentarios de su revisión resueltos, si los hubiera.
-- [ ] Integración en `main` y CI posterior al merge en verde.
+Lo que siga pendiente de revisión humana en ese Pull Request se comprueba en
+GitHub, no aquí.
 
 ## Estado verificado localmente de SCRUM-69
 
