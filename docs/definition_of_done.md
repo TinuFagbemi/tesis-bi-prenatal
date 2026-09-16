@@ -10,10 +10,10 @@ migraciones, datos simulados o documentación.
       implementado, y nada fuera de su alcance se coló en el cambio.
 - [ ] **Pruebas locales aprobadas.** La suite corre en verde en la computadora
       de quien desarrolla, antes de abrir el Pull Request, desde `backend/`:
-      `python -m pytest -q --ignore=tests/test_migration_postgresql.py --ignore=tests/test_load_mock_data_postgresql.py --ignore=tests/test_ingestion_api_postgresql.py --ignore=tests/test_ingestion_idempotency_postgresql.py --ignore=tests/test_edge_postgresql.py --ignore=tests/test_edge_sincronizacion_postgresql.py --ignore=tests/test_etl_postgresql.py --ignore=tests/test_autenticacion_postgresql.py`.
+      `python -m pytest -q --ignore=tests/test_migration_postgresql.py --ignore=tests/test_load_mock_data_postgresql.py --ignore=tests/test_ingestion_api_postgresql.py --ignore=tests/test_ingestion_idempotency_postgresql.py --ignore=tests/test_edge_postgresql.py --ignore=tests/test_edge_sincronizacion_postgresql.py --ignore=tests/test_etl_postgresql.py --ignore=tests/test_autenticacion_postgresql.py --ignore=tests/test_cuentas_postgresql.py`.
 - [ ] **CI aprobado.** El workflow `CI` (`.github/workflows/ci.yml`) termina en
       verde para el Pull Request. Un job en rojo bloquea el cierre del ticket.
-- [ ] **Pruebas de PostgreSQL ejecutadas y no omitidas.** Los ocho archivos que
+- [ ] **Pruebas de PostgreSQL ejecutadas y no omitidas.** Los nueve archivos que
       necesitan un servidor real deben ejecutarse de verdad y no aparecer como
       *skipped*:
       `tests/test_migration_postgresql.py`, con `SCRUM52_TEST_DATABASE_URL`
@@ -56,6 +56,14 @@ migraciones, datos simulados o documentación.
       auditoría con commits de verdad —incluidas las restricciones reales de
       `auditoria_log`: actor nulo en el login fallido, `ip_origen` NOT NULL y
       la clave foránea RESTRICT—, y no deja ninguna base al terminar.
+      Y `tests/test_cuentas_postgresql.py`, con `SCRUM97_TEST_DATABASE_URL`,
+      que crea sus propias bases temporales (`scrum97_tmp_`) y valida allí la
+      migración de SCRUM-97 sobre una base limpia y sobre una existente con las
+      37 cuentas, el CHECK de correo canónico, el trigger diferido rol/vínculo,
+      la provisión atómica, la desactivación con un token previo, la
+      reactivación de la misma identidad, la preservación de la historia, la
+      continuidad entre embarazos y carreras con conexiones independientes, y
+      no deja ninguna base al terminar.
       El workflow `CI` lo verifica sobre el reporte JUnit de cada ejecución y
       falla el job si al menos una prueba de PostgreSQL queda omitida.
 - [ ] **Pull Request vinculado al ticket de Jira y aprobado.** El PR referencia
@@ -72,6 +80,111 @@ migraciones, datos simulados o documentación.
       README y los documentos de `docs/` lo reflejan.
 - [ ] **Integrado en `main`.** El trabajo quedó incorporado a la rama de
       integración final del ticket.
+
+### Criterios adicionales para tickets de identidad y cuentas
+
+Desde SCRUM-97, un ticket que cree, vincule, active o desactive cuentas solo se
+considera terminado si además:
+
+- [ ] tiene pruebas positivas **y** negativas de cada operación, incluidas las
+      de RBAC (anónimo, token inválido, rol no permitido antes de revelar la
+      existencia del objetivo);
+- [ ] demuestra sus garantías de unicidad y coherencia **en PostgreSQL real**,
+      no solo en Python, e incluye pruebas **concurrentes** con conexiones
+      independientes;
+- [ ] prueba sus migraciones en base limpia y en base existente, con
+      `upgrade → downgrade → upgrade`, `alembic check` y una sola cabeza;
+- [ ] deja la auditoría saneada —sin contraseñas, hashes, tokens ni correos— y
+      sin éxitos falsos tras un rollback;
+- [ ] no introduce ningún secreto útil ni credencial real;
+- [ ] demuestra que no borra ni altera perfiles, embarazos, sesiones, lecturas,
+      hechos analíticos ni auditoría previa;
+- [ ] demuestra la continuidad longitudinal de la identidad entre embarazos;
+- [ ] mantiene en verde la regresión de autenticación, JWT, Argon2id, RBAC y
+      auditoría de SCRUM-70;
+- [ ] tiene el CI en verde y la revisión de la otra autora **sobre el último
+      commit** del Pull Request.
+
+## Estado verificado localmente de SCRUM-97
+
+Evidencia local previa al Pull Request. **No sustituye la ejecución remota de CI
+ni la revisión de la otra autora.**
+
+La rama `feature/scrum-97-aprovisionamiento-ciclo-cuentas` se creó desde
+`3ca311531cab9ce470fd276e25849055ba139926`, que era el `HEAD` aprobado de
+SCRUM-70 mientras el Pull Request #15 seguía abierto.
+
+SCRUM-70 se integró después en `main` mediante el merge commit
+`f6235032c67b7fc6f86b55f234f713448a3bc0ee`, que conserva ese `HEAD` en la
+historia. Por eso el Pull Request de SCRUM-97, el **#16**, está abierto contra
+`main` —no contra la rama de SCRUM-70— y su comparación contra `main` contiene
+únicamente el trabajo de SCRUM-97. El CI remoto del Pull Request se ejecuta
+sobre el *merge ref* del propio PR contra `main`, así que valida la integración
+y no solo la rama aislada.
+
+### Comprobado
+
+- ADMIN provisiona una cuenta PACIENTE y una MEDICO para perfiles existentes sin
+  cuenta; el rol sale de la ruta y el cuerpo no puede pedir ninguno.
+- La contraseña solo se guarda como digest Argon2id que verifica con
+  `app.services.passwords.verificar`; ni ella ni el hash aparecen en respuestas,
+  auditoría ni logs.
+- La cuenta nueva inicia sesión —también con su correo en mayúsculas o con
+  espacios exteriores— y `/api/v1/autenticacion/yo` devuelve su `id_usuario` y
+  su rol.
+- Correo exacto o equivalente ya en uso, segunda cuenta para la misma paciente o
+  el mismo médico y perfil inexistente se rechazan sin dejar filas.
+- PACIENTE y MEDICO reciben el mismo `403` con identificadores existentes e
+  inexistentes; anónimo y token inválido, `401`.
+- El trigger diferido `rol_vinculo_coherente` rechaza cuenta clínica sin vínculo,
+  cuenta en ambos bridges, rol incompatible, ADMIN con vínculo y cambio de rol
+  que conserva el vínculo; acepta cuenta y vínculo insertados en la misma
+  transacción.
+- Un fallo entre la cuenta y su vínculo, o en la auditoría de éxito, no deja
+  cuenta huérfana ni auditoría falsa.
+- Desactivar hace fallar un login nuevo y rechaza en su siguiente uso el token
+  emitido antes; reactivar conserva `id_usuario`, hash y vínculo. La limitación
+  del token previo tras reactivar está documentada y fijada en una prueba.
+- Las cuentas ADMIN —la propia incluida— no se administran (`409`).
+- Desactivar y reactivar no alteran perfiles, embarazos, sesiones, lecturas,
+  vínculos, hechos analíticos ni auditoría previa.
+- Una paciente con un embarazo `FINALIZADO` conserva la misma cuenta y el mismo
+  vínculo al registrarse un embarazo `ACTIVO` nuevo.
+- Carreras reales: mismo correo, misma paciente y mismo médico producen un `201`
+  y un `409`; dos desactivaciones, dos reactivaciones y activar/desactivar a la
+  vez dejan un estado coherente con su auditoría.
+- Migración `54053d46abd6` sobre `60facdbacf51`: base limpia y base existente con
+  las 37 cuentas, `upgrade → downgrade → upgrade`, `alembic check` sin
+  divergencias y una sola cabeza; aborta sin modificar nada ante correos que
+  colisionan, vacíos o con espacios internos, y ante cuentas incoherentes.
+- Dataset canónico intacto: 37 cuentas (2 ADMIN, 5 MEDICO, 30 PACIENTE),
+  30 `UsuarioPaciente`, 5 `UsuarioMedico`, 30 embarazos, 732 sesiones y 1,180
+  lecturas; el cargador sigue siendo idempotente.
+
+### Verificaciones externas requeridas para cerrar SCRUM-97
+
+El estado de estas verificaciones cambia fuera del contenido versionado: se
+comprueba en GitHub y en Jira, no en este documento.
+
+Ya hecho:
+
+- SCRUM-70 quedó integrado en `main` (merge commit
+  `f6235032c67b7fc6f86b55f234f713448a3bc0ee`) y esta rama desciende del `HEAD`
+  que ese merge incorporó, así que no hizo falta rebase ni cherry-pick;
+- el Pull Request #16 está abierto contra `main` y su diff contiene
+  exclusivamente los cambios de SCRUM-97.
+
+Pendiente:
+
+- [ ] CI remoto en verde **sobre el `HEAD` final** del Pull Request. Cada commit
+      nuevo lo vuelve a poner en duda: lo que vale es el último, comprobado en
+      GitHub Actions.
+- [ ] Aprobación de la otra autora sobre ese mismo `HEAD` final, dada de forma
+      humana en el Pull Request. Es un control externo y este documento no puede
+      darlo por obtenido.
+- [ ] Comentarios de su revisión resueltos, si los hubiera.
+- [ ] SCRUM-71 sigue abierto hasta que SCRUM-98 también esté terminado: cerrar
+      SCRUM-97 no cierra su ticket padre.
 
 ## Estado verificado localmente de SCRUM-70
 
@@ -129,7 +242,9 @@ Ya hecho:
 
 - el trabajo está confirmado en commits firmados y la rama
   `feature/scrum-70-autenticacion-rbac-auditoria` está publicada en GitHub;
-- el Pull Request #15 está abierto contra `main`;
+- el Pull Request #15 **fue fusionado** en `main` mediante el merge commit
+  `f6235032c67b7fc6f86b55f234f713448a3bc0ee`, que incorpora el `HEAD`
+  `3ca311531cab9ce470fd276e25849055ba139926`;
 - **GitHub Actions terminó correctamente** sobre el commit
   `b4af89dfc5eb25a2b240c760349ae1814e49e36f`, en la ejecución `34999415238`
   del workflow `CI`, con conclusión `success`:
@@ -149,14 +264,14 @@ Ya hecho:
 
   El guardián JUnit validó los 8 reportes: ninguna prueba de PostgreSQL quedó
   omitida.
-- a la fecha de este registro, el Pull Request #15 no tiene hilos de revisión
-  abiertos.
+- a la fecha de este registro, el Pull Request #15 no tenía hilos de revisión
+  abiertos;
+- la integración en `main` **ya ocurrió**: merge commit
+  `f6235032c67b7fc6f86b55f234f713448a3bc0ee`, con dos padres, de modo que el
+  historial de la rama quedó incorporado tal cual, sin squash ni rebase.
 
-Pendiente:
-
-- [ ] Aprobación de la otra autora en el Pull Request.
-- [ ] Comentarios de su revisión resueltos, si los hubiera.
-- [ ] Integración en `main` y CI posterior al merge en verde.
+Lo que siga pendiente de revisión humana en ese Pull Request se comprueba en
+GitHub, no aquí.
 
 ## Estado verificado localmente de SCRUM-69
 

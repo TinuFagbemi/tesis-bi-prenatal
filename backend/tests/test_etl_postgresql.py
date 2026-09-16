@@ -87,6 +87,7 @@ from app.services.principal import PrincipalAutenticado
 from app.main import app
 from tests.conftest import construir_config_alembic
 from tests.test_etl_cli import cli  # noqa: F401  -- fixture del script
+from tests.test_etl_esquema import REVISION_ANALITICA
 from tests.test_generate_mock_data import cargar_generador
 from tests.test_load_mock_data_postgresql import FILAS_ESPERADAS
 from tests.test_models import PG_MAX_IDENTIFIER_LENGTH, TABLAS_ESPERADAS
@@ -601,7 +602,14 @@ def test_ninguna_llave_foranea_cruza_de_un_esquema_a_otro(base_vacia):
 
 
 def test_downgrade_al_head_previo_conserva_los_datos_y_vuelve_a_subir(clon):
-    head, previa = revisiones()
+    # Desde SCRUM-97 la revision analitica ya no es el head: se baja hasta la
+    # revision anterior a ella, que es la que retira el esquema analitico.
+    head, _ = revisiones()
+    previa = (
+        ScriptDirectory.from_config(construir_config_alembic())
+        .get_revision(REVISION_ANALITICA)
+        .down_revision
+    )
     ejecutar_etl(clon.engine)
 
     revertir(clon.url, previa)

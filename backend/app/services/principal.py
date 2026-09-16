@@ -32,6 +32,7 @@ from sqlalchemy.orm import Session
 from app.models.catalogos import Rol
 from app.models.enums import NombreRol
 from app.models.seguridad import Usuario
+from app.services.correo import EmailNoCanonizable, canonizar_email
 from app.services.passwords import verificar
 
 
@@ -103,7 +104,21 @@ def autenticar(sesion_bd: Session, email: str, password: str) -> PrincipalAutent
     An early return for a missing account, or for a deactivated one, would make
     that case measurably cheaper than a wrong password and turn this endpoint
     into an account oracle. There is no such return here.
+
+    **The email is looked up in canonical form (SCRUM-97)**, through the same
+    ``canonizar_email`` provisioning stores it with. The HTTP contract already
+    delivers it canonical, and the helper is idempotent, so this is the same
+    value; it is applied again so no internal caller can look an account up
+    under a rule the stored addresses do not follow. A value with no canonical
+    form cannot match any account, and it still pays the dummy verification
+    before answering ``None``.
     """
+    try:
+        email = canonizar_email(email)
+    except EmailNoCanonizable:
+        verificar(None, password)
+        return None
+
     fila = sesion_bd.execute(
         _consulta_de_cuenta().where(Usuario.email == email)
     ).one_or_none()

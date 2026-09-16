@@ -386,10 +386,16 @@ def sql_downgrade() -> str:
     return _renderizar_revision("downgrade")
 
 
-def test_la_revision_analitica_es_el_unico_head_y_desciende_de_scrum_63():
-    script = ScriptDirectory.from_config(construir_config_alembic())
+def test_la_revision_analitica_sigue_en_la_cadena_lineal_y_desciende_de_scrum_63():
+    """Desde SCRUM-97 ya no es el head: la revision de cuentas se apoya en ella.
 
-    assert script.get_heads() == [REVISION_ANALITICA]
+    Lo que sigue importando no cambio: una sola cabeza, y la revision analitica
+    dentro de esa unica cadena, directamente sobre SCRUM-63.
+    """
+    script = ScriptDirectory.from_config(construir_config_alembic())
+    [head] = script.get_heads()
+
+    assert REVISION_ANALITICA in {r.revision for r in script.iterate_revisions(head, "base")}
     assert script.get_revision(REVISION_ANALITICA).down_revision == REVISION_SCRUM_63
 
 

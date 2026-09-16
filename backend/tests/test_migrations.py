@@ -43,13 +43,17 @@ from tests.test_models import ONDELETE_ESPERADOS, TABLAS_ESPERADAS
 # SCRUM-52 deployed the operational schema in one revision and every later
 # sprint stacks on top of it. SCRUM-63 adds the second: idempotencia_solicitud.
 # SCRUM-69 adds the third, the analytic schema, which touches nothing here.
-CANTIDAD_DE_REVISIONES_ESPERADA = 3
+# SCRUM-97 adds the fourth: ck_usuario_email_canonico and the role/link
+# triggers, on tables that already existed.
+CANTIDAD_DE_REVISIONES_ESPERADA = 4
 
 # Shape of the deployed schema, pinned so a silent drift in either the models or
 # the revisions fails here. UNIQUE went from 18 to 17 when the 1:1 between
 # sesion_monitoreo and lectura_biometrica became 1:N; SCRUM-63 then added one
 # table with one primary key, one foreign key with ON DELETE RESTRICT, one
-# UNIQUE and one CHECK, and no index of its own.
+# UNIQUE and one CHECK, and no index of its own. SCRUM-97 adds one CHECK to an
+# existing table -- ck_usuario_email_canonico -- and nothing else counted here:
+# its triggers and function are not constraints of this inventory.
 CANTIDADES_ESPERADAS = {
     "tablas": 23,
     "primary_key": 23,
@@ -57,7 +61,7 @@ CANTIDADES_ESPERADAS = {
     "on_delete_restrict": 16,
     "on_delete_cascade": 10,
     "unique": 18,
-    "check": 30,
+    "check": 31,
     "indices": 13,
 }
 
@@ -68,6 +72,12 @@ CREATE_TABLE = re.compile(
 CREATE_INDEX = re.compile(
     rf"CREATE INDEX (?P<indice>\w+) ON {SCHEMA_OPERACIONAL}\.(?P<tabla>\w+) "
     r"\((?P<columnas>[^)]*)\)"
+)
+# A constraint a later revision adds to a table created earlier (SCRUM-97). It is
+# part of the deployed table as much as a clause of its CREATE TABLE.
+ADD_CONSTRAINT = re.compile(
+    rf"ALTER TABLE {SCHEMA_OPERACIONAL}\.(?P<tabla>\w+) ADD (?P<clausula>CONSTRAINT .*?);\n",
+    re.DOTALL,
 )
 DROP_TABLE = re.compile(rf"DROP TABLE {SCHEMA_OPERACIONAL}\.(?P<tabla>\w+)")
 DROP_INDEX = re.compile(rf"DROP INDEX {SCHEMA_OPERACIONAL}\.(?P<indice>\w+)")
@@ -105,10 +115,15 @@ def _dividir_en_clausulas(cuerpo: str) -> set[str]:
 
 
 def _clausulas_por_tabla(sql: str) -> dict[str, set[str]]:
-    return {
+    """Clauses of each table as the chain leaves it: CREATE TABLE plus later ADDs."""
+    clausulas = {
         coincidencia["tabla"]: _dividir_en_clausulas(coincidencia["cuerpo"])
         for coincidencia in CREATE_TABLE.finditer(sql)
     }
+    for coincidencia in ADD_CONSTRAINT.finditer(sql):
+        if coincidencia["tabla"] in clausulas:
+            clausulas[coincidencia["tabla"]].add(" ".join(coincidencia["clausula"].split()))
+    return clausulas
 
 
 def _revisiones_en_orden(direccion: str) -> list:
