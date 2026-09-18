@@ -26,6 +26,14 @@ services:
       APP_NAME: "${APP_NAME:-FetalAlert API}"
       APP_ENV: "${APP_ENV:-development}"
       # Debe apuntar a db:5432 (red interna de Docker), nunca a localhost:5433.
+      #
+      # Es la credencial del runtime restringido, y es la unica URL de base que
+      # este servicio recibe (SCRUM-98). ALEMBIC_DATABASE_URL y ETL_DATABASE_URL
+      # NO se pasan aqui, a proposito: el proceso web no ejecuta migraciones ni
+      # el ETL, y entregarle la credencial del migrador anularia el aislamiento
+      # por filas -- el propietario de una tabla omite sus politicas. Si alguna
+      # vez hace falta migrar, se hace desde un proceso aparte con su propia
+      # variable, nunca desde este contenedor.
       DATABASE_URL: "${DATABASE_URL:?Define DATABASE_URL en el archivo .env}"
       # Material de firma de los tokens (SCRUM-70). Se pasa de forma explicita y
       # sin valor funcional por omision: si falta o no es valido, app.main se

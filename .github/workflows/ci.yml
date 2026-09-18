@@ -43,6 +43,20 @@ jobs:
       # arrancar si la clave de firma repite la de la base.
       JWT_SECRET_KEY: ci_efimero_no_es_secreto_clave_de_firma_de_pruebas
 
+      # Migrador de CI (SCRUM-98). Efimero y exclusivo de este job, igual que
+      # las credenciales de arriba: no es superusuario y no omite RLS, que es
+      # justo lo que lo hace util. Todo lo que viene despues del bootstrap
+      # -- migraciones, cargador y ETL -- se ejecuta con esta identidad.
+      CI_MIGRADOR_USER: fetalalert_ci_migrador
+      CI_MIGRADOR_PASSWORD: ci_migrador_efimero_no_es_secreto
+      CI_MIGRADOR_URL: postgresql+psycopg://fetalalert_ci_migrador:ci_migrador_efimero_no_es_secreto@localhost:5432/scrum52_validacion_tmp
+
+      # Roles de conexion restringidos, uno por proceso. Los crea el CI, no la
+      # migracion: los roles son globales del cluster y Alembic no los toca.
+      # Efimeros y ficticios, como el resto de credenciales de este job.
+      API_PASSWORD: api_efimero_no_es_secreto
+      ETL_PASSWORD: etl_efimero_no_es_secreto
+
     services:
       postgres:
         image: postgres:16
@@ -102,7 +116,11 @@ jobs:
             --ignore=tests/test_edge_sincronizacion_postgresql.py \
             --ignore=tests/test_etl_postgresql.py \
             --ignore=tests/test_autenticacion_postgresql.py \
-            --ignore=tests/test_cuentas_postgresql.py
+            --ignore=tests/test_cuentas_postgresql.py \
+            --ignore=tests/test_bootstrap_postgresql.py \
+            --ignore=tests/test_contexto_postgresql.py \
+            --ignore=tests/test_rls_postgresql.py \
+            --ignore=tests/test_http_como_api_postgresql.py
 
       # Contrato del camino .env/shell -> docker-compose.yml -> entorno del
       # contenedor de la API. Las pruebas de Python reciben JWT_SECRET_KEY
@@ -254,6 +272,180 @@ jobs:
           sys.exit(1 if fallos else 0)
           PY
 
+      # Aprovisionamiento del cluster (SCRUM-98), en dos pasos y en este orden.
+      #
+      # El usuario inicial del contenedor es superusuario, y usarlo para el
+      # bootstrap ocultaria el requisito que este ticket existe para demostrar:
+      # que un migrador sin superusuario puede crear los roles tecnicos y dejar
+      # los helpers en su propietario final. Ademas rompia la suite de SCRUM-98,
+      # que se aprovisiona con un migrador propio: los roles ya existian,
+      # creados por otra identidad, y PostgreSQL responde "permission denied to
+      # grant role ... Only roles with the ADMIN option may grant this role".
+      #
+      # Asi que CI fabrica un migrador real y lo usa para TODO lo que viene
+      # despues: bootstrap, migraciones, cargador del dataset y ETL. El
+      # superusuario solo lo crea.
+      - name: Crear el migrador de CI (SCRUM-98)
+        run: |
+          python - <<'PY'
+          import os
+
+          from sqlalchemy import create_engine, text
+
+          ADMINISTRADOR = (
+              "postgresql+psycopg://"
+              f"{os.environ['POSTGRES_USER']}:{os.environ['POSTGRES_PASSWORD']}"
+              f"@localhost:5432/{os.environ['POSTGRES_DB']}"
+          )
+
+          MIGRADOR = os.environ["CI_MIGRADOR_USER"]
+
+          # Los roles de conexion, con la clave que este job trae del entorno.
+          # La migracion les concede privilegios y aborta si no existen, asi que
+          # se crean aqui, antes de Alembic. No hay un rol de pruebas: las
+          # suites de aislamiento se conectan como fetalalert_api.
+          DE_CONEXION = (
+              ("fetalalert_api", os.environ["API_PASSWORD"]),
+              ("fetalalert_etl", os.environ["ETL_PASSWORD"]),
+          )
+
+
+          def existe(conexion, rol):
+              return bool(
+                  conexion.execute(
+                      text("SELECT 1 FROM pg_roles WHERE rolname = :r"), {"r": rol}
+                  ).scalar()
+              )
+
+
+          def crear(conexion, rol, clave, atributos):
+              # DDL no admite parametros ligados, asi que el literal se compone
+              # aqui. El nombre sale de una constante de este script y la clave
+              # del entorno del job; se comprueba que ninguna traiga comillas
+              # antes de interpolarlas.
+              assert '"' not in rol and "'" not in rol, rol
+              assert "'" not in clave, "la clave no puede contener comillas simples"
+              conexion.exec_driver_sql(
+                  f"CREATE ROLE \"{rol}\" LOGIN PASSWORD '{clave}' {atributos}"
+              )
+
+
+          motor = create_engine(ADMINISTRADOR, isolation_level="AUTOCOMMIT")
+          try:
+              with motor.connect() as conexion:
+                  if not existe(conexion, MIGRADOR):
+                      crear(
+                          conexion,
+                          MIGRADOR,
+                          os.environ["CI_MIGRADOR_PASSWORD"],
+                          "NOSUPERUSER NOBYPASSRLS CREATEROLE NOCREATEDB NOREPLICATION",
+                      )
+
+                  # Propietario de la base de validacion, para que pueda crear
+                  # schemas sin que nadie le conceda nada mas.
+                  conexion.exec_driver_sql(
+                      f'ALTER DATABASE "{os.environ["POSTGRES_DB"]}" '
+                      f'OWNER TO "{MIGRADOR}"'
+                  )
+
+                  for rol, clave in DE_CONEXION:
+                      if not existe(conexion, rol):
+                          crear(
+                              conexion,
+                              rol,
+                              clave,
+                              "NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE "
+                              "NOREPLICATION",
+                          )
+
+                  fila = (
+                      conexion.execute(
+                          text(
+                              "SELECT rolsuper, rolbypassrls FROM pg_roles "
+                              "WHERE rolname = :r"
+                          ),
+                          {"r": MIGRADOR},
+                      )
+                      .mappings()
+                      .one()
+                  )
+          finally:
+              motor.dispose()
+
+          assert fila["rolsuper"] is False, "el migrador de CI no puede ser superusuario"
+          assert fila["rolbypassrls"] is False, "el migrador de CI no puede omitir RLS"
+          print("migrador y roles de conexion listos: sin SUPERUSER y sin BYPASSRLS")
+          PY
+
+      - name: Pruebas del bootstrap de roles contra PostgreSQL (SCRUM-98)
+        working-directory: backend
+        env:
+          SCRUM98_TEST_DATABASE_URL: postgresql+psycopg://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/scrum98_bootstrap_tmp
+        run: |
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, text
+
+          url = os.environ["SCRUM98_TEST_DATABASE_URL"].replace(
+              "/scrum98_bootstrap_tmp", f"/{os.environ['POSTGRES_DB']}"
+          )
+          motor = create_engine(url, isolation_level="AUTOCOMMIT")
+          with motor.connect() as conexion:
+              existe = conexion.execute(
+                  text("SELECT 1 FROM pg_database WHERE datname = 'scrum98_bootstrap_tmp'")
+              ).scalar()
+              if not existe:
+                  conexion.exec_driver_sql("CREATE DATABASE scrum98_bootstrap_tmp")
+          motor.dispose()
+          print("base desechable lista")
+          PY
+          python -m pytest -q -rs tests/test_bootstrap_postgresql.py --junitxml=pytest-scrum98.xml
+
+      # El contexto transaccional: que muere con la transaccion y que no viaja
+      # entre solicitudes por una conexion reutilizada del pool. Corre sobre su
+      # propia base desechable y como un rol con LOGIN y nada mas, creado por la
+      # propia suite: comprobar el aislamiento con una credencial que lo omite
+      # todo no comprobaria nada.
+      - name: Pruebas de contexto transaccional contra PostgreSQL (SCRUM-98)
+        working-directory: backend
+        env:
+          SCRUM98_CONTEXTO_TEST_DATABASE_URL: postgresql+psycopg://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/scrum98_contexto_tmp
+        run: |
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, text
+
+          url = os.environ["SCRUM98_CONTEXTO_TEST_DATABASE_URL"].replace(
+              "/scrum98_contexto_tmp", f"/{os.environ['POSTGRES_DB']}"
+          )
+          motor = create_engine(url, isolation_level="AUTOCOMMIT")
+          with motor.connect() as conexion:
+              existe = conexion.execute(
+                  text("SELECT 1 FROM pg_database WHERE datname = 'scrum98_contexto_tmp'")
+              ).scalar()
+              if not existe:
+                  conexion.exec_driver_sql("CREATE DATABASE scrum98_contexto_tmp")
+          motor.dispose()
+          print("base de contexto lista")
+          PY
+          python -m pytest -q -rs tests/test_contexto_postgresql.py --junitxml=pytest-scrum98-contexto.xml
+
+      # Bootstrap de la base principal, ya con la identidad del migrador de CI y
+      # despues de que la suite haya limpiado sus propios roles. Va antes de
+      # Alembic porque las migraciones de sub-fases posteriores concederan
+      # privilegios a roles que deben existir.
+      - name: Aprovisionar roles NOLOGIN con el migrador de CI (SCRUM-98)
+        env:
+          ALEMBIC_DATABASE_URL: ${{ env.CI_MIGRADOR_URL }}
+        run: python scripts/bootstrap_roles.py aplicar
+
+      # Idempotencia del bootstrap, comprobada en el workflow y no solo en la
+      # suite: la segunda pasada del MISMO migrador debe volver a terminar en 0.
+      - name: Reaplicar el bootstrap para comprobar idempotencia (SCRUM-98)
+        env:
+          ALEMBIC_DATABASE_URL: ${{ env.CI_MIGRADOR_URL }}
+        run: python scripts/bootstrap_roles.py aplicar
+
       # Segunda capa: ciclo real upgrade -> downgrade -> upgrade -> alembic check
       # contra el servicio PostgreSQL de arriba. Corre antes que las pruebas del
       # cargador porque es quien deja la base desplegada en el head de Alembic,
@@ -261,7 +453,9 @@ jobs:
       - name: Pruebas de migración contra PostgreSQL (SCRUM-52)
         working-directory: backend
         env:
-          SCRUM52_TEST_DATABASE_URL: postgresql+psycopg://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
+          # Alembic corre con la identidad del migrador de CI, no con el
+          # superusuario: es el ciclo real que un despliegue ejecutaria.
+          SCRUM52_TEST_DATABASE_URL: ${{ env.CI_MIGRADOR_URL }}
         run: python -m pytest -q -rs tests/test_migration_postgresql.py --junitxml=pytest-postgresql.xml
 
       # Tercera capa: carga idempotente del dataset simulado sobre la misma base
@@ -272,6 +466,9 @@ jobs:
         working-directory: backend
         env:
           APP_ENV: ci
+          # El cargador del dataset es mantenimiento, no runtime: desde SCRUM-98
+          # usa ALEMBIC_DATABASE_URL y no DATABASE_URL.
+          ALEMBIC_DATABASE_URL: ${{ env.CI_MIGRADOR_URL }}
           SCRUM61_TEST_DATABASE_URL: postgresql+psycopg://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
         run: python -m pytest -q -rs tests/test_load_mock_data_postgresql.py --junitxml=pytest-scrum61.xml
 
@@ -295,9 +492,14 @@ jobs:
       #
       # Va la última y en un step propio a propósito. Ejecuta DDL real -- baja y
       # vuelve a subir la revisión de SCRUM-63 -- y sus pruebas concurrentes
-      # toman un candado exclusivo sobre 'embarazo' mientras dos peticiones
-      # esperan. En serie es seguro; compartir la base con otra suite corriendo
-      # a la vez no lo sería, y por eso no hay matriz ni paralelización.
+      # toman un candado exclusivo sobre 'dispositivo' mientras dos peticiones
+      # esperan. Era 'embarazo' hasta que SCRUM-98 movió la comprobación de
+      # propiedad delante de la reclamación: con el candado ahí, las dos
+      # solicitudes se detenían antes de reclamar y la perdedora quedaba
+      # bloqueada por el control en vez de por la ganadora. 'dispositivo' es la
+      # primera tabla que el endpoint lee **después** de reclamar la clave.
+      # En serie es seguro; compartir la base con otra suite corriendo a la vez
+      # no lo sería, y por eso no hay matriz ni paralelización.
       - name: Pruebas de idempotencia contra PostgreSQL (SCRUM-63)
         working-directory: backend
         env:
@@ -354,6 +556,7 @@ jobs:
       - name: Pruebas del esquema analítico y el ETL contra PostgreSQL (SCRUM-69)
         working-directory: backend
         env:
+          ETL_DATABASE_URL: postgresql+psycopg://fetalalert_etl:${{ env.ETL_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
           SCRUM69_TEST_DATABASE_URL: postgresql+psycopg://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
         run: python -m pytest -q -rs tests/test_etl_postgresql.py --junitxml=pytest-scrum69.xml
 
@@ -397,11 +600,41 @@ jobs:
       # La variable de entorno de cada capa es lo único que evita que su archivo
       # quede omitido, y pytest devuelve 0 aunque se salte todo. Por eso los
       # reportes JUnit se revisan después: un solo <skipped> en cualquiera de
-      # los nueve tumba el job.
+      # los trece tumba el job.
       #
       # El guardián detecta **omisiones**. Los fallos y los errores los detecta
       # el código de salida de pytest, en el step que los produce. Son dos
       # comprobaciones distintas y ninguna sustituye a la otra.
+      # Aislamiento por filas, conectando como **fetalalert_api**: el mismo rol
+      # con el que la API atiende peticiones, no un rol de pruebas con politicas
+      # propias. Un sujeto distinto demostraria el aislamiento de ese sujeto.
+      # Va la ultima de las capas PostgreSQL porque necesita la base migrada y
+      # cargada, que los steps anteriores dejan lista.
+      - name: Pruebas de aislamiento por filas contra PostgreSQL (SCRUM-98)
+        working-directory: backend
+        env:
+          SCRUM98_RLS_TEST_DATABASE_URL: postgresql+psycopg://fetalalert_api:${{ env.API_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
+          SCRUM98_RLS_ADMIN_USER: ${{ env.POSTGRES_USER }}
+          SCRUM98_RLS_ADMIN_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
+        run: python -m pytest -q -rs tests/test_rls_postgresql.py --junitxml=pytest-scrum98-rls.xml
+
+      # Recorridos HTTP completos con la credencial de la API. Es la contraparte
+      # de la suite anterior: aquella comprueba las politicas con sentencias
+      # sueltas, y esta atraviesa las rutas reales -- token, guardia, contexto,
+      # transaccion y commit -- bajo el mismo rol restringido.
+      #
+      # Existe porque las suites HTTP heredadas (SCRUM-62, 63, 70 y 97) se
+      # conectan con el usuario de inicializacion del servicio, que es
+      # superusuario y por tanto no esta sujeto a ninguna politica. Dos defectos
+      # reales de aislamiento pasaron por delante de ellas en verde.
+      - name: Recorridos HTTP como fetalalert_api contra PostgreSQL (SCRUM-98)
+        working-directory: backend
+        env:
+          SCRUM98_HTTP_TEST_DATABASE_URL: postgresql+psycopg://fetalalert_api:${{ env.API_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
+          SCRUM98_HTTP_ADMIN_USER: ${{ env.POSTGRES_USER }}
+          SCRUM98_HTTP_ADMIN_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
+        run: python -m pytest -q -rs tests/test_http_como_api_postgresql.py --junitxml=pytest-scrum98-http.xml
+
       - name: Verificar que ninguna prueba de PostgreSQL quedó omitida
         working-directory: backend
         run: |
@@ -420,6 +653,10 @@ jobs:
               "pytest-scrum69.xml": "SCRUM69_TEST_DATABASE_URL",
               "pytest-scrum70.xml": "SCRUM70_TEST_DATABASE_URL",
               "pytest-scrum97.xml": "SCRUM97_TEST_DATABASE_URL",
+              "pytest-scrum98.xml": "SCRUM98_TEST_DATABASE_URL",
+              "pytest-scrum98-contexto.xml": "SCRUM98_CONTEXTO_TEST_DATABASE_URL",
+              "pytest-scrum98-rls.xml": "SCRUM98_RLS_TEST_DATABASE_URL",
+              "pytest-scrum98-http.xml": "SCRUM98_HTTP_TEST_DATABASE_URL",
           }
 
           fallo = False

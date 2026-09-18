@@ -909,9 +909,13 @@ def test_la_guardia_admite_solo_admin():
     aplicacion = FastAPI()
 
     @aplicacion.get("/sonda")
-    def sonda(principal=Depends(router_cuentas.EXIGIR_ADMIN)) -> dict:
-        return {"rol": principal.rol.value}
+    def sonda(contexto=Depends(router_cuentas.EXIGIR_ADMIN)) -> dict:
+        return {"rol": contexto.rol.value}
 
+    # Desde SCRUM-98 la guardia tambien instala el contexto clinico, asi que
+    # depende de la sesion de negocio ademas de la de auditoria. Sin este
+    # segundo override la sonda saldria a buscar el engine real.
+    aplicacion.dependency_overrides[get_db] = lambda: SesionDeCuentas()
     aplicacion.dependency_overrides[get_db_auditoria] = lambda: SesionDeCuentas()
     permitidos = set()
     for rol in NombreRol:
@@ -949,11 +953,16 @@ def sql_downgrade() -> str:
     return _renderizar("downgrade")
 
 
-def test_la_revision_es_el_unico_head_sobre_la_analitica():
+def test_la_revision_encadena_sobre_la_analitica():
+    """SCRUM-97 sigue colgando de la analitica, aunque ya no sea la cabeza.
+
+    Desde SCRUM-98 la cabeza es otra; lo que esta prueba fija es el eslabon de
+    SCRUM-97, no cual es el ultimo de la cadena.
+    """
     script = ScriptDirectory.from_config(construir_config_alembic())
 
-    assert script.get_heads() == [REVISION_SCRUM_97]
     assert script.get_revision(REVISION_SCRUM_97).down_revision == REVISION_ANALITICA
+    assert len(script.get_heads()) == 1
 
 
 def test_valida_antes_de_normalizar_y_de_instalar(sql_upgrade):
@@ -1030,7 +1039,15 @@ def test_el_ci_ejecuta_la_suite_postgresql_de_cuentas_y_la_vigila():
     assert "run: python -m pytest -q -rs tests/test_cuentas_postgresql.py --junitxml=pytest-scrum97.xml" in step
     assert "SCRUM97_TEST_DATABASE_URL: postgresql+psycopg://" in step
     assert '"pytest-scrum97.xml": "SCRUM97_TEST_DATABASE_URL"' in guardian
-    assert guardian.count('.xml": "SCRUM') == 9
+    # El total crece con cada capa nueva: 9 hasta SCRUM-97, y 13 desde que
+    # SCRUM-98 anadio pytest-scrum98.xml (roles), pytest-scrum98-contexto.xml
+    # (contexto y pool), pytest-scrum98-rls.xml (aislamiento por filas) y
+    # pytest-scrum98-http.xml (recorridos HTTP como fetalalert_api). Sigue
+    # siendo un
+    # numero exacto y no un
+    # ">=" a proposito: lo que vigila es que nadie retire un reporte del
+    # guardian al anadir el suyo.
+    assert guardian.count('.xml": "SCRUM') == 13
 
 
 def test_la_migracion_no_usa_marcadores_que_psycopg_o_sqlalchemy_interpreten(sql_upgrade):

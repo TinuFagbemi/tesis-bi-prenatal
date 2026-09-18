@@ -51,13 +51,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import DBAPIError, IntegrityError
-from sqlalchemy.orm import InstrumentedAttribute, Session
+from sqlalchemy.orm import Session
 
 from app.db.base import Base
 from app.models.catalogos import Rol
-from app.models.clinico import Medico, Paciente
 from app.models.enums import NombreRol
 from app.models.seguridad import Usuario, UsuarioMedico, UsuarioPaciente
 from app.services.correo import canonizar_email
@@ -151,32 +150,48 @@ def _vinculo_medico(id_usuario: int, id_perfil: int) -> Base:
     return UsuarioMedico(id_usuario=id_usuario, id_medico=id_perfil)
 
 
+# Las cuatro respuestas del helper de estado, y las unicas. Cualquier otra cosa
+# -- incluida ``sin_autorizacion`` -- se trata como «no hay perfil»: es lo unico
+# que esta capa puede afirmar sin convertir la respuesta en un oraculo.
+ESTADO_INEXISTENTE = "inexistente"
+ESTADO_DISPONIBLE = "disponible"
+ESTADO_VINCULADO = "vinculado"
+ESTADO_SIN_AUTORIZACION = "sin_autorizacion"
+ESTADOS = frozenset(
+    {ESTADO_INEXISTENTE, ESTADO_DISPONIBLE, ESTADO_VINCULADO, ESTADO_SIN_AUTORIZACION}
+)
+
+
 @dataclass(frozen=True)
 class TipoDePerfil:
     """Everything that differs between provisioning a PACIENTE and a MEDICO.
 
     ``rol`` is fixed here and is the only source of the new account's role.
+
+    ``helper_de_estado`` names the SECURITY DEFINER function that answers
+    whether the profile exists and whether it is already taken. It is named
+    rather than built from a model class on purpose: ``fetalalert_api`` has no
+    privilege at all on ``operacional.paciente`` or ``operacional.medico``, and
+    reading the bridges directly would need an ADMIN branch in their row-level
+    policy -- which is exactly the enumeration this project refuses to grant.
     """
 
     rol: NombreRol
-    columna_perfil: InstrumentedAttribute
-    columna_vinculo: InstrumentedAttribute
+    helper_de_estado: str
     crear_vinculo: Callable[[int, int], Base]
     mensaje_inexistente: str
 
 
 PERFIL_PACIENTE = TipoDePerfil(
     rol=NombreRol.PACIENTE,
-    columna_perfil=Paciente.id_paciente,
-    columna_vinculo=UsuarioPaciente.id_paciente,
+    helper_de_estado="estado_del_perfil_paciente",
     crear_vinculo=_vinculo_paciente,
     mensaje_inexistente=MENSAJE_PACIENTE_INEXISTENTE,
 )
 
 PERFIL_MEDICO = TipoDePerfil(
     rol=NombreRol.MEDICO,
-    columna_perfil=Medico.id_medico,
-    columna_vinculo=UsuarioMedico.id_medico,
+    helper_de_estado="estado_del_perfil_medico",
     crear_vinculo=_vinculo_medico,
     mensaje_inexistente=MENSAJE_MEDICO_INEXISTENTE,
 )
@@ -227,20 +242,25 @@ def provisionar(
     resolve the role by name, hash, insert the account, flush for its id, insert
     the link. Nothing is committed; if anything after the first insert fails,
     the caller's rollback takes the account with it, so there is no orphan.
-    """
-    perfil = sesion_bd.execute(
-        select(tipo.columna_perfil)
-        .where(tipo.columna_perfil == id_perfil)
-        .with_for_update(key_share=True)
-    ).scalar_one_or_none()
-    if perfil is None:
-        raise PerfilInexistente(tipo.mensaje_inexistente)
 
-    ya_vinculado = sesion_bd.execute(
-        select(tipo.columna_vinculo).where(tipo.columna_vinculo == id_perfil)
-    ).first()
-    if ya_vinculado is not None:
+    **The first two steps are one call.** ``seguridad.estado_del_perfil_*`` runs
+    as its own NOLOGIN owner, takes the same ``FOR NO KEY UPDATE`` this code used
+    to take, and answers with a single word. It returns no column of the profile
+    and no column of the bridge, so the account that calls it learns exactly what
+    it needs to provision and nothing it could enumerate with.
+
+    Anything other than ``disponible`` or ``vinculado`` becomes the same 404 as a
+    missing profile. ``sin_autorizacion`` lands there too: a caller without the
+    administrative context has no standing to be told whether the row exists.
+    """
+    estado = sesion_bd.execute(
+        select(getattr(func.seguridad, tipo.helper_de_estado)(id_perfil))
+    ).scalar_one()
+
+    if estado == ESTADO_VINCULADO:
         raise PerfilYaVinculado()
+    if estado != ESTADO_DISPONIBLE:
+        raise PerfilInexistente(tipo.mensaje_inexistente)
 
     email_canonico = canonizar_email(email)
     en_uso = sesion_bd.execute(

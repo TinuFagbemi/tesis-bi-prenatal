@@ -327,7 +327,15 @@ def test_el_422_de_la_ingesta_conserva_su_contrato(prefijo):
     El valor marcador aparece en la respuesta a proposito: es la prueba de que
     el contrato 422 que SCRUM-62 definio sigue exactamente igual.
     """
+    # Desde SCRUM-98 la ruta resuelve ademas el contexto clinico contra
+    # PostgreSQL. Aqui no hay base, y lo que esta prueba mide es el cuerpo del
+    # 422, asi que se entrega un contexto ya resuelto; el cuerpo se valida
+    # despues de las dependencias, que es justo el orden que se quiere fijar.
+    from app.api.v1 import sesiones as router_sesiones
+    from tests.conftest import contexto_de_prueba
+
     app.dependency_overrides[usuario_actual] = principal_de_prueba
+    app.dependency_overrides[router_sesiones.EXIGIR_PACIENTE] = contexto_de_prueba
     try:
         cliente = TestClient(app, root_path=prefijo)
         respuesta = cliente.post(

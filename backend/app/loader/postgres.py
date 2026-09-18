@@ -28,6 +28,7 @@ from sqlalchemy import Column, Table, func, insert, select, text, tuple_
 from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.exc import ArgumentError
 
+from app.config import AMBIENTES_PERMITIDOS as AMBIENTES_PERMITIDOS_CONFIG
 from app.loader.dataset import (
     ORDEN_DE_CARGA,
     TABLA_DE_LECTURAS,
@@ -45,7 +46,9 @@ from app.loader.dataset import (
 
 # Environments the loader is allowed to write to. Anything else -- production
 # above all -- is refused before a connection is even attempted.
-AMBIENTES_PERMITIDOS = frozenset({"development", "test", "ci"})
+# Definido en ``app.config``, junto a ``app_env``. Se reexporta aquí, y desde
+# ``app.loader``, para que quien ya lo importaba siga encontrándolo.
+AMBIENTES_PERMITIDOS = AMBIENTES_PERMITIDOS_CONFIG
 
 MOTOR_REQUERIDO = "postgresql"
 

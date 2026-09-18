@@ -254,21 +254,25 @@ def test_la_autorizacion_va_antes_que_la_clave_de_idempotencia(ingesta):
     assert respuesta.status_code == HTTPStatus.FORBIDDEN
 
 
-def test_la_ingesta_no_correlaciona_todavia_al_paciente_con_su_embarazo(ingesta):
-    """Limitacion declarada de SCRUM-70, y por eso esta escrita como prueba.
+def test_la_ingesta_ya_correlaciona_al_paciente_con_su_embarazo(ingesta):
+    """El hueco que SCRUM-70 declaraba, cerrado por SCRUM-98.
 
-    Una cuenta PACIENTE cualquiera puede enviar un paquete de cualquier
-    ``id_embarazo``. Es exactamente el hueco que SCRUM-71 viene a cerrar, y
-    dejarlo documentado aqui evita que alguien lea el 201 como una garantia de
-    propiedad que no existe.
+    Hasta esta subfase una cuenta PACIENTE cualquiera podia enviar un paquete de
+    cualquier ``id_embarazo`` y recibir 201. Ahora la ruta comprueba la
+    propiedad antes de reclamar la clave, y un embarazo ajeno responde el mismo
+    404 que uno inexistente.
     """
-    como, _ = ingesta
+    como, sesion = ingesta
+    sesion.id_paciente = 9_000_101
     ajeno = paquete()
     ajeno["id_embarazo"] = 999_001
+    # El doble deja de reconocer el embarazo como propio.
+    sesion.embarazo_propio = False
 
     respuesta = como(NombreRol.PACIENTE).post(RUTA_INGESTA, json=ajeno)
 
-    assert respuesta.status_code == HTTPStatus.CREATED
+    assert respuesta.status_code == HTTPStatus.NOT_FOUND
+    assert sesion.inserts == 0, "no debe reclamarse la clave de un embarazo ajeno"
 
 
 # ---------------------------------------------------------------------------
@@ -379,11 +383,18 @@ def test_la_guardia_de_la_ingesta_admite_solo_paciente():
     aplicacion = FastAPI()
 
     @aplicacion.get("/sonda")
-    def sonda(principal: PrincipalAutenticado = Depends(EXIGIR_PACIENTE)) -> dict:
-        return {"rol": principal.rol.value}
+    def sonda(contexto=Depends(EXIGIR_PACIENTE)) -> dict:
+        return {"rol": contexto.rol.value}
 
     auditoria = SesionDeCuentas()
     aplicacion.dependency_overrides[get_db_auditoria] = lambda: auditoria
+    # Desde SCRUM-98 la guardia resuelve ademas el contexto clinico, asi que
+    # necesita una sesion. Se da un doble: lo que esta prueba mide es que roles
+    # pasan, no de donde sale el perfil.
+    from app.db.session import get_db
+    from tests.test_ingestion_api import SesionFalsa
+
+    aplicacion.dependency_overrides[get_db] = lambda: SesionFalsa()
 
     permitidos = set()
     for rol in NombreRol:

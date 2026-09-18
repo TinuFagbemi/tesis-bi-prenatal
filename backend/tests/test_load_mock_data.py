@@ -687,8 +687,10 @@ def test_el_cli_ejecuta_el_preflight_antes_de_abrir_la_transaccion(monkeypatch):
         return _resultado(0, 0)
 
     monkeypatch.setattr(settings, "app_env", "development")
-    monkeypatch.setattr(
-        settings, "database_url", "postgresql+psycopg://u:c@localhost:5432/base"
+    # Desde SCRUM-98 el cargador toma ALEMBIC_DATABASE_URL: es mantenimiento, no
+    # runtime, y la credencial restringida de la API no puede escribir el dataset.
+    monkeypatch.setenv(
+        "ALEMBIC_DATABASE_URL", "postgresql+psycopg://u:c@localhost:5432/base"
     )
     monkeypatch.setattr(cli, "leer_dataset", falso_leer)
     monkeypatch.setattr(cli, "validar_dataset", falsa_validacion)
@@ -980,6 +982,11 @@ def test_el_cli_termina_con_codigo_distinto_de_cero_ante_un_error(
         raise AssertionError("no debió construirse ningún engine")
 
     monkeypatch.setattr(settings, "app_env", "development")
+    # La URL se aporta para que lo que se ejercite sea el archivo ausente y no
+    # la guardia de configuracion, que corre antes y tiene sus propias pruebas.
+    monkeypatch.setenv(
+        "ALEMBIC_DATABASE_URL", "postgresql+psycopg://u:c@localhost:5432/base"
+    )
     monkeypatch.setattr(cli, "create_engine", explotar)
 
     assert cli.main([str(tmp_path / "no_existe.json")]) == 1

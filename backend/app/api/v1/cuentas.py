@@ -52,7 +52,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Request
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.api.dependencias import MENSAJE_ERROR_INTERNO, exigir_roles
+from app.api.dependencias import MENSAJE_ERROR_INTERNO, exigir_contexto_de_rol
 from app.db.session import get_db
 from app.models.enums import NombreRol
 from app.schemas.cuentas import (
@@ -74,8 +74,8 @@ from app.services.cuentas import (
     PerfilInexistente,
     PerfilYaVinculado,
 )
+from app.services.contexto import ContextoClinico
 from app.services.errores import diagnostico_seguro
-from app.services.principal import PrincipalAutenticado
 from app.services.tokens import ID_USUARIO_MAXIMO
 
 registrador = logging.getLogger(__name__)
@@ -94,7 +94,19 @@ RUTAS_CON_CREDENCIALES_DE_CUENTAS = frozenset(
 )
 
 # ``usuario``, the table the target rows belong to -- also what a denial names.
-EXIGIR_ADMIN = exigir_roles(NombreRol.ADMIN, entidad=auditoria.ENTIDAD_USUARIO)
+#
+# **The guard also installs the clinical context (SCRUM-98).** Checking the role
+# is no longer enough on its own: every statement these routes run goes to
+# PostgreSQL under ``fetalalert_api``, and the provisioning path crosses two
+# places that need the identity in the transaction -- the ``WITH CHECK`` of
+# ``pol_provision`` on both bridges, which asks ``seguridad.es_admin()``, and the
+# ``seguridad.estado_del_perfil_*`` helper, which refuses without it. Guarding
+# the role without installing the context left both of them looking at a
+# transaction with no identity: the INSERT was rejected and the helper answered
+# ``sin_autorizacion``, so provisioning failed for every administrator.
+EXIGIR_ADMIN = exigir_contexto_de_rol(
+    NombreRol.ADMIN, entidad=auditoria.ENTIDAD_USUARIO
+)
 
 # The three identifiers are PostgreSQL INTEGER keys. Bounding them in the path
 # turns an impossible id into a 422 instead of a driver error.
@@ -202,7 +214,7 @@ RESPUESTAS_DE_PROVISION = {
 def _provisionar(
     sesion_bd: Session,
     peticion: Request,
-    principal: PrincipalAutenticado,
+    contexto: ContextoClinico,
     entrada: ProvisionEntrada,
     *,
     tipo: servicio_cuentas.TipoDePerfil,
@@ -220,7 +232,7 @@ def _provisionar(
         auditoria.registrar(
             sesion_bd,
             accion,
-            id_usuario=principal.id_usuario,
+            id_usuario=contexto.id_usuario,
             ip_origen=_origen(peticion),
             nombre_entidad=auditoria.ENTIDAD_USUARIO,
             id_entidad=str(cuenta.id_usuario),
@@ -245,14 +257,14 @@ def provisionar_cuenta_paciente(
     entrada: ProvisionEntrada,
     peticion: Request,
     id_paciente: int = Path(ge=1, le=IDENTIFICADOR_MAXIMO),
-    principal: PrincipalAutenticado = Depends(EXIGIR_ADMIN),
+    contexto: ContextoClinico = Depends(EXIGIR_ADMIN),
     sesion_bd: Session = Depends(get_db),
 ) -> CuentaPacienteProvisionada:
     """Create the one PACIENTE account of an existing, still unlinked patient."""
     cuenta = _provisionar(
         sesion_bd,
         peticion,
-        principal,
+        contexto,
         entrada,
         tipo=servicio_cuentas.PERFIL_PACIENTE,
         id_perfil=id_paciente,
@@ -278,14 +290,14 @@ def provisionar_cuenta_medico(
     entrada: ProvisionEntrada,
     peticion: Request,
     id_medico: int = Path(ge=1, le=IDENTIFICADOR_MAXIMO),
-    principal: PrincipalAutenticado = Depends(EXIGIR_ADMIN),
+    contexto: ContextoClinico = Depends(EXIGIR_ADMIN),
     sesion_bd: Session = Depends(get_db),
 ) -> CuentaMedicoProvisionada:
     """Create the one MEDICO account of an existing, still unlinked physician."""
     cuenta = _provisionar(
         sesion_bd,
         peticion,
-        principal,
+        contexto,
         entrada,
         tipo=servicio_cuentas.PERFIL_MEDICO,
         id_perfil=id_medico,
@@ -325,7 +337,7 @@ def cambiar_estado_de_cuenta(
     entrada: EstadoCuentaEntrada,
     peticion: Request,
     id_usuario: int = Path(ge=1, le=IDENTIFICADOR_MAXIMO),
-    principal: PrincipalAutenticado = Depends(EXIGIR_ADMIN),
+    contexto: ContextoClinico = Depends(EXIGIR_ADMIN),
     sesion_bd: Session = Depends(get_db),
 ) -> EstadoCuentaSalida:
     """Deactivate or reactivate the same account. Nothing is deleted, ever.
@@ -345,7 +357,7 @@ def cambiar_estado_de_cuenta(
         auditoria.registrar(
             sesion_bd,
             AccionAuditada.CUENTA_REACTIVADA if estado.activo else AccionAuditada.CUENTA_DESACTIVADA,
-            id_usuario=principal.id_usuario,
+            id_usuario=contexto.id_usuario,
             ip_origen=_origen(peticion),
             nombre_entidad=auditoria.ENTIDAD_USUARIO,
             id_entidad=str(estado.id_usuario),

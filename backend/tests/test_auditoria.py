@@ -49,9 +49,19 @@ class SesionDeAuditoria:
         self.commits = 0
         self.rollbacks = 0
 
-    def add(self, entidad) -> None:
-        self.agregados.append(entidad)
-        self.pasos.append("add")
+    def execute(self, sentencia, parametros=None):
+        """El servicio inserta con el nucleo, no con el ORM.
+
+        Un INSERT del ORM vuelve con ``RETURNING id_log``, y eso exige SELECT
+        sobre la traza -- que la credencial de la API no tiene ni debe tener.
+
+        El doble materializa los valores de la sentencia en una instancia del
+        modelo para que las pruebas sigan afirmando sobre *lo que se escribe*,
+        que es lo que importa, y no sobre la forma del INSERT.
+        """
+        self.agregados.append(AuditoriaLog(**(parametros or {})))
+        self.pasos.append("execute")
+        return None
 
     def flush(self) -> None:
         self.pasos.append("flush")
@@ -78,8 +88,13 @@ def sesion() -> SesionDeAuditoria:
 # ---------------------------------------------------------------------------
 
 
-def test_el_catalogo_tiene_exactamente_ocho_acciones():
-    """Las cuatro de SCRUM-70 y las cuatro del ciclo de cuentas de SCRUM-97."""
+def test_el_catalogo_tiene_exactamente_diez_acciones():
+    """Cuatro de SCRUM-70, cuatro del ciclo de cuentas de SCRUM-97 y dos de SCRUM-98.
+
+    El conjunto se escribe entero y no se cuenta: lo que vigila es que nadie
+    anada un codigo sin decidir en que transaccion se escribe ni quien puede
+    leerlo, y un ``len()`` no obligaria a esa decision.
+    """
     assert {a.value for a in AccionAuditada} == {
         "LOGIN_EXITOSO",
         "LOGIN_FALLIDO",
@@ -89,6 +104,14 @@ def test_el_catalogo_tiene_exactamente_ocho_acciones():
         "CUENTA_MEDICO_PROVISIONADA",
         "CUENTA_DESACTIVADA",
         "CUENTA_REACTIVADA",
+        # SCRUM-98: una cuenta autenticada cuyo rol clinico no resuelve a un
+        # perfil. Se escribe en transaccion propia, porque el handler que
+        # bloquea no llega a ejecutarse.
+        "CONTEXTO_CLINICO_AUSENTE",
+        # SCRUM-98 subfase 4: una cuenta autenticada que pidio un recurso
+        # clinico que no puede leer. Tambien en transaccion propia, y por la
+        # misma razon: la lectura que bloquea no llega a ocurrir.
+        "ACCESO_CLINICO_DENEGADO",
     }
 
 
@@ -171,7 +194,7 @@ def test_registrar_no_confirma_ni_revierte(sesion):
 
     assert sesion.commits == 0
     assert sesion.rollbacks == 0
-    assert sesion.pasos == ["add", "flush"]
+    assert sesion.pasos == ["execute", "flush"]
 
 
 def test_registrar_hace_flush_para_que_el_fallo_salga_aqui(sesion):
@@ -243,7 +266,7 @@ def test_registrar_con_commit_confirma(sesion):
     )
 
     assert sesion.commits == 1
-    assert sesion.pasos == ["add", "flush", "commit"]
+    assert sesion.pasos == ["execute", "flush", "commit"]
 
 
 def test_un_fallo_revierte_y_se_reporta():
@@ -338,6 +361,8 @@ def test_la_creacion_se_audita_antes_del_commit(ingesta):
     respuesta = cliente.post("/api/v1/sesiones-monitoreo", json=paquete())
 
     assert respuesta.status_code == 201
+    # ``SesionFalsa`` conserva el nombre ``add`` para este paso: la fila de
+    # auditoria se anade aqui, aunque el servicio la inserte con el nucleo.
     assert sesion.pasos.index("add") < sesion.pasos.index("commit")
     assert len(sesion.agregados) == 1
     assert sesion.agregados[0].accion == "SESION_MONITOREO_REGISTRADA"

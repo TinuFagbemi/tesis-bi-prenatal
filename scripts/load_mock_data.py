@@ -5,8 +5,17 @@ Uso desde la raíz del repositorio::
     python scripts/load_mock_data.py                 # data/generated/dataset_fetalalert.json
     python scripts/load_mock_data.py otra/ruta.json  # archivo alternativo de prueba
 
-La conexión sale de la configuración del proyecto (``DATABASE_URL``). Nunca se
-recibe por argumento, nunca se imprime y nunca aparece en un mensaje de error.
+La conexión sale de ``ALEMBIC_DATABASE_URL``, no de ``DATABASE_URL`` (SCRUM-98).
+Cargar el dataset simulado es una operación de mantenimiento: escribe en las
+tablas clínicas, y desde que esas tablas llevan seguridad por filas la
+credencial restringida de la API no puede -- ni debe poder -- hacerlo. Es la
+misma credencial que ejecuta las migraciones, y el mismo rol que la policy de
+mantenimiento admite. Se ejecuta a mano, fuera del proceso web, que nunca recibe
+esa variable.
+
+No hay respaldo a ``DATABASE_URL``: si la variable falta, el cargador se
+detiene. Nunca se recibe por argumento, nunca se imprime y nunca aparece en un
+mensaje de error.
 
 Requisitos previos: PostgreSQL en marcha, la base en ``alembic upgrade head`` y
 el dataset ya generado con ``python scripts/generate_mock_data.py``. Este
@@ -27,7 +36,12 @@ sys.path.insert(0, str(RAIZ_DEL_REPOSITORIO / "backend"))
 from sqlalchemy import create_engine  # noqa: E402  -- tras ajustar sys.path
 from sqlalchemy.exc import SQLAlchemyError  # noqa: E402
 
-from app.config import settings  # noqa: E402
+from app.config import (  # noqa: E402
+    VARIABLE_URL_ALEMBIC,
+    UrlDeEntornoInvalida,
+    exigir_url_de_entorno,
+    settings,
+)
 from app.loader import (  # noqa: E402
     RUTA_POR_DEFECTO,
     ErrorDeCarga,
@@ -38,7 +52,6 @@ from app.loader import (  # noqa: E402
     sanear_mensaje,
     validar_dataset,
     verificar_ambiente,
-    verificar_url,
 )
 
 CODIGO_DE_EXITO = 0
@@ -79,13 +92,13 @@ def main(argv: list[str] | None = None) -> int:
         # Las dos guardias corren antes de construir el engine: una URL errónea
         # no debe llegar a crear nada antes de ser rechazada.
         verificar_ambiente(settings.app_env)
-        verificar_url(settings.database_url)
+        url = exigir_url_de_entorno(VARIABLE_URL_ALEMBIC)
 
         # Validar antes de abrir la transacción: un archivo inservible no llega
         # nunca a tocar la base.
         dataset = validar_dataset(leer_dataset(argumentos.ruta))
 
-        engine = create_engine(settings.database_url)
+        engine = create_engine(url)
         try:
             # Orden aprobado: validación -> preflight -> transacción -> carga.
             # El preflight de Alembic ocurre en su propia conexión, fuera de la
@@ -106,6 +119,10 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             engine.dispose()
 
+    except UrlDeEntornoInvalida as error:
+        # El mensaje ya viene saneado y nunca repite el valor rechazado.
+        print(f"Error: {error}", file=sys.stderr)
+        return CODIGO_DE_ERROR
     except ErrorDeCarga as error:
         print(f"Error: {sanear_mensaje(str(error))}", file=sys.stderr)
         return CODIGO_DE_ERROR

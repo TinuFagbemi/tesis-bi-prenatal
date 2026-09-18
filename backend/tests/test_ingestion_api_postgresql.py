@@ -73,6 +73,8 @@ from sqlalchemy.orm import Session
 from app.api.v1.sesiones import CABECERA_IDEMPOTENCIA
 from app.db.session import get_db
 from app.api.dependencias import usuario_actual
+from app.api.v1 import sesiones as router_sesiones
+from app.services.contexto import ContextoClinico
 from app.models.catalogos import Rol
 from app.models.enums import NombreRol
 from app.models.seguridad import Usuario
@@ -260,6 +262,14 @@ def sesion_de_pruebas(conexion_revertida):
 # ---------------------------------------------------------------------------
 # Referencias preexistentes: el endpoint no crea ninguna
 # ---------------------------------------------------------------------------
+
+
+# Perfil clinico que la identidad de la suite dice tener en cada prueba. Lo fija
+# la fabrica de ``Referencias``, porque es ella quien decide a que paciente
+# pertenece el embarazo que el paquete va a referenciar. Desde SCRUM-98 la ruta
+# comprueba esa propiedad antes de reclamar la clave, asi que sin esto todos los
+# paquetes responderian el 404 de un embarazo ajeno.
+_PERFIL_DE_LA_SUITE: dict[str, int | None] = {"id_paciente": None}
 
 
 @dataclass(frozen=True)
@@ -462,6 +472,7 @@ def referencias(conexion_revertida) -> Referencias:
         fecha_fin=None,
     )
 
+    _PERFIL_DE_LA_SUITE["id_paciente"] = id_paciente
     return Referencias(
         id_clinica=id_clinica,
         id_paciente=id_paciente,
@@ -1780,6 +1791,7 @@ def _referencias_para(conexion) -> Referencias:
         fecha_inicio=FECHA_INICIO_EMBARAZO,
         fecha_fin=None,
     )
+    _PERFIL_DE_LA_SUITE["id_paciente"] = id_paciente
     return Referencias(
         id_clinica=id_clinica,
         id_paciente=id_paciente,
@@ -1896,8 +1908,28 @@ def identidad_de_la_suite():
         visto["principal"] = principal
         return principal
 
+    def contexto_de_la_suite(
+        principal: PrincipalAutenticado = Depends(usuario_actual),
+    ) -> ContextoClinico:
+        """El perfil clinico de esa identidad, ya resuelto.
+
+        Se sustituye la dependencia y no la resolucion: la identidad sigue
+        siendo la cuenta real que la suite creo, y el perfil el de la paciente
+        dueña del embarazo que cada prueba referencia. Lo que se evita es
+        depender de un vinculo usuario_paciente que estas pruebas no crean; el
+        aislamiento real, con vinculos de verdad, vive en
+        ``test_rls_postgresql.py``.
+        """
+        return ContextoClinico(
+            id_usuario=principal.id_usuario,
+            rol=NombreRol.PACIENTE,
+            id_paciente=_PERFIL_DE_LA_SUITE["id_paciente"],
+        )
+
     app.dependency_overrides[usuario_actual] = principal_de_la_suite
+    app.dependency_overrides[router_sesiones.EXIGIR_PACIENTE] = contexto_de_la_suite
     try:
         yield visto
     finally:
         app.dependency_overrides.pop(usuario_actual, None)
+        app.dependency_overrides.pop(router_sesiones.EXIGIR_PACIENTE, None)

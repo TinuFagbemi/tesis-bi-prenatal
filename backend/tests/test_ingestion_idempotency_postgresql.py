@@ -66,6 +66,7 @@ from app.models.seguridad import AuditoriaLog, Usuario, UsuarioPaciente
 # La identidad PACIENTE de la suite se define una sola vez, en el modulo
 # de SCRUM-62, junto a la transaccion revertida de la que depende.
 from tests.test_ingestion_api_postgresql import (  # noqa: F401
+    _PERFIL_DE_LA_SUITE,
     EMAIL_IDENTIDAD_DE_LA_SUITE,
     _crear_usuario,
     identidad_de_la_suite,
@@ -87,7 +88,10 @@ from app.services.idempotencia import (
     huella_del_paquete,
 )
 from app.schemas.monitoreo import SesionMonitoreoEntrada
-from tests.conftest import construir_config_alembic
+from tests.conftest import (
+    construir_config_alembic,
+    url_del_migrador,
+)
 from tests.test_migration_postgresql import NOMBRE_DE_BASE_REQUERIDO
 
 # Fixtures y ayudantes de SCRUM-62, reutilizados tal cual. ``engine_de_pruebas``
@@ -299,7 +303,7 @@ def ciclo_de_la_revision(engine_de_pruebas, url_de_pruebas):
     with pytest.MonkeyPatch.context() as parche:
         # alembic/env.py resuelve la URL desde settings, no desde el Config: esto
         # es lo que de verdad mantiene el ciclo lejos de la base de desarrollo.
-        parche.setattr(settings, "database_url", url_de_pruebas)
+        parche.setenv("ALEMBIC_DATABASE_URL", url_del_migrador(url_de_pruebas))
 
         # The target is named, not relative: «-1» would now revert the analytic
         # revision that sits on top, and this cycle is about SCRUM-63's. Going
@@ -1007,13 +1011,24 @@ def test_la_respuesta_de_colision_no_nombra_la_restriccion(colision):
 # La coreografía usa un candado que el propio endpoint toma sin saberlo, así que
 # no hay ni un hook de prueba en el código productivo:
 #
-#   1. Una conexión de control toma ``LOCK TABLE operacional.embarazo IN ACCESS
-#      EXCLUSIVE MODE``. Ese modo entra en conflicto con el ACCESS SHARE que toma
-#      cualquier ``SELECT``.
-#   2. La solicitud A entra: consulta la vía rápida y **reclama la clave** -- la
-#      tabla de idempotencia no está bloqueada --, y queda detenida en el primer
-#      ``SELECT`` de ``verificar_referencias``, que lee ``embarazo``. Su
-#      transacción sigue abierta, con la reclamación tomada y sin confirmar.
+#   1. Una conexión de control toma ``LOCK TABLE operacional.dispositivo IN
+#      ACCESS EXCLUSIVE MODE``. Ese modo entra en conflicto con el ACCESS SHARE
+#      que toma cualquier ``SELECT``.
+#
+#      **Por qué ``dispositivo`` y no ``embarazo``.** Desde SCRUM-98 el endpoint
+#      comprueba la propiedad PACIENTE→embarazo *antes* de reclamar la clave, de
+#      modo que un candado sobre ``embarazo`` detendría a las dos solicitudes en
+#      ese punto previo: A no llegaría a reclamar nada, y B quedaría bloqueada
+#      por el control en vez de por A -- justo la evidencia que estas pruebas
+#      existen para producir. La coreografía necesita un punto de parada
+#      *posterior* a la reclamación, y ``dispositivo`` lo es: ninguna
+#      comprobación anterior lo lee, y ``verificar_referencias`` lo consulta
+#      inmediatamente después.
+#   2. La solicitud A entra: resuelve su contexto, comprueba la propiedad del
+#      embarazo y **reclama la clave** -- la tabla de idempotencia no está
+#      bloqueada --, y queda detenida en el ``SELECT`` que
+#      ``verificar_referencias`` hace sobre ``dispositivo``. Su transacción sigue
+#      abierta, con la reclamación tomada y sin confirmar.
 #   3. La solicitud B entra con la misma clave y queda detenida en su
 #      ``INSERT ... ON CONFLICT``, bloqueada por la entrada no confirmada de A en
 #      el índice único.
@@ -1025,6 +1040,12 @@ def test_la_respuesta_de_colision_no_nombra_la_restriccion(colision):
 # sondean condiciones observables con intervalos breves y un deadline. Si la
 # condición no se cumple, la prueba falla por tiempo agotado en vez de continuar
 # a ciegas.
+
+# La tabla que el control bloquea para congelar a la ganadora. Ver el paso 1 de
+# arriba: tiene que ser una tabla que el endpoint lea **después** de reclamar la
+# clave y que ninguna comprobación previa toque. No lleva RLS, así que el rol de
+# la aplicación la alcanza y el candado es lo único que la detiene.
+TABLA_DEL_CANDADO = "dispositivo"
 
 TIEMPO_MAXIMO_DE_ESPERA = 20.0
 INTERVALO_DE_SONDEO = 0.02
@@ -1234,6 +1255,11 @@ def entorno_concurrente(engine_de_pruebas, url_de_pruebas, request):
             fecha_inicio=FECHA_INICIO_EMBARAZO,
             fecha_fin=None,
         )
+        # El perfil de la identidad de la suite: desde SCRUM-98 la ruta comprueba
+        # que el embarazo del paquete sea de la paciente conectada antes de
+        # reclamar la clave, asi que la identidad debe ser la duena de estos
+        # embarazos o todos los paquetes responderian 404.
+        _PERFIL_DE_LA_SUITE["id_paciente"] = id_paciente
         referencias_creadas = Referencias(
             id_clinica=id_clinica,
             id_paciente=id_paciente,
@@ -1448,16 +1474,19 @@ def correr_carrera(entorno: EntornoConcurrente, cuerpo_a, cuerpo_b) -> Carrera:
     a, b = entorno.participantes
     observador = entorno.observador
 
-    # 1. El control detiene cualquier lectura de 'embarazo'.
+    # 1. El control detiene cualquier lectura de la tabla del candado.
     entorno.control.execute(
-        text(f"LOCK TABLE {SCHEMA_OPERACIONAL}.embarazo IN ACCESS EXCLUSIVE MODE")
+        text(
+            f"LOCK TABLE {SCHEMA_OPERACIONAL}.{TABLA_DEL_CANDADO} "
+            f"IN ACCESS EXCLUSIVE MODE"
+        )
     )
 
     ejecutor = ThreadPoolExecutor(max_workers=2)
     try:
         futuro_a = ejecutor.submit(enviar, a, cuerpo_a, entorno.clave)
 
-        # 2. A reclamó la clave y quedó detenida al leer 'embarazo'.
+        # 2. A reclamó la clave y quedó detenida al leer la tabla del candado.
         pid_a = esperar_a(
             lambda: pid_de(observador, a.nombre),
             "que la solicitud A abra su conexión",

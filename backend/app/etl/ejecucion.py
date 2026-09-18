@@ -35,9 +35,11 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import SQLAlchemyError
+
+from app.db.base import SCHEMA_OPERACIONAL
 
 from app.etl import carga, conciliacion, extraccion, transformacion
 from app.etl.carga import CargaInconsistente, ResultadoUpsert
@@ -111,6 +113,113 @@ class ResultadoEjecucion:
     hechos_existentes: int
     informe: InformeDeConciliacion
     duracion_s: float
+
+
+# Tablas del universo operacional que el ETL extrae. La lista vive aqui porque
+# es la que hay que auditar, no la que hay que leer: la extraccion las nombra por
+# su cuenta.
+TABLAS_DE_ORIGEN = (
+    "clinica", "embarazo", "embarazo_factor_riesgo", "especialidad",
+    "factor_riesgo", "lectura_biometrica", "medico", "medico_clinica",
+    "paciente", "seguimiento_clinico", "semaforo", "sesion_monitoreo",
+    "telefono_medico", "telefono_paciente", "tiempo_gestacional",
+)
+
+
+class OrigenPodriaFiltrarse(ErrorDeEtl):
+    """Alguna tabla de origen podria devolver menos filas de las que tiene."""
+
+
+# Forma que debe tener la proteccion de cada tabla de origen para que el ETL
+# lea el universo completo. Se lee del catalogo, no de los datos.
+_FORMA_DE_LAS_POLITICAS = text(
+    """
+    SELECT c.relname AS tabla,
+           c.relrowsecurity AS con_rls,
+           count(*) FILTER (
+               WHERE p.polpermissive
+                 AND p.polcmd IN ('r', '*')
+                 AND pg_catalog.pg_get_expr(p.polqual, p.polrelid) IS NOT DISTINCT FROM 'true'
+                 AND EXISTS (
+                     SELECT 1 FROM unnest(p.polroles) AS r(oid)
+                     WHERE r.oid = 0 OR pg_has_role(current_user, r.oid, 'USAGE')
+                 )
+           ) AS permisivas_totales,
+           count(*) FILTER (
+               WHERE NOT p.polpermissive
+                 AND p.polcmd IN ('r', '*')
+                 AND EXISTS (
+                     SELECT 1 FROM unnest(p.polroles) AS r(oid)
+                     WHERE r.oid = 0 OR pg_has_role(current_user, r.oid, 'USAGE')
+                 )
+           ) AS restrictivas
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    LEFT JOIN pg_policy p ON p.polrelid = c.oid
+    WHERE n.nspname = :esquema AND c.relname = ANY(:tablas)
+    GROUP BY c.relname, c.relrowsecurity
+    """
+)
+
+
+def verificar_lectura_completa(conexion: Connection) -> None:
+    """Aborta si alguna tabla de origen pudiera entregar un subconjunto.
+
+    **Por que no basta con la conciliacion.** El informe compara ``operacional``
+    con ``analitico`` dentro de la misma transaccion. Si una politica filtrara
+    el origen, la carga base escribiria ese mismo subconjunto y las dos consultas
+    coincidirian: cero discrepancias, cero datos y el ETL terminando en verde.
+    Lo que se comprueba aqui no son filas, es la configuracion -- que es donde
+    vive ese fallo.
+
+    **Por que es una demostracion y no una heuristica.** PostgreSQL combina las
+    politicas permisivas con OR y las restrictivas con AND. Una permisiva cuyo
+    qualifier sea literalmente ``true``, aplicable a este rol, sin ninguna
+    restrictiva aplicable, implica que ninguna fila puede ocultarse. Una tabla
+    sin RLS tampoco puede ocultar nada.
+
+    Se consideran aplicables las politicas dirigidas a ``PUBLIC`` (OID 0) y las
+    dirigidas a cualquier rol que este usuario herede, no solo las que lleven su
+    nombre: una membresia tambien alcanza.
+
+    No lee una sola fila de negocio.
+    """
+    filas = conexion.execute(
+        _FORMA_DE_LAS_POLITICAS,
+        {"esquema": SCHEMA_OPERACIONAL, "tablas": list(TABLAS_DE_ORIGEN)},
+    ).mappings().all()
+
+    vistas = {fila["tabla"] for fila in filas}
+    ausentes = sorted(set(TABLAS_DE_ORIGEN) - vistas)
+    if ausentes:
+        raise OrigenPodriaFiltrarse(
+            "No se encontraron en el catalogo las tablas de origen "
+            + ", ".join(ausentes)
+            + ". El ETL no puede afirmar que lee el universo completo."
+        )
+
+    problemas = []
+    for fila in filas:
+        if not fila["con_rls"]:
+            continue
+        if fila["restrictivas"]:
+            problemas.append(
+                f"{fila['tabla']} tiene {fila['restrictivas']} politica(s) "
+                "restrictiva(s) aplicables a este rol"
+            )
+        elif not fila["permisivas_totales"]:
+            problemas.append(
+                f"{fila['tabla']} tiene RLS y ninguna politica permisiva con "
+                "qualifier 'true' aplicable a este rol"
+            )
+
+    if problemas:
+        raise OrigenPodriaFiltrarse(
+            "El ETL podria estar leyendo un subconjunto: "
+            + "; ".join(problemas)
+            + ". Se aborta antes de extraer: una carga incompleta que concilia "
+            "consigo misma terminaria en verde."
+        )
 
 
 def _tomar_candado(conexion: Connection) -> None:
@@ -192,6 +301,10 @@ def ejecutar_etl(
         # rolls the transaction back, and the lock goes with it.
         with conexion.begin():
             _tomar_candado(conexion)
+            # Despues del candado -- que sigue siendo la primera sentencia -- y
+            # antes de extraer: si el rol pudiera ver menos de lo que hay, la
+            # carga entera seria un subconjunto silencioso.
+            verificar_lectura_completa(conexion)
             revision, resultados, bridge, nuevos, existentes, informe = _cargar(
                 conexion, version=version
             )

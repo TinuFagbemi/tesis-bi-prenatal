@@ -45,7 +45,7 @@ from tests.test_models import ONDELETE_ESPERADOS, TABLAS_ESPERADAS
 # SCRUM-69 adds the third, the analytic schema, which touches nothing here.
 # SCRUM-97 adds the fourth: ck_usuario_email_canonico and the role/link
 # triggers, on tables that already existed.
-CANTIDAD_DE_REVISIONES_ESPERADA = 4
+CANTIDAD_DE_REVISIONES_ESPERADA = 5
 
 # Shape of the deployed schema, pinned so a silent drift in either the models or
 # the revisions fails here. UNIQUE went from 18 to 17 when the 1:1 between
@@ -62,7 +62,9 @@ CANTIDADES_ESPERADAS = {
     "on_delete_cascade": 10,
     "unique": 18,
     "check": 31,
-    "indices": 13,
+    # 14 desde SCRUM-98: ix_lectura_biometrica_id_sesion, que la politica de
+    # esa tabla necesita y que la cascada del borrado tampoco tenia.
+    "indices": 14,
 }
 
 CREATE_TABLE = re.compile(
@@ -285,7 +287,8 @@ def test_el_esquema_se_crea_antes_que_cualquier_tabla(sql_upgrade):
 def test_el_esquema_no_adopta_uno_preexistente(sql_upgrade):
     """Without IF NOT EXISTS the migration refuses to reuse an unknown schema."""
     assert "CREATE SCHEMA IF NOT EXISTS" not in sql_upgrade
-    assert sql_upgrade.count("CREATE SCHEMA") == 1
+    # Dos desde SCRUM-98: ``operacional`` y ``seguridad``, el de los helpers.
+    assert sql_upgrade.count("CREATE SCHEMA") == 2
 
 
 # --------------------------------------------------------------------------
@@ -457,8 +460,18 @@ def test_id_sesion_conserva_su_llave_foranea_en_cascada(sql_upgrade):
     ],
 )
 def test_cantidades_de_la_estructura_desplegada(clave, patron, sql_upgrade):
-    """Pin the shape of the schema so an accidental drop or addition fails loudly."""
-    assert sql_upgrade.count(patron) == CANTIDADES_ESPERADAS[clave]
+    """Pin the shape of the schema so an accidental drop or addition fails loudly.
+
+    ``WITH CHECK (`` de las policies de SCRUM-98 contiene ``CHECK (``, y contarlo
+    mezclaria dos cosas distintas: las restricciones de columna del modelo y la
+    clausula de escritura de una politica. Se descuenta, asi que esta cifra
+    sigue describiendo lo que siempre describio.
+    """
+    encontrados = sql_upgrade.count(patron)
+    if clave == "check":
+        encontrados -= sql_upgrade.count("WITH CHECK (")
+
+    assert encontrados == CANTIDADES_ESPERADAS[clave]
 
 
 def test_las_cantidades_pinneadas_siguen_a_la_metadata():
@@ -554,7 +567,17 @@ def test_el_esquema_se_elimina_despues_de_sus_objetos(sql_downgrade):
     assert drop_schema > ultimo_drop_table
 
 
-def test_el_downgrade_no_usa_cascade(sql_downgrade):
-    """CASCADE would silently drop objects this revision never created."""
-    assert "CASCADE" not in sql_downgrade
+def test_el_downgrade_no_usa_cascade_sobre_tablas(sql_downgrade):
+    """CASCADE would silently drop objects this revision never created.
+
+    La unica excepcion es ``DROP SCHEMA seguridad CASCADE``: ese schema lo crea
+    esta cadena y no contiene nada que no haya creado ella, asi que el CASCADE
+    alcanza exactamente sus siete funciones. Sobre una tabla seguiria siendo
+    inaceptable, y por eso la prueba distingue el objeto en vez de prohibir la
+    palabra.
+    """
+    for linea in sql_downgrade.splitlines():
+        if "CASCADE" not in linea:
+            continue
+        assert "DROP SCHEMA seguridad CASCADE" in linea, linea
     assert "IF EXISTS" not in sql_downgrade
