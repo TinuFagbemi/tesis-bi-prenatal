@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>FetalAlert — Seguimiento de la gestante</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- =====================================================================
+       ENCABEZADO
+       Conserva la identidad de la interfaz original: "Bienvenida a",
+       el titulo con degradado y el eslogan. La pildora de estado ya no
+       describe un dispositivo, sino la conectividad con la API central.
+       ===================================================================== -->
+  <header>
+    <div class="logo">
+      <div class="welcome-text">Bienvenida a</div>
+      <div class="header-text">
+        <h1>FetalAlert</h1>
+        <p class="slogan">Tecnología al cuidado de tu embarazo</p>
+      </div>
+    </div>
+    <div id="connection-status" class="connection-status status-connecting">
+      Comprobando conexión…
+    </div>
+  </header>
+
+  <!-- =====================================================================
+       MENU PRINCIPAL
+       Solo visible con una sesion iniciada.
+       ===================================================================== -->
+  <nav class="main-menu" id="main-menu" hidden>
+    <a href="#inicio"    class="qa-btn" data-vista="inicio">Inicio</a>
+    <a href="#historial" class="qa-btn" data-vista="historial">Mi historial</a>
+    <a href="#manual"    class="qa-btn" data-vista="manual">Manual de uso</a>
+    <a href="#acerca"    class="qa-btn" data-vista="acerca">Acerca de FetalAlert</a>
+    <a href="#salir"     class="qa-btn" id="btn-cerrar-sesion">Cerrar sesión</a>
+  </nav>
+
+  <main>
+
+    <p class="aviso-simulado">
+      Prototipo académico de FetalAlert. Toda la información que se muestra
+      proviene de datos simulados. No es un sistema clínicamente validado y no
+      emite diagnósticos.
+    </p>
+
+    <!-- =================================================================
+         VISTA 1 — INICIO DE SESION
+         ================================================================= -->
+    <section id="vista-login" class="vista">
+      <div class="panel-login">
+        <div class="result-card">
+          <h2 class="titulo-vista">Iniciar sesión</h2>
+          <p class="texto-apoyo">
+            Accede con el correo y la contraseña de tu cuenta de FetalAlert.
+            Las cuentas las crea el personal administrador del sistema.
+          </p>
+
+          <form id="form-login" class="form-login" autocomplete="on" novalidate>
+            <label class="campo">
+              <span class="campo-etiqueta">Correo</span>
+              <input type="email" id="login-email" name="email"
+                     autocomplete="username" required
+                     placeholder="nombre@ejemplo.com">
+            </label>
+
+            <label class="campo">
+              <span class="campo-etiqueta">Contraseña</span>
+              <input type="password" id="login-password" name="password"
+                     autocomplete="current-password" required>
+            </label>
+
+            <button type="submit" id="btn-login" class="btn-primario">
+              Iniciar sesión
+            </button>
+          </form>
+
+          <p id="login-mensaje" class="mensaje-error" role="alert" hidden></p>
+
+          <p class="texto-ayuda">
+            ¿No puedes entrar? Comunícate con el personal que gestiona tu
+            seguimiento. Esta versión no ofrece registro ni recuperación de
+            contraseña.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- =================================================================
+         VISTA 2 — INICIO / PANEL PRINCIPAL
+         ================================================================= -->
+    <section id="vista-inicio" class="vista" hidden>
+
+      <h2 class="titulo-vista" id="saludo">Bienvenida</h2>
+
+      <!-- Embarazo actual ------------------------------------------------>
+      <div class="result-card bloque-embarazo">
+        <h3 class="subtitulo">Embarazo actual</h3>
+        <div class="data-row">
+          <span class="label">Estado:</span>
+          <span class="value" id="embarazo-estado">No disponible</span>
+        </div>
+        <div class="data-row">
+          <span class="label">Semana gestacional:</span>
+          <span class="value" id="embarazo-semana">No disponible</span>
+        </div>
+        <div class="data-row">
+          <span class="label">Episodios anteriores:</span>
+          <span class="value" id="embarazo-anteriores">No disponible</span>
+        </div>
+        <p class="nota-pendiente" id="nota-embarazo">
+          El contexto clínico de tu embarazo todavía no está conectado en esta
+          versión del prototipo.
+        </p>
+      </div>
+
+      <!-- Tarjetas de metricas ------------------------------------------->
+      <section class="cards">
+
+        <div class="card">
+          <h2>Frecuencia Cardíaca</h2>
+          <div class="value">
+            <span id="hr-value">—</span><span class="unit">BPM</span>
+          </div>
+          <p id="hr-status">Sin lectura</p>
+        </div>
+
+        <div class="card">
+          <h2>Saturación de Oxígeno</h2>
+          <div class="value">
+            <span id="spo2-value">—</span><span class="unit">%</span>
+          </div>
+          <p id="spo2-status">Sin lectura</p>
+        </div>
+
+        <div class="card">
+          <h2>Actividad Fetal</h2>
+          <div class="value">
+            <span id="movs-value">—</span>
+          </div>
+          <div class="movements-text">Movimientos fetales</div>
+          <p id="mov-status">Sin lectura</p>
+
+          <div class="mov-buttons">
+            <button id="btn-registrar-movimientos"
+                    class="btn-iniciar-conteo" type="button" disabled>
+              Registrar sesión de movimientos
+            </button>
+          </div>
+          <p class="texto-ayuda-conteo" id="nota-movimientos">
+            Disponible al integrar el contexto clínico autorizado.
+          </p>
+        </div>
+
+      </section>
+
+      <!-- Semaforo -------------------------------------------------------->
+      <div id="semaforo" class="alert waiting">
+        <div id="semaforo-luz" class="alert-light"></div>
+        <span id="semaforo-mensaje">Sin clasificación disponible</span>
+      </div>
+
+      <div class="semaforo">
+        <div class="semaforo-item ok">
+          <span class="alert-light"></span>
+          <span>Verde — dentro de lo esperado para el seguimiento simulado</span>
+        </div>
+        <div class="semaforo-item warning">
+          <span class="alert-light"></span>
+          <span>Ámbar — conviene repetir la medición</span>
+        </div>
+        <div class="semaforo-item error">
+          <span class="alert-light"></span>
+          <span>Rojo — comunícate con tu personal de seguimiento</span>
+        </div>
+      </div>
+
+      <!-- Estado local del nodo ------------------------------------------>
+      <div class="result-card bloque-sincronizacion">
+        <h3 class="subtitulo">Registros de este dispositivo</h3>
+        <p class="texto-apoyo">
+          Lo que se captura en este equipo se guarda aquí primero, y se envía
+          cuando hay conexión.
+        </p>
+
+        <div class="estado-local" id="estado-local">
+          <div class="estado-item">
+            <span class="estado-nombre">PENDIENTE</span>
+            <span class="estado-conteo" id="outbox-pendientes">—</span>
+          </div>
+          <div class="estado-item">
+            <span class="estado-nombre">ENVIADO</span>
+            <span class="estado-conteo" id="outbox-enviados">—</span>
+          </div>
+          <div class="estado-item">
+            <span class="estado-nombre">FALLIDO (reintentable)</span>
+            <span class="estado-conteo" id="outbox-reintentables">—</span>
+          </div>
+          <div class="estado-item">
+            <span class="estado-nombre">FALLIDO (requiere revisión)</span>
+            <span class="estado-conteo" id="outbox-revision">—</span>
+          </div>
+        </div>
+
+        <p class="nota-pendiente" id="nota-estado-local" hidden></p>
+      </div>
+
+      <!-- Ultima actualizacion -------------------------------------------->
+      <div class="last-update">
+        <p>Última lectura: <span id="last-update">—</span></p>
+        <p>Última sincronización: <span id="last-sync">—</span></p>
+      </div>
+
+    </section>
+
+    <!-- =================================================================
+         VISTA 3 — MI HISTORIAL
+         ================================================================= -->
+    <section id="vista-historial" class="vista" hidden>
+      <h2 class="titulo-vista">Mi historial</h2>
+
+      <p class="texto-apoyo">
+        Aquí aparecerán tus episodios de embarazo y las sesiones de monitoreo
+        registradas en cada uno, del más reciente al más antiguo.
+      </p>
+
+      <div class="selector-embarazo">
+        <label class="campo campo-en-linea">
+          <span class="campo-etiqueta">Embarazo</span>
+          <select id="selector-embarazo" disabled>
+            <option value="">No disponible</option>
+          </select>
+        </label>
+      </div>
+
+      <div id="historial-lista" class="historial-lista">
+        <!-- Estado vacio. Las filas se construyen en app.js a partir de lo
+             que entregue el adaptador; hoy no entrega historial clinico. -->
+        <div class="result-card estado-vacio" id="historial-vacio">
+          <h3 class="subtitulo">Todavía no hay historial que mostrar</h3>
+          <p class="texto-apoyo">
+            El historial clínico se mostrará cuando el contexto de embarazo
+            esté conectado. Esta versión del prototipo no inventa registros.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- =================================================================
+         VISTA 4 — MANUAL DE USO
+         ================================================================= -->
+    <section id="vista-manual" class="vista" hidden>
+      <h2 class="titulo-vista">Manual de uso</h2>
+
+      <div class="manual-step">
+        <div class="card">
+          <h2>1. Iniciar sesión</h2>
+          <ul>
+            <li>Escribe el correo y la contraseña de tu cuenta de FetalAlert.</li>
+            <li>La cuenta la crea el personal administrador; aquí no existe
+                registro ni creación de cuentas.</li>
+            <li>La primera vez necesitas conexión con el servidor.</li>
+            <li>Tu contraseña no se guarda en este equipo en ningún momento.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="manual-step">
+        <div class="card">
+          <h2>2. Inicio</h2>
+          <ul>
+            <li>Reúne lo principal: tu embarazo, las últimas mediciones, el
+                semáforo y el estado de los envíos de este dispositivo.</li>
+            <li>Desde aquí se registra una sesión de movimientos fetales.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="manual-step">
+        <div class="card">
+          <h2>3. Mi historial</h2>
+          <ul>
+            <li>Reúne tus episodios de embarazo y sus sesiones de monitoreo.</li>
+            <li>Cada embarazo se muestra por separado: la información de uno
+                nunca se mezcla con la de otro.</li>
+            <li>Solo verás información tuya.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="manual-step">
+        <div class="card">
+          <h2>4. Estado de conexión</h2>
+          <ul>
+            <li><strong>Conectado</strong>: hay comunicación con el servidor
+                central.</li>
+            <li><strong>Sin conexión</strong>: el servidor no responde. La
+                interfaz sigue funcionando y lo que registres se guarda en este
+                equipo.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="manual-step">
+        <div class="card">
+          <h2>5. Estado de los envíos</h2>
+          <ul>
+            <li><strong>PENDIENTE</strong>: guardado en este equipo, todavía sin
+                enviar. No se pierde al cerrar la aplicación.</li>
+            <li><strong>ENVIADO</strong>: el servidor confirmó que lo recibió.
+                Es un estado definitivo.</li>
+            <li><strong>FALLIDO (reintentable)</strong>: un intento no se pudo
+                confirmar y se volverá a intentar.</li>
+            <li><strong>FALLIDO (requiere revisión)</strong>: se agotaron los
+                intentos o el envío fue rechazado. Necesita que alguien lo
+                revise.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="manual-step">
+        <div class="card">
+          <h2>6. Qué significa «No disponible» o «—»</h2>
+          <ul>
+            <li>Que ese dato no existe todavía o no se pudo consultar.</li>
+            <li><strong>No significa cero.</strong> Un valor ausente nunca se
+                muestra como 0: una medición que no se tomó y una medición de
+                valor cero son cosas distintas.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="manual-step">
+        <div class="card">
+          <h2>7. Uso sin conexión</h2>
+          <ul>
+            <li>Tras iniciar sesión con conexión, el equipo queda autorizado
+                durante una ventana de tiempo configurada.</li>
+            <li>Dentro de esa ventana puedes cerrar y abrir la aplicación las
+                veces que quieras, aunque no haya internet.</li>
+            <li>Abrir la aplicación sin conexión no alarga esa ventana: solo la
+                consume. Únicamente una validación con conexión la renueva.</li>
+            <li>Cuando la ventana termina, hay que volver a iniciar sesión con
+                conexión.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="manual-step">
+        <div class="card">
+          <h2>8. Registrar movimientos fetales</h2>
+          <ul>
+            <li>La acción está preparada en Inicio.</li>
+            <li>Queda habilitada cuando el contexto clínico autorizado esté
+                integrado, porque una sesión debe quedar asociada al embarazo
+                correcto.</li>
+            <li>En esta versión no hay sensores ni hardware: el prototipo
+                trabaja con datos simulados.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="manual-step">
+        <div class="card">
+          <h2>9. Cerrar sesión</h2>
+          <ul>
+            <li>Cierra la sesión de este equipo de inmediato.</li>
+            <li>Para volver a entrar hace falta el correo y la contraseña.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="manual-step">
+        <div class="card">
+          <h2>10. Datos simulados</h2>
+          <ul>
+            <li>FetalAlert es, en esta etapa, un prototipo académico.</li>
+            <li>Toda la información es simulada y no corresponde a personas
+                reales.</li>
+            <li>No sustituye la consulta con personal de salud.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- =================================================================
+         VISTA 5 — ACERCA DE FETALALERT
+         ================================================================= -->
+    <section id="vista-acerca" class="vista" hidden>
+      <div class="hero-about">
+        <h2>Acerca de FetalAlert</h2>
+        <p>
+          FetalAlert es un proyecto académico de seguimiento prenatal pensado
+          para entornos con conectividad intermitente.
+        </p>
+      </div>
+
+      <section class="values-section">
+        <div class="values-grid">
+          <div class="value-card">
+            <h4>Qué busca</h4>
+            <p>
+              Acompañar el seguimiento del embarazo cuando la conexión a
+              internet no puede darse por segura, conservando lo que se registra
+              hasta que sea posible enviarlo.
+            </p>
+          </div>
+
+          <div class="value-card">
+            <h4>Cómo funciona sin conexión</h4>
+            <p>
+              Lo que se captura se guarda primero en el propio dispositivo. Al
+              recuperarse la conexión se envía al servidor central sin
+              duplicarse, conservando su identidad original.
+            </p>
+          </div>
+
+          <div class="value-card">
+            <h4>Datos simulados</h4>
+            <p>
+              Toda la información de esta versión es simulada. No corresponde a
+              pacientes reales ni procede de sensores reales.
+            </p>
+          </div>
+
+          <div class="value-card">
+            <h4>Alcance de esta versión</h4>
+            <p>
+              Prototipo académico. No está validado clínicamente, no emite
+              diagnósticos y no incorpora hardware dentro del alcance de esta
+              implementación.
+            </p>
+          </div>
+
+          <div class="value-card">
+            <h4>Privacidad</h4>
+            <p>
+              Cada persona accede únicamente a su propia información. Las
+              cuentas las crea el personal administrador sobre perfiles que ya
+              existen en el sistema.
+            </p>
+          </div>
+
+          <div class="value-card">
+            <h4>Autoría</h4>
+            <p>
+              Trabajo de tesis desarrollado por Tinuola Fagbemi y Viviana Jaén.
+            </p>
+          </div>
+        </div>
+      </section>
+    </section>
+
+  </main>
+
+  <footer class="footer">
+    <p>FetalAlert Panamá &copy; 2026 — Prototipo académico con datos simulados</p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
