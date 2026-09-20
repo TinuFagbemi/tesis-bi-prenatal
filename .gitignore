@@ -215,6 +215,11 @@ data/generated/
 # auxiliares (-wal, -shm). Es un artefacto local, nunca contenido versionado.
 data/edge/
 
+# Interfaz de la gestante: base SQLite de las sesiones locales del adaptador.
+# Misma razon que data/edge/ -- es estado de un dispositivo concreto, no
+# contenido del proyecto -- y ademas guarda identificadores de sesion.
+data/gestante/
+
 # Reportes JUnit que generan localmente las suites de pytest (--junitxml).
 # Son artefactos de una ejecucion, nunca contenido versionado.
 pytest-*.xml
