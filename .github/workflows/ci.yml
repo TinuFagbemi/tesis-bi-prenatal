@@ -507,6 +507,15 @@ jobs:
         working-directory: backend
         env:
           SCRUM63_TEST_DATABASE_URL: postgresql+psycopg://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
+          # Dos identidades, y la separacion es el punto. La suite ejerce sus
+          # operaciones funcionales con la conexion de siempre, pero su ciclo
+          # head -> 150788f88be7 -> head es DDL, y desde SCRUM-98 el preflight
+          # de la revision de RLS exige que quien migra tenga las membresias
+          # exactas que el bootstrap concede al migrador. Sin esta variable,
+          # ``tests.conftest.url_del_migrador`` devuelve la URL tal cual -- la
+          # del usuario de inicializacion del servicio -- y la migracion aborta,
+          # con razon. Los UndefinedTable que venian detras eran la cascada.
+          ALEMBIC_DATABASE_URL: ${{ env.CI_MIGRADOR_URL }}
         run: python -m pytest -q -rs tests/test_ingestion_idempotency_postgresql.py --junitxml=pytest-scrum63.xml
 
       # Sexta capa: el ciclo real del nodo edge simulado -- SQLite temporal ->
@@ -559,6 +568,13 @@ jobs:
       - name: Pruebas del esquema analítico y el ETL contra PostgreSQL (SCRUM-69)
         working-directory: backend
         env:
+          # Dos identidades. La suite usa su propia conexion de
+          # mantenimiento para crear bases temporales; migrarlas es DDL, y
+          # desde SCRUM-98 el preflight de la revision de RLS exige que
+          # quien migra tenga las membresias exactas del migrador. Sin esta
+          # variable, ``tests.conftest.url_del_migrador`` devuelve la URL tal
+          # cual y la migracion aborta.
+          ALEMBIC_DATABASE_URL: ${{ env.CI_MIGRADOR_URL }}
           ETL_DATABASE_URL: postgresql+psycopg://fetalalert_etl:${{ env.ETL_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
           SCRUM69_TEST_DATABASE_URL: postgresql+psycopg://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
         run: python -m pytest -q -rs tests/test_etl_postgresql.py --junitxml=pytest-scrum69.xml
@@ -580,6 +596,13 @@ jobs:
       - name: Pruebas de autenticacion contra PostgreSQL (SCRUM-70)
         working-directory: backend
         env:
+          # Dos identidades. La suite usa su propia conexion de
+          # mantenimiento para crear bases temporales; migrarlas es DDL, y
+          # desde SCRUM-98 el preflight de la revision de RLS exige que
+          # quien migra tenga las membresias exactas del migrador. Sin esta
+          # variable, ``tests.conftest.url_del_migrador`` devuelve la URL tal
+          # cual y la migracion aborta.
+          ALEMBIC_DATABASE_URL: ${{ env.CI_MIGRADOR_URL }}
           SCRUM70_TEST_DATABASE_URL: postgresql+psycopg://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
         run: python -m pytest -q -rs tests/test_autenticacion_postgresql.py --junitxml=pytest-scrum70.xml
 
@@ -597,6 +620,13 @@ jobs:
       - name: Pruebas de cuentas contra PostgreSQL (SCRUM-97)
         working-directory: backend
         env:
+          # Dos identidades. La suite usa su propia conexion de
+          # mantenimiento para crear bases temporales; migrarlas es DDL, y
+          # desde SCRUM-98 el preflight de la revision de RLS exige que
+          # quien migra tenga las membresias exactas del migrador. Sin esta
+          # variable, ``tests.conftest.url_del_migrador`` devuelve la URL tal
+          # cual y la migracion aborta.
+          ALEMBIC_DATABASE_URL: ${{ env.CI_MIGRADOR_URL }}
           SCRUM97_TEST_DATABASE_URL: postgresql+psycopg://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
         run: python -m pytest -q -rs tests/test_cuentas_postgresql.py --junitxml=pytest-scrum97.xml
 
