@@ -54,6 +54,22 @@ CANTIDAD_DE_REVISIONES_ESPERADA = 5
 # UNIQUE and one CHECK, and no index of its own. SCRUM-97 adds one CHECK to an
 # existing table -- ck_usuario_email_canonico -- and nothing else counted here:
 # its triggers and function are not constraints of this inventory.
+#
+# SCRUM-98 subfase 5 anade el mapa de seudonimos: dos tablas en el schema
+# ``privado``, cada una con su PRIMARY KEY, su UNIQUE y una llave foranea hacia
+# ``operacional`` con ON DELETE RESTRICT. No viven en ``operacional``, asi que no
+# entran en ``ONDELETE_ESPERADOS`` -- que inventaria el modelo operativo -- pero
+# si aparecen en el SQL renderizado. Su aporte se declara aparte para que siga
+# siendo visible cual de los dos esquemas lo produce.
+APORTE_DEL_MAPA = {
+    "primary_key": 2,
+    "foreign_key": 2,
+    "on_delete_restrict": 2,
+    # ``unique`` no aparece: las dos restricciones del mapa se renderizan como
+    # ``CONSTRAINT uq_... UNIQUE`` en la columna, sin el ``UNIQUE (`` que esta
+    # cifra cuenta.
+}
+
 CANTIDADES_ESPERADAS = {
     "tablas": 23,
     "primary_key": 23,
@@ -185,7 +201,19 @@ def _sentencias(sql: str) -> list[str]:
     return [sentencia for sentencia in sql.split(SEPARADOR_DE_SENTENCIAS) if sentencia.strip()]
 
 
+# El schema de las superficies publicadas. Sus vistas leen ``analitico``,
+# ``privado`` y ``operacional`` a la vez -- eso es lo que hacen --, asi que no
+# pertenecen a ninguna de las dos particiones que este modulo separa y se
+# excluyen de la del esquema analitico. La garantia que esa particion protege es
+# que ninguna **tabla** analitica referencie una operacional; una vista que lee
+# de los dos esquemas no es eso, y la comprueba
+# ``test_el_unico_cruce_de_esquema_es_el_del_mapa_de_seudonimos``.
+ESQUEMA_PUBLICACION = "publicacion"
+
+
 def _es_del_esquema_analitico(sentencia: str) -> bool:
+    if ESQUEMA_PUBLICACION in sentencia:
+        return False
     return ESQUEMA_ANALITICO in sentencia
 
 
@@ -288,7 +316,10 @@ def test_el_esquema_no_adopta_uno_preexistente(sql_upgrade):
     """Without IF NOT EXISTS the migration refuses to reuse an unknown schema."""
     assert "CREATE SCHEMA IF NOT EXISTS" not in sql_upgrade
     # Dos desde SCRUM-98: ``operacional`` y ``seguridad``, el de los helpers.
-    assert sql_upgrade.count("CREATE SCHEMA") == 2
+    # Cuatro en este render: operacional, seguridad (SCRUM-98 subfase 3) y los
+    # dos de la publicacion (subfase 5). El de ``analitico`` no cuenta aqui
+    # porque ``sql_upgrade`` aparta las sentencias de ese esquema.
+    assert sql_upgrade.count("CREATE SCHEMA") == 4
 
 
 # --------------------------------------------------------------------------
@@ -343,15 +374,22 @@ def test_cada_tabla_es_equivalente_a_la_de_la_metadata(nombre_tabla, sql_upgrade
 
 
 def test_cantidad_de_llaves_foraneas(sql_upgrade):
+    """Las del modelo operativo, mas las dos del mapa privado."""
     referencias = sql_upgrade.count(f"REFERENCES {SCHEMA_OPERACIONAL}.")
 
-    assert referencias == len(ONDELETE_ESPERADOS)
+    assert referencias == len(ONDELETE_ESPERADOS) + APORTE_DEL_MAPA["foreign_key"]
 
 
 @pytest.mark.parametrize("politica", ["RESTRICT", "CASCADE"])
 def test_cantidad_de_politicas_on_delete(politica, sql_upgrade):
-    """The RESTRICT/CASCADE split is pinned by ONDELETE_ESPERADOS in test_models."""
+    """The RESTRICT/CASCADE split is pinned by ONDELETE_ESPERADOS in test_models.
+
+    Las dos del mapa privado son RESTRICT, y no por comodidad: es lo que impide
+    borrar una paciente por debajo de los datos ya publicados.
+    """
     esperadas = sum(1 for p in ONDELETE_ESPERADOS.values() if p == politica)
+    if politica == "RESTRICT":
+        esperadas += APORTE_DEL_MAPA["on_delete_restrict"]
 
     assert sql_upgrade.count(f"ON DELETE {politica}") == esperadas
 
@@ -359,7 +397,7 @@ def test_cantidad_de_politicas_on_delete(politica, sql_upgrade):
 def test_ninguna_llave_foranea_queda_sin_politica(sql_upgrade):
     con_politica = sql_upgrade.count("ON DELETE ")
 
-    assert con_politica == len(ONDELETE_ESPERADOS)
+    assert con_politica == len(ONDELETE_ESPERADOS) + APORTE_DEL_MAPA["foreign_key"]
 
 
 def test_toda_referencia_lleva_el_esquema(sql_upgrade):
@@ -468,6 +506,7 @@ def test_cantidades_de_la_estructura_desplegada(clave, patron, sql_upgrade):
     sigue describiendo lo que siempre describio.
     """
     encontrados = sql_upgrade.count(patron)
+    encontrados -= APORTE_DEL_MAPA.get(clave, 0)
     if clave == "check":
         encontrados -= sql_upgrade.count("WITH CHECK (")
 
@@ -567,17 +606,26 @@ def test_el_esquema_se_elimina_despues_de_sus_objetos(sql_downgrade):
     assert drop_schema > ultimo_drop_table
 
 
+# Los tres schemas que esta cadena crea entera y puede por tanto eliminar
+# entera. El CASCADE alcanza exactamente lo que ella misma puso dentro.
+SCHEMAS_QUE_SE_ELIMINAN_ENTEROS = ("seguridad", "publicacion", "privado")
+
+
 def test_el_downgrade_no_usa_cascade_sobre_tablas(sql_downgrade):
     """CASCADE would silently drop objects this revision never created.
 
-    La unica excepcion es ``DROP SCHEMA seguridad CASCADE``: ese schema lo crea
-    esta cadena y no contiene nada que no haya creado ella, asi que el CASCADE
-    alcanza exactamente sus siete funciones. Sobre una tabla seguiria siendo
+    Las unicas excepciones son los ``DROP SCHEMA ... CASCADE`` de los tres
+    schemas que esta cadena crea por completo: ``seguridad`` con sus nueve
+    funciones, y ``publicacion`` y ``privado`` con sus vistas y su mapa. Ninguno
+    contiene nada que no haya creado ella. Sobre una **tabla** seguiria siendo
     inaceptable, y por eso la prueba distingue el objeto en vez de prohibir la
     palabra.
     """
+    permitidos = {
+        f"DROP SCHEMA {schema} CASCADE" for schema in SCHEMAS_QUE_SE_ELIMINAN_ENTEROS
+    }
     for linea in sql_downgrade.splitlines():
         if "CASCADE" not in linea:
             continue
-        assert "DROP SCHEMA seguridad CASCADE" in linea, linea
+        assert any(permitido in linea for permitido in permitidos), linea
     assert "IF EXISTS" not in sql_downgrade

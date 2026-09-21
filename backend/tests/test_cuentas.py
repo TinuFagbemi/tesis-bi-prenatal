@@ -1047,7 +1047,7 @@ def test_el_ci_ejecuta_la_suite_postgresql_de_cuentas_y_la_vigila():
     # numero exacto y no un
     # ">=" a proposito: lo que vigila es que nadie retire un reporte del
     # guardian al anadir el suyo.
-    assert guardian.count('.xml": "SCRUM') == 13
+    assert guardian.count('.xml": "SCRUM') == 14
 
 
 def test_la_migracion_no_usa_marcadores_que_psycopg_o_sqlalchemy_interpreten(sql_upgrade):

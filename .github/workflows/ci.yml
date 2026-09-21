@@ -56,6 +56,7 @@ jobs:
       # Efimeros y ficticios, como el resto de credenciales de este job.
       API_PASSWORD: api_efimero_no_es_secreto
       ETL_PASSWORD: etl_efimero_no_es_secreto
+      POWERBI_PASSWORD: powerbi_efimero_no_es_secreto
 
     services:
       postgres:
@@ -120,7 +121,8 @@ jobs:
             --ignore=tests/test_bootstrap_postgresql.py \
             --ignore=tests/test_contexto_postgresql.py \
             --ignore=tests/test_rls_postgresql.py \
-            --ignore=tests/test_http_como_api_postgresql.py
+            --ignore=tests/test_http_como_api_postgresql.py \
+            --ignore=tests/test_publicacion_postgresql.py
 
       # Contrato del camino .env/shell -> docker-compose.yml -> entorno del
       # contenedor de la API. Las pruebas de Python reciben JWT_SECRET_KEY
@@ -307,6 +309,7 @@ jobs:
           DE_CONEXION = (
               ("fetalalert_api", os.environ["API_PASSWORD"]),
               ("fetalalert_etl", os.environ["ETL_PASSWORD"]),
+              ("fetalalert_powerbi", os.environ["POWERBI_PASSWORD"]),
           )
 
 
@@ -600,7 +603,7 @@ jobs:
       # La variable de entorno de cada capa es lo único que evita que su archivo
       # quede omitido, y pytest devuelve 0 aunque se salte todo. Por eso los
       # reportes JUnit se revisan después: un solo <skipped> en cualquiera de
-      # los trece tumba el job.
+      # los catorce tumba el job.
       #
       # El guardián detecta **omisiones**. Los fallos y los errores los detecta
       # el código de salida de pytest, en el step que los produce. Son dos
@@ -635,6 +638,21 @@ jobs:
           SCRUM98_HTTP_ADMIN_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
         run: python -m pytest -q -rs tests/test_http_como_api_postgresql.py --junitxml=pytest-scrum98-http.xml
 
+      # Proteccion analitica: seudonimizacion, entitlements y aislamiento de la
+      # credencial tecnica de Power BI. Va la ultima porque necesita el ETL ya
+      # ejecutado: sin seudonimos emitidos, las superficies publicadas estan
+      # vacias y nada de lo que afirma significaria algo.
+      - name: Proteccion analitica contra PostgreSQL (SCRUM-98)
+        working-directory: backend
+        env:
+          SCRUM98_PUB_TEST_DATABASE_URL: postgresql+psycopg://fetalalert_powerbi:${{ env.POWERBI_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
+          SCRUM98_PUB_ADMIN_USER: ${{ env.POSTGRES_USER }}
+          SCRUM98_PUB_ADMIN_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
+          # La suite ejecuta el ETL de verdad para demostrar que el mapa de
+          # seudonimos es estable, y lo ejecuta con la credencial del ETL.
+          SCRUM98_PUB_ETL_PASSWORD: ${{ env.ETL_PASSWORD }}
+        run: python -m pytest -q -rs tests/test_publicacion_postgresql.py --junitxml=pytest-scrum98-pub.xml
+
       - name: Verificar que ninguna prueba de PostgreSQL quedó omitida
         working-directory: backend
         run: |
@@ -657,6 +675,7 @@ jobs:
               "pytest-scrum98-contexto.xml": "SCRUM98_CONTEXTO_TEST_DATABASE_URL",
               "pytest-scrum98-rls.xml": "SCRUM98_RLS_TEST_DATABASE_URL",
               "pytest-scrum98-http.xml": "SCRUM98_HTTP_TEST_DATABASE_URL",
+              "pytest-scrum98-pub.xml": "SCRUM98_PUB_TEST_DATABASE_URL",
           }
 
           fallo = False

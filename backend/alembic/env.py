@@ -5,10 +5,12 @@ from alembic import context
 from sqlalchemy import CheckConstraint, MetaData, engine_from_config, pool
 
 import app.etl.modelos  # noqa: F401  -- registers the analytic tables on BaseAnalitica.metadata
+import app.models.privado  # noqa: F401  -- registers the pseudonym map on BasePrivada.metadata
 import app.models  # noqa: F401  -- registers every model on Base.metadata
 from app.config import VARIABLE_URL_ALEMBIC, exigir_url_de_entorno
 from app.db.base import NAMING_CONVENTION, Base
 from app.db.base_analitica import BaseAnalitica
+from app.db.base_privada import BasePrivada
 
 config = context.config
 if config.config_file_name is not None:
@@ -49,7 +51,7 @@ def _esquema_referido(tabla, esquema_destino, restriccion, esquema_referido):
     return esquema_referido or tabla.schema
 
 
-for registro in (Base.metadata, BaseAnalitica.metadata):
+for registro in (Base.metadata, BaseAnalitica.metadata, BasePrivada.metadata):
     for tabla in registro.tables.values():
         tabla.to_metadata(target_metadata, referred_schema_fn=_esquema_referido)
 

@@ -23,7 +23,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 
-from sqlalchemy import Table, literal_column, tuple_
+from sqlalchemy import Table, literal_column, text, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
@@ -126,3 +126,55 @@ def insertar_hechos(conexion: Connection, hechos: Sequence[Fila]) -> int:
                 "se revierte."
             ) from error
     return insertadas
+
+
+# ---------------------------------------------------------------------------
+# El mapa de seudonimos
+# ---------------------------------------------------------------------------
+
+SCHEMA_PRIVADO = "privado"
+
+# Una sentencia por tabla, y las dos con la misma forma: inserta las claves
+# operacionales que todavia no tienen seudonimo y deja intactas las que si.
+#
+# ``ON CONFLICT DO NOTHING`` es lo que hace el seudonimo **estable**. La carga
+# base y cada incremental ejecutan exactamente esto; la primera emite, las demas
+# no tocan una sola fila. Si en vez de eso se regenerara el UUID, cada ejecucion
+# partiria en dos la serie longitudinal de cada paciente y el modelo publicado
+# dejaria de poder seguir un embarazo a lo largo del tiempo.
+#
+# El UUID no se calcula aqui: lo pone el ``DEFAULT gen_random_uuid()`` de la
+# tabla. Derivarlo del identificador -- un hash de ``id_paciente``, por ejemplo
+# -- habria sido reversible probando los enteros, que son pocos y consecutivos.
+_EMITIR = """
+INSERT INTO {schema}.{tabla} ({columna})
+SELECT o.{columna} FROM operacional.{origen} o
+ON CONFLICT ({columna}) DO NOTHING
+"""
+
+
+def emitir_seudonimos(conexion: Connection) -> dict[str, int]:
+    """Asegura un seudonimo para cada paciente y cada embarazo. Idempotente.
+
+    Devuelve cuantos emitio de nuevos, por tabla. En una carga base son todos;
+    en una incremental, solo los de las filas que aparecieron desde la anterior,
+    y lo normal es que sean cero.
+
+    Corre dentro de la transaccion del ETL, asi que un fallo posterior revierte
+    tambien los seudonimos emitidos: nunca queda un UUID asignado a una fila
+    cuyo hecho no llego a cargarse.
+    """
+    emitidos: dict[str, int] = {}
+    for tabla, columna, origen in (
+        ("seudonimo_paciente", "id_paciente", "paciente"),
+        ("seudonimo_embarazo", "id_embarazo", "embarazo"),
+    ):
+        resultado = conexion.execute(
+            text(
+                _EMITIR.format(
+                    schema=SCHEMA_PRIVADO, tabla=tabla, columna=columna, origen=origen
+                )
+            )
+        )
+        emitidos[tabla] = resultado.rowcount
+    return emitidos

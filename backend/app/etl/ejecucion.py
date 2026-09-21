@@ -113,6 +113,11 @@ class ResultadoEjecucion:
     hechos_existentes: int
     informe: InformeDeConciliacion
     duracion_s: float
+    # Seudonimos emitidos en *esta* ejecucion, por tabla del mapa privado. En
+    # una carga base son todos; en una incremental, solo los de las filas
+    # aparecidas desde la anterior, y lo normal es cero. Que el numero baje a
+    # cero es la senal observable de que los seudonimos se estan reutilizando.
+    seudonimos_emitidos: dict[str, int]
 
 
 # Tablas del universo operacional que el ETL extrae. La lista vive aqui porque
@@ -280,11 +285,18 @@ def _cargar(conexion: Connection, *, version: str) -> tuple:
             "lecturas nuevas. La ejecución se revierte."
         )
 
+    # Los seudonimos, despues de cargar las dimensiones y antes de conciliar.
+    # Despues, porque un embarazo que el ETL rechazara no debe recibir uno;
+    # antes, porque la conciliacion ya puede contar con que la publicacion esta
+    # completa. Es idempotente: la carga base los emite y cada incremental
+    # reutiliza los mismos.
+    seudonimos = carga.emitir_seudonimos(conexion)
+
     informe = conciliacion.conciliar(conexion)
     if not informe.correcta:
         raise ConciliacionFallida(informe)
 
-    return revision, resultados, bridge, nuevos, existentes, informe
+    return revision, resultados, bridge, nuevos, existentes, informe, seudonimos
 
 
 def ejecutar_etl(
@@ -305,9 +317,15 @@ def ejecutar_etl(
             # antes de extraer: si el rol pudiera ver menos de lo que hay, la
             # carga entera seria un subconjunto silencioso.
             verificar_lectura_completa(conexion)
-            revision, resultados, bridge, nuevos, existentes, informe = _cargar(
-                conexion, version=version
-            )
+            (
+                revision,
+                resultados,
+                bridge,
+                nuevos,
+                existentes,
+                informe,
+                seudonimos,
+            ) = _cargar(conexion, version=version)
 
     return ResultadoEjecucion(
         revision=revision,
@@ -318,6 +336,7 @@ def ejecutar_etl(
         hechos_existentes=existentes,
         informe=informe,
         duracion_s=reloj() - inicio,
+        seudonimos_emitidos=seudonimos,
     )
 
 
@@ -410,8 +429,12 @@ def formatear_resumen(resultado: ResultadoEjecucion) -> str:
     lineas += [
         f"hechos_nuevos={resultado.hechos_nuevos}",
         f"hechos_existentes={resultado.hechos_existentes}",
-        formatear_conciliacion(resultado.informe),
     ]
+    lineas += [
+        f"seudonimos_{tabla}={emitidos}"
+        for tabla, emitidos in sorted(resultado.seudonimos_emitidos.items())
+    ]
+    lineas.append(formatear_conciliacion(resultado.informe))
     return "\n".join(lineas)
 
 

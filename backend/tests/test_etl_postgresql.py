@@ -597,16 +597,55 @@ def test_ningun_nombre_supera_63_caracteres_ni_quedo_truncado(base_vacia):
     assert max(len(nombre) for nombre in en_el_servidor) <= PG_MAX_IDENTIFIER_LENGTH
 
 
-def test_ninguna_llave_foranea_cruza_de_un_esquema_a_otro(base_vacia):
+CRUCES_DE_ESQUEMA = (
+    "SELECT n.nspname || '.' || r.relname || ' -> ' || fn.nspname AS cruce "
+    "FROM pg_constraint c "
+    "JOIN pg_class r ON r.oid = c.conrelid JOIN pg_namespace n ON n.oid = r.relnamespace "
+    "JOIN pg_class fr ON fr.oid = c.confrelid "
+    "JOIN pg_namespace fn ON fn.oid = fr.relnamespace "
+    "WHERE c.contype = 'f' AND n.nspname <> fn.nspname"
+)
+
+
+def test_el_esquema_analitico_no_se_ata_al_operacional_por_llaves_foraneas(base_vacia):
+    """El modelo estrella se carga, no se referencia.
+
+    Una llave foranea entre ``analitico`` y ``operacional`` ataria el modelo
+    dimensional al operativo: no se podria recargar el uno sin el otro, ni bajar
+    la revision analitica sin tocar las tablas de produccion. Esa es la
+    propiedad que esta prueba protege, y sigue intacta.
+    """
     migrar(base_vacia.url, "head")
 
-    assert base_vacia.escalar(
-        "SELECT count(*) FROM pg_constraint c "
-        "JOIN pg_class r ON r.oid = c.conrelid JOIN pg_namespace n ON n.oid = r.relnamespace "
-        "JOIN pg_class fr ON fr.oid = c.confrelid "
-        "JOIN pg_namespace fn ON fn.oid = fr.relnamespace "
-        "WHERE c.contype = 'f' AND n.nspname <> fn.nspname"
-    ) == 0
+    cruces = {
+        fila[0]
+        for fila in base_vacia.filas(CRUCES_DE_ESQUEMA)
+        if "analitico" in fila[0]
+    }
+
+    assert cruces == set()
+
+
+def test_el_unico_cruce_de_esquema_es_el_del_mapa_de_seudonimos(base_vacia):
+    """Y es deliberado, no un descuido que la prueba anterior dejara pasar.
+
+    ``privado.seudonimo_paciente`` y ``privado.seudonimo_embarazo`` **si**
+    apuntan al operacional, con ``ON DELETE RESTRICT``. Es lo que impide borrar
+    a una paciente por debajo de los datos ya publicados: sin esa llave, un
+    DELETE dejaria un seudonimo huerfano y la superficie analitica seguiria
+    mostrando un episodio cuya fila de origen ya no existe.
+
+    Se enumeran uno a uno para que un cruce nuevo -- de cualquier otra tabla --
+    haga fallar esta prueba en vez de esconderse detras de la excepcion.
+    """
+    migrar(base_vacia.url, "head")
+
+    cruces = {fila[0] for fila in base_vacia.filas(CRUCES_DE_ESQUEMA)}
+
+    assert cruces == {
+        "privado.seudonimo_paciente -> operacional",
+        "privado.seudonimo_embarazo -> operacional",
+    }
 
 
 def test_downgrade_al_head_previo_conserva_los_datos_y_vuelve_a_subir(clon):

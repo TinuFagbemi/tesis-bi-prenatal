@@ -64,12 +64,25 @@ depends_on: Union[str, Sequence[str], None] = None
 OPERACIONAL = "operacional"
 ANALITICO = "analitico"
 SEGURIDAD = "seguridad"
+# El mapa de seudonimos. Nadie fuera del ETL y del mantenimiento lo alcanza, y
+# Power BI ni siquiera recibe USAGE sobre el schema.
+PRIVADO = "privado"
+# Lo unico que Power BI puede consultar. Son vistas, no tablas: leen de
+# ``analitico`` y de ``privado`` con los privilegios de su propietario, de modo
+# que publicar una columna es un acto explicito y no el resultado de un GRANT
+# demasiado ancho.
+PUBLICACION = "publicacion"
 
 ROL_RLS_OWNER = "fetalalert_rls_owner"
 ROL_PROVISION_OWNER = "fetalalert_provision_owner"
 ROL_MANTENIMIENTO = "fetalalert_mantenimiento"
 ROL_API = "fetalalert_api"
 ROL_ETL = "fetalalert_etl"
+# La credencial tecnica con la que Power BI consulta la base. **No es la
+# identidad de ningun medico**: cada medico entra a Power BI Service con la suya
+# y el RLS del dataset filtra por ella. Aqui solo hay una cuenta de solo lectura
+# sobre las superficies publicadas.
+ROL_POWERBI = "fetalalert_powerbi"
 
 # El rol que ejecuta las consultas de la aplicacion. Uno, y solo uno.
 #
@@ -87,7 +100,7 @@ ROLES_DE_APLICACION = (ROL_API,)
 ROLES_PRIVILEGIADOS = (ROL_RLS_OWNER, ROL_PROVISION_OWNER, ROL_MANTENIMIENTO)
 
 # Los roles que se autentican y ejecutan consultas de usuario final.
-ROLES_DE_RUNTIME = (ROL_API, ROL_ETL)
+ROLES_DE_RUNTIME = (ROL_API, ROL_ETL, ROL_POWERBI)
 
 # Membresias exactas que el migrador debe tener, con sus opciones efectivas
 # (INHERIT, SET). Replica ``app.db.roles.MEMBRESIAS_DEL_MIGRADOR``: si las dos
@@ -132,6 +145,17 @@ TABLAS_DEL_ETL_CON_RLS = ("embarazo", "sesion_monitoreo", "lectura_biometrica")
 
 # Destino del ETL: las nueve estructuras del modelo estrella. El ETL escribe
 # aqui y en ningun otro sitio.
+# Las dos tablas del mapa privado. Clave operacional -> seudonimo estable.
+TABLAS_DEL_MAPA = ("seudonimo_paciente", "seudonimo_embarazo")
+
+# Las cuatro superficies publicadas, y las unicas que Power BI puede nombrar.
+VISTAS_PUBLICADAS = (
+    "v_embarazo",
+    "v_lectura",
+    "v_entitlement_medico",
+    "v_resumen_administrativo",
+)
+
 TABLAS_ANALITICAS = (
     "dim_clinica", "dim_embarazo", "dim_factor_riesgo", "dim_medico",
     "dim_paciente", "dim_semaforo", "dim_tiempo_gestacional",
@@ -907,6 +931,45 @@ def _concesiones() -> tuple[Concesion, ...]:
         for secuencia in SECUENCIAS_DE_LA_API
     ]
 
+    # --- Mapa privado: el ETL lo escribe, el mantenimiento lo conserva -----
+    #
+    # El ETL inserta un seudonimo la primera vez que ve a una paciente o un
+    # embarazo y lo reutiliza siempre despues; por eso necesita SELECT ademas de
+    # INSERT. No recibe UPDATE ni DELETE: cambiar un seudonimo ya emitido
+    # rompería la serie longitudinal de todo lo publicado, y no hay ninguna
+    # operación del ETL que deba poder hacerlo.
+    #
+    # El mantenimiento si los tiene, porque es la identidad de un restore: un
+    # backup que no devuelva el mapa deja la publicación sin longitudinalidad.
+    concesiones.append(Concesion("USAGE", f"SCHEMA {PRIVADO}", (ROL_ETL,)))
+    # El dueno de ``v_entitlement_medico`` lee el seudonimo del embarazo, y solo
+    # ese: no recibe ``seudonimo_paciente``, que es el que ataria un seudonimo a
+    # una persona.
+    concesiones.append(Concesion("USAGE", f"SCHEMA {PRIVADO}", (ROL_RLS_OWNER,)))
+    concesiones.append(
+        Concesion(
+            "SELECT", f"TABLE {PRIVADO}.seudonimo_embarazo", (ROL_RLS_OWNER,)
+        )
+    )
+    concesiones.append(
+        Concesion("USAGE", f"SCHEMA {PRIVADO}", (ROL_MANTENIMIENTO,))
+    )
+    concesiones += [
+        Concesion("SELECT, INSERT", f"TABLE {PRIVADO}.{tabla}", (ROL_ETL,))
+        for tabla in TABLAS_DEL_MAPA
+    ]
+    concesiones += [
+        Concesion(
+            "SELECT, INSERT, UPDATE, DELETE",
+            f"TABLE {PRIVADO}.{tabla}",
+            (ROL_MANTENIMIENTO,),
+        )
+        for tabla in TABLAS_DEL_MAPA
+    ]
+
+    # Lo de ``publicacion`` no esta aqui: va en ``_permisos_de_publicacion()``,
+    # que corre **antes** de transferir la propiedad de las vistas. Ver alli.
+
     return tuple(concesiones)
 
 
@@ -918,6 +981,8 @@ ENDURECIMIENTO = (
     f"REVOKE ALL ON SCHEMA {OPERACIONAL} FROM PUBLIC",
     f"REVOKE ALL ON SCHEMA {SEGURIDAD} FROM PUBLIC",
     f"REVOKE ALL ON SCHEMA {ANALITICO} FROM PUBLIC",
+    f"REVOKE ALL ON SCHEMA {PRIVADO} FROM PUBLIC",
+    f"REVOKE ALL ON SCHEMA {PUBLICACION} FROM PUBLIC",
 )
 
 
@@ -928,6 +993,259 @@ def _grants() -> list[str]:
 def _revocaciones() -> list[str]:
     """Lo mismo, al reves y en orden inverso. Ni una sentencia mas."""
     return [c.revocar() for c in reversed(_concesiones())]
+
+
+# ---------------------------------------------------------------------------
+# Capa de publicacion analitica
+# ---------------------------------------------------------------------------
+#
+# Dos schemas y una separacion que es el punto entero de esta parte:
+#
+# * ``privado`` guarda el **mapa de seudonimos**: que UUID le corresponde a cada
+#   paciente y a cada embarazo. Lo escriben el ETL y el mantenimiento, y nadie
+#   mas lo alcanza -- ``fetalalert_powerbi`` no recibe ni USAGE sobre el schema,
+#   de modo que no puede nombrarlo aunque quisiera.
+# * ``publicacion`` contiene cuatro vistas. Son vistas y no tablas a proposito:
+#   una vista lee sus tablas con los privilegios de **su propietario**, asi que
+#   publicar una columna es un acto explicito. Conceder SELECT sobre una tabla
+#   de ``analitico`` habria publicado tambien la cedula, el nombre y el telefono
+#   que esa tabla lleva.
+#
+# **Esto es seudonimizacion, no anonimizacion.** El seudonimo es estable y el
+# mapa existe: quien tuviera acceso al mapa puede volver a la persona, y esa es
+# justamente la propiedad que hace util la serie longitudinal. Lo que se protege
+# es quien puede recorrer ese camino, no la posibilidad de recorrerlo.
+
+MAPA = f"""
+-- Los nombres de las restricciones siguen la convencion del proyecto, que es
+-- la misma que ``app.models.privado`` declara: si divergieran, ``alembic
+-- check`` lo diria en cada ejecucion. Las tablas no llevan COMMENT por el mismo
+-- motivo -- la metadata no lo declara --, y el porque de cada una vive en el
+-- docstring de su modelo y en el bloque de arriba.
+CREATE TABLE {PRIVADO}.seudonimo_paciente (
+    id_paciente integer NOT NULL
+        CONSTRAINT pk_seudonimo_paciente PRIMARY KEY
+        CONSTRAINT fk_seudonimo_paciente_id_paciente_paciente
+            REFERENCES {OPERACIONAL}.paciente(id_paciente) ON DELETE RESTRICT,
+    seudonimo uuid NOT NULL DEFAULT gen_random_uuid()
+        CONSTRAINT uq_seudonimo_paciente_seudonimo UNIQUE,
+    creado_en timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE {PRIVADO}.seudonimo_embarazo (
+    id_embarazo integer NOT NULL
+        CONSTRAINT pk_seudonimo_embarazo PRIMARY KEY
+        CONSTRAINT fk_seudonimo_embarazo_id_embarazo_embarazo
+            REFERENCES {OPERACIONAL}.embarazo(id_embarazo) ON DELETE RESTRICT,
+    seudonimo uuid NOT NULL DEFAULT gen_random_uuid()
+        CONSTRAINT uq_seudonimo_embarazo_seudonimo UNIQUE,
+    creado_en timestamptz NOT NULL DEFAULT now()
+);
+"""
+
+# ``DISTINCT`` en la vigencia y no en el JOIN: un embarazo puede tener a la vez
+# un seguimiento PRINCIPAL, uno de APOYO y uno de REEMPLAZO, y los tres conceden
+# lo mismo. Sin el DISTINCT el mismo medico veria el embarazo repetido.
+VIGENCIA = (
+    "sc.activo AND sc.fecha_asignacion <= CURRENT_DATE "
+    "AND (sc.fecha_fin IS NULL OR sc.fecha_fin >= CURRENT_DATE)"
+)
+
+# Umbral de celda de la superficie administrativa. Por debajo de este numero de
+# embarazos distintos, la fila no se publica: un agregado sobre dos embarazos
+# es una trayectoria individual con otro nombre.
+MINIMO_DE_CELDA = 5
+
+VISTAS = f"""
+CREATE VIEW {PUBLICACION}.v_embarazo AS
+SELECT sem.seudonimo                       AS seudonimo_embarazo,
+       sp.seudonimo                        AS seudonimo_paciente,
+       de.estado_embarazo,
+       de.clasificacion_embarazo,
+       de.duracion_est_semanas,
+       de.numero_gestas,
+       de.numero_partos,
+       -- Fechas generalizadas al mes: la semana gestacional y la evolucion se
+       -- siguen igual, y un dia exacto es un cuasi-identificador.
+       date_trunc('month', de.fecha_inicio)::date        AS mes_inicio,
+       date_trunc('month', de.fecha_probable_parto)::date AS mes_probable_parto,
+       (de.fecha_cierre IS NOT NULL)                     AS cerrado,
+       -- Edad en tramos de cinco anios, calculada al inicio del embarazo.
+       (5 * floor(
+            extract(year FROM age(de.fecha_inicio, dp.fecha_nac)) / 5))::integer
+                                                          AS edad_tramo_inicio,
+       -- Ubicacion a nivel de provincia. El distrito se queda fuera.
+       dc.provincia
+FROM {ANALITICO}.dim_embarazo de
+JOIN {PRIVADO}.seudonimo_embarazo sem ON sem.id_embarazo = de.id_embarazo
+JOIN {ANALITICO}.dim_paciente dp ON dp.id_paciente = de.id_paciente
+JOIN {PRIVADO}.seudonimo_paciente sp ON sp.id_paciente = de.id_paciente
+LEFT JOIN {ANALITICO}.dim_clinica dc ON dc.id_clinica = dp.id_clinica;
+
+COMMENT ON VIEW {PUBLICACION}.v_embarazo IS
+'Superficie longitudinal por episodio, seudonimizada. Sin cedula, nombre, '
+'telefono, email, fecha de nacimiento, distrito ni identificadores '
+'operacionales.';
+
+CREATE VIEW {PUBLICACION}.v_lectura AS
+SELECT sem.seudonimo AS seudonimo_embarazo,
+       sp.seudonimo  AS seudonimo_paciente,
+       dt.semana_gestacion,
+       dt.trimestre,
+       ds.codigo_nivel AS codigo_semaforo,
+       ds.prioridad    AS prioridad_semaforo,
+       f.hr_valor,
+       f.spo2_valor,
+       f.mov_valor,
+       f.estado_hr,
+       f.estado_spo2,
+       f.estado_mov,
+       f.fecha_hora::date AS fecha_captura,
+       -- Numero de la sesion dentro del episodio, no su clave operacional. Es
+       -- lo que permite medir adherencia sin publicar un id de la base.
+       dense_rank() OVER (
+           PARTITION BY f.id_embarazo ORDER BY f.id_sesion
+       ) AS secuencia_sesion,
+       dc.provincia
+FROM {ANALITICO}.fact_lectura_biometrica f
+JOIN {PRIVADO}.seudonimo_embarazo sem ON sem.id_embarazo = f.id_embarazo
+JOIN {PRIVADO}.seudonimo_paciente sp ON sp.id_paciente = f.id_paciente
+JOIN {ANALITICO}.dim_tiempo_gestacional dt
+     ON dt.id_tiempo_gest = f.id_tiempo_gestacional
+JOIN {ANALITICO}.dim_semaforo ds ON ds.id_semaforo = f.id_semaforo
+LEFT JOIN {ANALITICO}.dim_clinica dc ON dc.id_clinica = f.id_clinica;
+
+COMMENT ON VIEW {PUBLICACION}.v_lectura IS
+'Serie longitudinal de lecturas, seudonimizada. Conserva las variables '
+'clinicas y los estados que las alertas necesitan; no publica id_lectura, '
+'id_sesion, id_paciente, id_medico ni id_embarazo.';
+
+CREATE VIEW {PUBLICACION}.v_entitlement_medico AS
+SELECT DISTINCT lower(u.email) AS upn_medico,
+       sem.seudonimo           AS seudonimo_embarazo
+FROM {OPERACIONAL}.seguimiento_clinico sc
+JOIN {OPERACIONAL}.usuario_medico um ON um.id_medico = sc.id_medico
+JOIN {OPERACIONAL}.usuario u ON u.id_usuario = um.id_usuario
+JOIN {OPERACIONAL}.rol r ON r.id_rol = u.id_rol
+JOIN {PRIVADO}.seudonimo_embarazo sem ON sem.id_embarazo = sc.id_embarazo
+WHERE {VIGENCIA}
+  AND u.activo
+  AND r.nombre_rol = 'MEDICO';
+
+COMMENT ON VIEW {PUBLICACION}.v_entitlement_medico IS
+'La relacion medico-embarazo que aplica el RLS dinamico del dataset. Deriva de '
+'SeguimientoClinico vigente y de nada mas: medico_clinica no aparece, asi que '
+'compartir clinica no concede lectura. Los tres tipos -- PRINCIPAL, APOYO y '
+'REEMPLAZO -- conceden lo mismo, y por eso el tipo no se filtra. ``upn_medico`` '
+'es un identificador directo y existe unicamente para aplicar la seguridad: no '
+'se expone como columna analitica de ningun reporte.';
+
+CREATE VIEW {PUBLICACION}.v_resumen_administrativo AS
+SELECT dc.provincia,
+       date_trunc('month', f.fecha_hora)::date AS mes,
+       ds.codigo_nivel AS codigo_semaforo,
+       count(*)                          AS lecturas,
+       count(DISTINCT f.id_embarazo)     AS embarazos,
+       round(avg(f.hr_valor), 1)         AS hr_promedio,
+       round(avg(f.spo2_valor), 1)       AS spo2_promedio
+FROM {ANALITICO}.fact_lectura_biometrica f
+JOIN {ANALITICO}.dim_semaforo ds ON ds.id_semaforo = f.id_semaforo
+LEFT JOIN {ANALITICO}.dim_clinica dc ON dc.id_clinica = f.id_clinica
+GROUP BY dc.provincia, date_trunc('month', f.fecha_hora), ds.codigo_nivel
+HAVING count(DISTINCT f.id_embarazo) >= {MINIMO_DE_CELDA};
+
+COMMENT ON VIEW {PUBLICACION}.v_resumen_administrativo IS
+'Indicadores operativos agregados. Sin seudonimos y sin ninguna columna que '
+'permita reconstruir una trayectoria: el HAVING descarta las celdas con menos '
+'de {MINIMO_DE_CELDA} embarazos distintos, porque un agregado sobre dos '
+'episodios es una trayectoria individual con otro nombre.';
+"""
+
+
+def _schemas_de_publicacion() -> list[str]:
+    """Los dos schemas, cerrados a PUBLIC antes de que contengan nada."""
+    return [
+        f"CREATE SCHEMA {PRIVADO}",
+        f"CREATE SCHEMA {PUBLICACION}",
+        f"REVOKE ALL ON SCHEMA {PRIVADO} FROM PUBLIC",
+        f"REVOKE ALL ON SCHEMA {PUBLICACION} FROM PUBLIC",
+        # Y lo que se cree en ellos manana tampoco sera de PUBLIC. Se fija para
+        # el migrador, que es quien crea objetos aqui.
+        f"ALTER DEFAULT PRIVILEGES IN SCHEMA {PRIVADO} "
+        "REVOKE ALL ON TABLES FROM PUBLIC",
+        f"ALTER DEFAULT PRIVILEGES IN SCHEMA {PUBLICACION} "
+        "REVOKE ALL ON TABLES FROM PUBLIC",
+        f"ALTER DEFAULT PRIVILEGES IN SCHEMA {PRIVADO} "
+        "REVOKE ALL ON SEQUENCES FROM PUBLIC",
+        f"ALTER DEFAULT PRIVILEGES IN SCHEMA {PUBLICACION} "
+        "REVOKE ALL ON SEQUENCES FROM PUBLIC",
+    ]
+
+
+def _permisos_de_publicacion() -> list[str]:
+    """Lo que Power BI puede leer. **Antes** de transferir la propiedad.
+
+    El orden es el mismo que el de los helpers, y por la misma razon: ``GRANT``
+    exige ser propietario o tener grant option, y ejecutado despues del ``ALTER
+    VIEW ... OWNER TO`` el migrador ya no es ninguna de las dos cosas. Ahi
+    PostgreSQL responde «permission denied for table v_embarazo» y la migracion
+    aborta -- se comprobo reproduciendolo.
+
+    Estas concesiones no aparecen en ``_concesiones()`` y por tanto no se
+    retiran una a una en el downgrade: viven en ``publicacion``, y ese schema se
+    elimina entero. Retirarlas antes seria retirar algo que esta a punto de
+    dejar de existir.
+
+    USAGE sobre ``publicacion`` y nada mas. Ni ``operacional``, ni ``analitico``,
+    ni ``privado``: sin USAGE sobre un schema ese rol no puede ni nombrar sus
+    objetos, de modo que la proteccion no depende de acordarse de revocar una
+    tabla nueva.
+    """
+    return [
+        f"GRANT USAGE ON SCHEMA {PUBLICACION} TO {ROL_POWERBI}",
+        *[
+            f"GRANT SELECT ON TABLE {PUBLICACION}.{vista} TO {ROL_POWERBI}"
+            for vista in VISTAS_PUBLICADAS
+        ],
+    ]
+
+
+# La unica vista que cambia de propietario, y el inventario de por que.
+#
+# Una vista se ejecuta con los privilegios de **su propietario**, y eso es lo
+# que permite publicar unas columnas sin conceder la tabla entera. Tres de las
+# cuatro leen solo ``analitico`` y ``privado``, que el migrador posee y que no
+# llevan politicas: se quedan con el, y el conjunto de objetos que cambian de
+# dueno se reduce a uno.
+#
+# ``v_entitlement_medico`` es la excepcion, y la necesidad es concreta: lee
+# ``operacional.usuario_medico``, que lleva FORCE ROW LEVEL SECURITY. El
+# migrador, aunque sea el dueno de esa tabla, queda sujeto a sus politicas --
+# eso es lo que significa FORCE -- y no tiene ninguna, de modo que la vista
+# devolveria cero filas y el RLS del dataset no autorizaria a nadie.
+# ``fetalalert_rls_owner`` si tiene una, ``pol_helpers USING (true)``, es NOLOGIN
+# y ningun rol de runtime puede asumirlo. Es el mismo patron que ya sostiene los
+# helpers SECURITY DEFINER, aplicado al unico sitio que lo necesita.
+VISTA_CON_PROPIETARIO_PROPIO = "v_entitlement_medico"
+
+
+def _propiedad_de_las_vistas() -> list[str]:
+    """Transfiere **una** vista, con lo minimo para que pueda leer.
+
+    El CREATE sobre ``publicacion`` se concede y se retira dentro de esta misma
+    transaccion: ``ALTER ... OWNER TO`` lo exige y no tiene por que sobrevivir.
+
+    El SELECT sobre ``privado.seudonimo_embarazo`` si persiste, porque la vista
+    lo necesita en cada consulta. Es una tabla, no el mapa entero: el dueno de
+    las politicas no recibe acceso a ``seudonimo_paciente``, que es el que ataria
+    un seudonimo a una persona.
+    """
+    return [
+        f"GRANT CREATE ON SCHEMA {PUBLICACION} TO {ROL_RLS_OWNER}",
+        f"ALTER VIEW {PUBLICACION}.{VISTA_CON_PROPIETARIO_PROPIO} "
+        f"OWNER TO {ROL_RLS_OWNER}",
+        f"REVOKE CREATE ON SCHEMA {PUBLICACION} FROM {ROL_RLS_OWNER}",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1099,6 +1417,18 @@ def upgrade() -> None:
         _sql(sentencia)
     for sentencia in _propiedad_de_helpers():
         _sql(sentencia)
+    # La capa analitica publicada. Va antes de los grants porque estos
+    # conceden SELECT sobre sus vistas, y despues de los helpers porque su
+    # propietario es el mismo rol NOLOGIN.
+    for sentencia in _schemas_de_publicacion():
+        _sql(sentencia)
+    _sql(MAPA)
+    _sql(VISTAS)
+    for sentencia in _permisos_de_publicacion():
+        _sql(sentencia)
+    for sentencia in _propiedad_de_las_vistas():
+        _sql(sentencia)
+
     for sentencia in _grants():
         _sql(sentencia)
     for sentencia in _politicas():
@@ -1124,6 +1454,11 @@ def downgrade() -> None:
     for sentencia in _revocaciones():
         _sql(sentencia)
 
+    # Los dos schemas de publicacion se van enteros, con sus vistas y su mapa.
+    # CASCADE aqui solo alcanza lo que esta revision creo dentro de ellos:
+    # ninguna otra revision los toca, y el downgrade los elimina completos.
+    _sql(f"DROP SCHEMA {PUBLICACION} CASCADE")
+    _sql(f"DROP SCHEMA {PRIVADO} CASCADE")
     _sql(f"DROP SCHEMA {SEGURIDAD} CASCADE")
     op.drop_index(
         "ix_lectura_biometrica_id_sesion",
