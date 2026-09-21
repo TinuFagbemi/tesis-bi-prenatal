@@ -638,6 +638,92 @@ jobs:
       # El guardián detecta **omisiones**. Los fallos y los errores los detecta
       # el código de salida de pytest, en el step que los produce. Son dos
       # comprobaciones distintas y ninguna sustituye a la otra.
+      # ------------------------------------------------------------------
+      # Precondicion de las tres suites de SCRUM-98 que vienen despues.
+      # ------------------------------------------------------------------
+      #
+      # Hasta ahora el workflow no cargaba el dataset en la base del servicio, y
+      # las tres suites que lo necesitan -- aislamiento por filas, recorridos
+      # HTTP y proteccion analitica -- encontraban una base migrada pero vacia.
+      # El sintoma era «dataset insuficiente» en el fixture de identidades.
+      #
+      # **Esto no duplica a SCRUM-61.** Aquella suite *prueba el cargador*, y lo
+      # hace dentro de transacciones que revierte: demuestra que carga bien y no
+      # deja nada. Este step *prepara la base principal* y confirma, que es lo
+      # contrario y hace falta igualmente.
+      #
+      # **Va aqui y no antes.** SCRUM-63 comprueba que no deja residuos propios
+      # sobre una base sin filas suyas, y SCRUM-52 baja y sube la cadena entera.
+      # Cargar antes de cualquiera de los dos romperia lo que esas suites
+      # afirman. Este es el primer punto del workflow en el que el dataset puede
+      # persistir sin contradecir a nadie.
+      #
+      # Migra con la identidad del migrador, no con la del servicio: el cargador
+      # comprueba la revision desplegada antes de escribir.
+      - name: Cargar dataset canonico para SCRUM-98
+        env:
+          APP_ENV: ci
+          ALEMBIC_DATABASE_URL: ${{ env.CI_MIGRADOR_URL }}
+        run: python scripts/load_mock_data.py
+
+      # Fail-fast: si la carga no quedo confirmada, el job para aqui en vez de
+      # producir 39 errores de fixture tres steps mas adelante.
+      #
+      # La conexion es nueva -- otro proceso, otra sesion --, asi que lo que
+      # cuenta es lo que quedo commiteado y no lo que el cargador creyo escribir.
+      # Solo se imprimen nombres de tabla y numeros: ni un correo, ni una cedula,
+      # ni un nombre.
+      - name: Verificar el dataset cargado (SCRUM-98)
+        env:
+          VERIFICACION_DATABASE_URL: postgresql+psycopg://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+
+          from sqlalchemy import create_engine, text
+
+          ESPERADO = {
+              "usuario": 37,
+              "usuario_paciente": 30,
+              "usuario_medico": 5,
+              "paciente": 30,
+              "medico": 5,
+              "embarazo": 30,
+              "sesion_monitoreo": 732,
+              "lectura_biometrica": 1180,
+          }
+
+          motor = create_engine(os.environ["VERIFICACION_DATABASE_URL"])
+          try:
+              with motor.connect() as conexion:
+                  real = {
+                      tabla: conexion.execute(
+                          text(f"SELECT count(*) FROM operacional.{tabla}")
+                      ).scalar_one()
+                      for tabla in ESPERADO
+                  }
+          finally:
+              motor.dispose()
+
+          fallo = False
+          for tabla, esperado in ESPERADO.items():
+              obtenido = real[tabla]
+              marca = "ok" if obtenido == esperado else "DISTINTO"
+              print(f"operacional.{tabla}: {obtenido} (esperado {esperado}) {marca}")
+              fallo = fallo or obtenido != esperado
+
+          if fallo:
+              print(
+                  "::error::La carga del dataset no dejo los conteos canonicos. "
+                  "Las suites de SCRUM-98 que vienen despues necesitan esta base "
+                  "cargada, y sin ella fallarian con 'dataset insuficiente'."
+              )
+              sys.exit(1)
+
+          print("Dataset canonico confirmado desde una conexion nueva.")
+          PY
+
       # Aislamiento por filas, conectando como **fetalalert_api**: el mismo rol
       # con el que la API atiende peticiones, no un rol de pruebas con politicas
       # propias. Un sujeto distinto demostraria el aislamiento de ese sujeto.
@@ -667,6 +753,100 @@ jobs:
           SCRUM98_HTTP_ADMIN_USER: ${{ env.POSTGRES_USER }}
           SCRUM98_HTTP_ADMIN_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
         run: python -m pytest -q -rs tests/test_http_como_api_postgresql.py --junitxml=pytest-scrum98-http.xml
+
+      # ------------------------------------------------------------------
+      # Precondicion de la suite de proteccion analitica.
+      # ------------------------------------------------------------------
+      #
+      # Esa suite necesita la publicacion ya materializada: sin seudonimos
+      # emitidos, las cuatro vistas de ``publicacion`` estan vacias y nada de lo
+      # que afirma significaria algo.
+      #
+      # **SCRUM-69 no satisface esta precondicion.** Aquella suite ejerce el ETL
+      # sobre bases temporales propias, que crea y destruye; la base principal
+      # queda como estaba. Este step ejecuta el ETL de verdad sobre
+      # ``scrum52_validacion_tmp`` y lo deja confirmado.
+      #
+      # Con la credencial del ETL y de ningun otro: ni el superusuario, ni el
+      # migrador, ni la API, ni Power BI. Emitir seudonimos es trabajo del ETL, y
+      # demostrarlo con una credencial mas ancha no demostraria nada.
+      - name: Ejecutar ETL canonico para publicacion SCRUM-98
+        env:
+          ETL_DATABASE_URL: postgresql+psycopg://fetalalert_etl:${{ env.ETL_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
+        run: |
+          python scripts/etl_analitico.py ejecutar | tee etl_canonico.log
+          python - <<'PY'
+          import sys
+
+          ESPERADAS = (
+              "resultado=SUCCESS",
+              "lecturas_origen=1180 hechos=1180",
+              "semaforo: OK=826 WARNING=295 ERROR=59",
+              "seudonimos_seudonimo_paciente=30",
+              "seudonimos_seudonimo_embarazo=30",
+              "conciliacion=OK",
+          )
+
+          with open("etl_canonico.log", encoding="utf-8") as archivo:
+              salida = archivo.read()
+
+          faltan = [linea for linea in ESPERADAS if linea not in salida]
+          for linea in ESPERADAS:
+              print(f"{'ok      ' if linea not in faltan else 'FALTA   '}{linea}")
+
+          if faltan:
+              print(
+                  "::error::La ejecucion del ETL no reporto lo esperado. La suite "
+                  "de proteccion analitica parte de esta publicacion."
+              )
+              sys.exit(1)
+          PY
+
+      # Fail-fast desde una conexion nueva: lo que quedo confirmado, no lo que el
+      # ETL dijo. Tres conteos y ningun dato clinico.
+      - name: Verificar la publicacion materializada (SCRUM-98)
+        env:
+          VERIFICACION_DATABASE_URL: postgresql+psycopg://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+
+          from sqlalchemy import create_engine, text
+
+          ESPERADO = {
+              "analitico.fact_lectura_biometrica": 1180,
+              "privado.seudonimo_paciente": 30,
+              "privado.seudonimo_embarazo": 30,
+          }
+
+          motor = create_engine(os.environ["VERIFICACION_DATABASE_URL"])
+          try:
+              with motor.connect() as conexion:
+                  real = {
+                      tabla: conexion.execute(
+                          text(f"SELECT count(*) FROM {tabla}")
+                      ).scalar_one()
+                      for tabla in ESPERADO
+                  }
+          finally:
+              motor.dispose()
+
+          fallo = False
+          for tabla, esperado in ESPERADO.items():
+              obtenido = real[tabla]
+              marca = "ok" if obtenido == esperado else "DISTINTO"
+              print(f"{tabla}: {obtenido} (esperado {esperado}) {marca}")
+              fallo = fallo or obtenido != esperado
+
+          if fallo:
+              print(
+                  "::error::La publicacion no quedo materializada como se esperaba."
+              )
+              sys.exit(1)
+
+          print("Publicacion materializada y confirmada desde una conexion nueva.")
+          PY
 
       # Proteccion analitica: seudonimizacion, entitlements y aislamiento de la
       # credencial tecnica de Power BI. Va la ultima porque necesita el ETL ya
