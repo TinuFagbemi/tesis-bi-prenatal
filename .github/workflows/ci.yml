@@ -639,6 +639,65 @@ jobs:
       # el código de salida de pytest, en el step que los produce. Son dos
       # comprobaciones distintas y ninguna sustituye a la otra.
       # ------------------------------------------------------------------
+      # El dataset simulado no esta versionado: hay que fabricarlo aqui.
+      # ------------------------------------------------------------------
+      #
+      # ``data/generated/`` esta en .gitignore, asi que un checkout limpio no
+      # trae ``dataset_fetalalert.json`` y el cargador aborta buscandolo. En una
+      # maquina de desarrollo el fichero suele existir de una ejecucion
+      # anterior, y eso es justo lo que hacia invisible esta dependencia: el
+      # runner parte de cero y tiene que construir todo lo que necesita.
+      #
+      # Los datos son simulados y completamente ficticios; el generador es su
+      # unica fuente.
+      - name: Generar dataset canonico para SCRUM-98
+        run: |
+          python scripts/generate_mock_data.py
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          # Fail-fast sobre el artefacto, no sobre lo que el generador dijo.
+          #
+          # Se comprueban los seis conteos que las suites de SCRUM-98 dan por
+          # ciertos, y no un hash del fichero entero: los ``password_hash`` son
+          # Argon2id con salt aleatorio, de modo que dos ejecuciones legitimas
+          # producen bytes distintos. Exigir determinismo byte a byte convertiria
+          # una propiedad correcta del hashing en un fallo de CI.
+          ruta = Path("data/generated/dataset_fetalalert.json")
+
+          if not ruta.is_file():
+              raise SystemExit(
+                  "::error::El generador no produjo "
+                  "data/generated/dataset_fetalalert.json"
+              )
+
+          datos = json.loads(ruta.read_text(encoding="utf-8"))
+
+          esperados = {
+              "usuarios": 37,
+              "pacientes": 30,
+              "medicos": 5,
+              "embarazos": 30,
+              "sesiones_monitoreo": 732,
+              "lecturas_biometricas": 1180,
+          }
+
+          fallo = False
+          for nombre, esperado in esperados.items():
+              observado = len(datos[nombre])
+              print(f"{nombre}={observado}")
+              if observado != esperado:
+                  print(f"::error::{nombre}: esperado={esperado}, observado={observado}")
+                  fallo = True
+
+          if fallo:
+              raise SystemExit(1)
+
+          print("dataset_generado=OK")
+          PY
+
+      # ------------------------------------------------------------------
       # Precondicion de las tres suites de SCRUM-98 que vienen despues.
       # ------------------------------------------------------------------
       #
