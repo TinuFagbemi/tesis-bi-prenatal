@@ -9,12 +9,13 @@ immutability and **not** non-repudiation: anybody with administrative
 privileges on PostgreSQL can alter the table, and nothing here pretends
 otherwise.
 
-**The catalogue is closed.** Ten actions, listed in :class:`AccionAuditada`:
+**The catalogue is closed.** Eleven actions, listed in :class:`AccionAuditada`:
 the four of SCRUM-70, the four of the account life cycle added by SCRUM-97, and
-the two of SCRUM-98 -- ``CONTEXTO_CLINICO_AUSENTE`` for an authenticated account
-that cannot be resolved to the clinical profile its role requires, and
+the three of SCRUM-98 -- ``CONTEXTO_CLINICO_AUSENTE`` for an authenticated
+account that cannot be resolved to the clinical profile its role requires,
 ``ACCESO_CLINICO_DENEGADO`` for an authenticated account that asked for a
-clinical resource it may not read.
+clinical resource it may not read, and ``ACCESO_CLINICO_PERMITIDO`` for one that
+read a clinical resource it was entitled to.
 Deliberately absent:
 
 * a row per rejected token -- the bearer of an invalid token has no identified
@@ -128,6 +129,25 @@ class AccionAuditada(str, enum.Enum):
     # read writes nothing: a trail that grew with every legitimate query would
     # bury the denials it exists to surface.
     ACCESO_CLINICO_DENEGADO = "ACCESO_CLINICO_DENEGADO"
+    # A clinical resource the caller **was** entitled to read (SCRUM-98). RF-10
+    # asks who reached the information and when; RNF-07 asks that accesses to
+    # sensitive clinical data be recorded. A trail that only holds refusals
+    # answers neither: it says who was turned away, never who actually read a
+    # patient's series.
+    #
+    # **One entry per request, not per row.** A listing that returns four
+    # hundred readings is one act of access, and recording four hundred rows
+    # would bury the trail in its own volume while telling nobody anything the
+    # single entry does not. The target is the resource the route names -- the
+    # pregnancy or the session whose identifier the caller sent -- and a
+    # collection query names none, so it records the entity with no id.
+    #
+    # The entry holds the actor, the action, the entity, that identifier and the
+    # observed address. Not one biometric value, not the rows returned, not the
+    # token, not an email: what was read is reconstructible from the identifier
+    # and the account's scope at that moment, and copying the payload into the
+    # trail would turn the audit table into a second store of clinical data.
+    ACCESO_CLINICO_PERMITIDO = "ACCESO_CLINICO_PERMITIDO"
 
 
 # Physical names of the entities an entry can point at. Table names, not HTTP

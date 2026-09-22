@@ -879,3 +879,86 @@ def test_instalar_el_contexto_fuera_de_la_transaccion_protegida_no_sirve(
             ).scalar()
 
     assert visibles == 0
+
+
+# ---------------------------------------------------------------------------
+# El dia clinico de las politicas es el de Panama, no el de la sesion
+# ---------------------------------------------------------------------------
+#
+# ``pol_alcance`` sobre ``embarazo`` se apoya en
+# ``seguridad.embarazo_en_seguimiento_vigente``, que compara las fechas del
+# ``SeguimientoClinico`` contra «hoy». Si ese «hoy» fuera ``CURRENT_DATE``,
+# saldria del ``TimeZone`` de la sesion, y entonces el conjunto de embarazos que
+# un medico puede leer dependeria de como se conecto: entre las 19:00 y la
+# medianoche de Panama, una sesion en UTC ya estaria en el dia siguiente y la
+# ultima jornada de una asignacion habria caducado antes de tiempo.
+#
+# Una decision de autorizacion no puede depender de eso.
+
+TIMEZONES_DE_SESION = ("UTC", "Asia/Tokyo", "America/Panama", "Pacific/Kiritimati")
+
+
+def _visibles_en_zona(engine, id_usuario, zona, consulta):
+    """La consulta, con esa identidad y con esa zona horaria de sesion."""
+    with engine.connect() as conexion:
+        with conexion.begin():
+            conexion.execute(text(f"SET TIME ZONE '{zona}'"))
+            conexion.execute(
+                text("SELECT set_config('fetalalert.id_usuario', :v, true)"),
+                {"v": str(id_usuario)},
+            )
+            return sorted(conexion.execute(text(consulta)).scalars().all())
+
+
+@pytest.mark.parametrize("zona", TIMEZONES_DE_SESION)
+def test_el_alcance_del_medico_no_depende_del_timezone_de_la_sesion(
+    engine, identidades, zona
+):
+    """El mismo medico ve los mismos embarazos desde cualquier zona."""
+    id_usuario = identidades["medicos"][0]["id_usuario"]
+    consulta = "SELECT id_embarazo FROM operacional.embarazo ORDER BY id_embarazo"
+
+    alcance = _visibles_en_zona(engine, id_usuario, zona, consulta)
+    referencia = _visibles_en_zona(engine, id_usuario, "America/Panama", consulta)
+
+    assert alcance == referencia
+    assert alcance, "el dataset no da al medico ninguna asignacion vigente"
+
+
+@pytest.mark.parametrize("zona", TIMEZONES_DE_SESION)
+def test_las_sesiones_visibles_del_medico_tampoco_dependen_de_la_zona(
+    engine, identidades, zona
+):
+    """Lo que cuelga del embarazo hereda la misma decision, y debe ser estable."""
+    id_usuario = identidades["medicos"][0]["id_usuario"]
+    consulta = (
+        "SELECT id_sesion FROM operacional.sesion_monitoreo ORDER BY id_sesion"
+    )
+
+    alcance = _visibles_en_zona(engine, id_usuario, zona, consulta)
+    referencia = _visibles_en_zona(engine, id_usuario, "America/Panama", consulta)
+
+    assert alcance == referencia
+    assert alcance, "el medico no alcanza ninguna sesion"
+
+
+@pytest.mark.parametrize("zona", TIMEZONES_DE_SESION)
+def test_el_helper_de_vigencia_responde_igual_en_cualquier_zona(
+    engine, identidades, zona
+):
+    """El helper, interrogado directamente a traves del rol de la aplicacion.
+
+    Es la pieza concreta que ``pol_alcance`` consulta, asi que fijarla aqui
+    impide que una futura reescritura de la politica reintroduzca el defecto por
+    otro camino.
+    """
+    id_usuario = identidades["medicos"][0]["id_usuario"]
+    consulta = (
+        "SELECT id_embarazo FROM operacional.embarazo "
+        "WHERE seguridad.embarazo_en_seguimiento_vigente(id_embarazo) "
+        "ORDER BY id_embarazo"
+    )
+
+    assert _visibles_en_zona(engine, id_usuario, zona, consulta) == _visibles_en_zona(
+        engine, id_usuario, "America/Panama", consulta
+    )

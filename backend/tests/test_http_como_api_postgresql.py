@@ -2183,3 +2183,271 @@ def test_si_la_auditoria_falla_la_respuesta_sigue_siendo_404(
     assert _sin_identificador(ajeno.json()["detail"]) == _sin_identificador(
         inexistente.json()["detail"]
     )
+
+
+# ---------------------------------------------------------------------------
+# 8. Cada lectura clinica autorizada deja rastro (RF-10 / RNF-07)
+# ---------------------------------------------------------------------------
+#
+# La seccion anterior cubre las denegaciones. Esta cubre la otra mitad, que es
+# la que los requerimientos piden de verdad: quien accedio a la informacion y
+# cuando. Un registro que solo guarde rechazos dice quien fue rechazado y nunca
+# quien leyo la serie de una paciente.
+#
+# El contrato es **una entrada por peticion**. No una por embarazo devuelto, ni
+# una por sesion, ni una por lectura.
+
+
+def permitidos(engine_observador, desde: int) -> list[dict]:
+    """Las entradas de ``ACCESO_CLINICO_PERMITIDO`` posteriores a una marca."""
+    return [
+        dict(fila)
+        for fila in observar(
+            engine_observador,
+            """
+            SELECT id_log, id_usuario, accion, nombre_entidad_afectada,
+                   id_entidad_afectada, ip_origen
+            FROM operacional.auditoria_log
+            WHERE id_log > :desde AND accion = :accion
+            ORDER BY id_log
+            """,
+            desde=desde,
+            accion="ACCESO_CLINICO_PERMITIDO",
+        )
+    ]
+
+
+def test_listar_embarazos_deja_una_entrada_sin_identificador(
+    cliente, token_paciente, engine_observador, marca_de_auditoria, identidades
+):
+    """La ruta de coleccion no nombra ningun episodio, asi que el id es NULL.
+
+    Serializar la lista de embarazos devueltos convertiria la traza en un
+    segundo almacen de datos clinicos.
+    """
+    respuesta = cliente.get(RUTA_EMBARAZOS, headers=bearer(token_paciente))
+    assert respuesta.status_code == 200
+
+    [entrada] = permitidos(engine_observador, marca_de_auditoria)
+    assert entrada["id_usuario"] == identidades["paciente"]["id_usuario"]
+    assert entrada["nombre_entidad_afectada"] == "embarazo"
+    assert entrada["id_entidad_afectada"] is None
+    assert entrada["ip_origen"]
+
+
+def test_listar_sesiones_deja_una_entrada_con_el_embarazo_pedido(
+    cliente, token_paciente, alcance_clinico, engine_observador, marca_de_auditoria
+):
+    id_embarazo = alcance_clinico["de_la_paciente"][0]
+
+    respuesta = cliente.get(
+        RUTA_SESIONES_DE.format(id_embarazo), headers=bearer(token_paciente)
+    )
+    assert respuesta.status_code == 200
+    assert len(respuesta.json()) > 1, "hace falta mas de una sesion para que valga"
+
+    [entrada] = permitidos(engine_observador, marca_de_auditoria)
+    assert entrada["nombre_entidad_afectada"] == "embarazo"
+    assert entrada["id_entidad_afectada"] == str(id_embarazo)
+
+
+def test_listar_lecturas_deja_una_entrada_con_la_sesion_pedida(
+    cliente, token_paciente, alcance_clinico, engine_observador, marca_de_auditoria
+):
+    """Una serie de muchas lecturas es **un** acceso, no uno por fila."""
+    id_embarazo = alcance_clinico["de_la_paciente"][0]
+    id_sesion = cliente.get(
+        RUTA_SESIONES_DE.format(id_embarazo), headers=bearer(token_paciente)
+    ).json()[0]["id_sesion"]
+
+    marca = escalar(
+        engine_observador,
+        "SELECT coalesce(max(id_log), 0) FROM operacional.auditoria_log",
+    )
+    respuesta = cliente.get(
+        RUTA_LECTURAS_DE.format(id_sesion), headers=bearer(token_paciente)
+    )
+
+    assert respuesta.status_code == 200
+    assert len(respuesta.json()) >= 1
+
+    [entrada] = permitidos(engine_observador, marca)
+    assert entrada["nombre_entidad_afectada"] == "sesion_monitoreo"
+    assert entrada["id_entidad_afectada"] == str(id_sesion)
+
+
+def test_una_serie_larga_sigue_dejando_una_sola_entrada(
+    cliente, token_paciente, alcance_clinico, engine_observador
+):
+    """El contrato que importa: por peticion, no por fila devuelta."""
+    id_embarazo = alcance_clinico["de_la_paciente"][0]
+    sesiones = cliente.get(
+        RUTA_SESIONES_DE.format(id_embarazo), headers=bearer(token_paciente)
+    ).json()
+
+    # La sesion con mas lecturas del episodio.
+    mejor, cuantas = None, 0
+    for sesion in sesiones:
+        total = len(
+            cliente.get(
+                RUTA_LECTURAS_DE.format(sesion["id_sesion"]),
+                headers=bearer(token_paciente),
+            ).json()
+        )
+        if total > cuantas:
+            mejor, cuantas = sesion["id_sesion"], total
+
+    assert cuantas >= 2, "el dataset no da ninguna sesion con varias lecturas"
+
+    marca = escalar(
+        engine_observador,
+        "SELECT coalesce(max(id_log), 0) FROM operacional.auditoria_log",
+    )
+    respuesta = cliente.get(
+        RUTA_LECTURAS_DE.format(mejor), headers=bearer(token_paciente)
+    )
+
+    assert len(respuesta.json()) == cuantas
+    assert len(permitidos(engine_observador, marca)) == 1
+
+
+def test_una_lista_vacia_autorizada_tambien_deja_entrada(
+    cliente, token_admin, referencias, engine_observador
+):
+    """Preguntar tambien es acceder.
+
+    Una cuenta recien aprovisionada sin embarazos recibe una lista vacia, y ese
+    acceso se registra igual: la traza tiene que poder decir quien consulto,
+    aunque no se llevara nada.
+    """
+    if referencias["id_perfil_libre"] is None:
+        pytest.skip("el dataset no deja ningun perfil de paciente sin cuenta")
+
+    creada = cliente.post(
+        RUTA_PACIENTES.format(referencias["id_perfil_libre"]),
+        json={"email": EMAIL_CUENTA_PACIENTE, "password": PASSWORD_NUEVA},
+        headers=bearer(token_admin),
+    )
+    assert creada.status_code == 201, creada.text
+    token = iniciar_sesion(cliente, EMAIL_CUENTA_PACIENTE, PASSWORD_NUEVA)
+
+    marca = escalar(
+        engine_observador,
+        "SELECT coalesce(max(id_log), 0) FROM operacional.auditoria_log",
+    )
+    respuesta = cliente.get(RUTA_EMBARAZOS, headers=bearer(token))
+
+    assert respuesta.status_code == 200
+    assert respuesta.json() == []
+
+    [entrada] = permitidos(engine_observador, marca)
+    assert entrada["id_usuario"] == creada.json()["id_usuario"]
+    assert entrada["id_entidad_afectada"] is None
+
+
+def test_un_404_sigue_registrando_denegado_y_no_permitido(
+    cliente, token_paciente, alcance_clinico, engine_observador, marca_de_auditoria
+):
+    """Ajeno e inexistente no pueden pasar por accesos concedidos."""
+    for id_embarazo in (
+        alcance_clinico["del_medico"][0],
+        alcance_clinico["embarazo_inexistente"],
+    ):
+        assert (
+            cliente.get(
+                RUTA_SESIONES_DE.format(id_embarazo), headers=bearer(token_paciente)
+            ).status_code
+            == 404
+        )
+
+    assert permitidos(engine_observador, marca_de_auditoria) == []
+    assert len(denegaciones(engine_observador, marca_de_auditoria)) == 2
+
+
+def test_un_403_por_rol_no_registra_acceso_permitido(
+    cliente, token_admin, engine_observador, marca_de_auditoria
+):
+    """ADMIN no llega al handler: su rechazo es el de la guardia de rol."""
+    assert cliente.get(RUTA_EMBARAZOS, headers=bearer(token_admin)).status_code == 403
+
+    assert permitidos(engine_observador, marca_de_auditoria) == []
+    assert (
+        escalar(
+            engine_observador,
+            "SELECT count(*) FROM operacional.auditoria_log "
+            "WHERE id_log > :d AND accion = 'ACCESO_DENEGADO_ROL'",
+            d=marca_de_auditoria,
+        )
+        >= 1
+    )
+
+
+def test_la_entrada_no_lleva_biometria_token_ni_pii(
+    cliente, token_paciente, alcance_clinico, engine_observador, marca_de_auditoria
+):
+    """La fila contiene lo que la peticion trajo, y nada de lo que devolvio."""
+    id_embarazo = alcance_clinico["de_la_paciente"][0]
+    cliente.get(RUTA_SESIONES_DE.format(id_embarazo), headers=bearer(token_paciente))
+
+    [entrada] = permitidos(engine_observador, marca_de_auditoria)
+    texto = " ".join(str(valor) for valor in entrada.values())
+
+    assert token_paciente not in texto
+    assert PASSWORD_SIMULADA not in texto
+    assert "Bearer" not in texto and "@" not in texto
+    for prohibido in ("hr_valor", "spo2_valor", "mov_valor", "SELECT", "codigo_semaforo"):
+        assert prohibido not in texto
+
+
+def test_si_no_puede_registrarse_el_acceso_no_se_entregan_los_datos(
+    cliente, token_paciente, alcance_clinico, monkeypatch
+):
+    """Fail-closed, y es lo contrario de lo que hace una denegacion.
+
+    Entregar la serie de una paciente sin poder registrar quien se la llevo es
+    exactamente lo que RF-10 prohibe. Asi que si la auditoria no puede escribir,
+    la respuesta falla por el canal saneado y los datos no salen.
+    """
+    from app.api.v1 import clinico as router_clinico
+    from app.services.auditoria import FalloDeAuditoria
+
+    def revienta(*_, **__):
+        raise FalloDeAuditoria()
+
+    monkeypatch.setattr(router_clinico.auditoria, "registrar_con_commit", revienta)
+
+    respuesta = cliente.get(RUTA_EMBARAZOS, headers=bearer(token_paciente))
+
+    assert respuesta.status_code >= 400
+    assert respuesta.status_code != 200
+    cuerpo = respuesta.text.lower()
+    assert "select" not in cuerpo and "operacional." not in cuerpo
+    assert "traceback" not in cuerpo
+
+
+def test_una_denegacion_sigue_respondiendo_404_aunque_falle_la_auditoria(
+    cliente, token_paciente, alcance_clinico, monkeypatch
+):
+    """La asimetria, comprobada: la denegacion no se degrada.
+
+    Si tambien fallara en cerrado, una tabla de auditoria rota distinguiria un
+    recurso ajeno de uno inexistente por el codigo de respuesta.
+    """
+    from app.api.v1 import clinico as router_clinico
+    from app.services.auditoria import FalloDeAuditoria
+
+    def revienta(*_, **__):
+        raise FalloDeAuditoria()
+
+    monkeypatch.setattr(router_clinico.auditoria, "registrar_con_commit", revienta)
+
+    ajeno = cliente.get(
+        RUTA_SESIONES_DE.format(alcance_clinico["del_medico"][0]),
+        headers=bearer(token_paciente),
+    )
+    inexistente = cliente.get(
+        RUTA_SESIONES_DE.format(alcance_clinico["embarazo_inexistente"]),
+        headers=bearer(token_paciente),
+    )
+
+    assert ajeno.status_code == inexistente.status_code == 404

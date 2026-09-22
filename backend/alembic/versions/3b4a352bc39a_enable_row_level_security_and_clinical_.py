@@ -172,6 +172,47 @@ SECUENCIAS_DE_LA_API = (
     "lectura_biometrica_id_lectura_seq",
 )
 
+# ---------------------------------------------------------------------------
+# El dia clinico
+# ---------------------------------------------------------------------------
+#
+# FetalAlert tiene **un** dia clinico y es el de Panama. El ETL ya lo habia
+# fijado asi -- ``app.etl.reglas.ZONA_HORARIA_CLINICA`` y la expresion SQL de
+# ``app.etl.conciliacion.DIA_CLINICO`` --, y esta revision se habia separado de
+# esa convencion sin querer.
+#
+# **Por que importa.** ``CURRENT_DATE`` y ``timestamptz::date`` no son
+# absolutos: los resuelve el parametro ``TimeZone`` de la **sesion**. Dos
+# conexiones a la misma base, una en UTC y otra en Asia/Tokyo, obtenian dias
+# distintos para el mismo instante. Eso alcanzaba a la vigencia de una
+# asignacion medica -- es decir, a quien puede leer que -- y a la fecha de cada
+# lectura publicada. Una lectura de las 22:30 en Panama se publicaba con la
+# fecha del dia siguiente si la sesion estaba en UTC, y una asignacion podia
+# aparecer vigente o vencida segun quien preguntara.
+#
+# ``AT TIME ZONE`` convierte el ``timestamptz`` al reloj de pared de esa zona y
+# devuelve un ``timestamp`` sin zona; el ``::date`` posterior es entonces el dia
+# calendario de Panama, y no depende de nada de la sesion.
+#
+# No hay funcion nueva. Estas tres expresiones se interpolan en el SQL de la
+# revision, que es donde tienen que ser identicas, y una prueba offline
+# comprueba que la zona coincide con la que usa el ETL.
+ZONA_CLINICA = "America/Panama"
+
+# «Hoy» en Panama, para la vigencia de las asignaciones.
+HOY_CLINICO = f"(CURRENT_TIMESTAMP AT TIME ZONE '{ZONA_CLINICA}')::date"
+
+
+def _dia_clinico(columna: str) -> str:
+    """El dia calendario panameno de un ``timestamptz``."""
+    return f"({columna} AT TIME ZONE '{ZONA_CLINICA}')::date"
+
+
+def _mes_clinico(columna: str) -> str:
+    """El primer dia del mes panameno de un ``timestamptz``."""
+    return f"date_trunc('month', {columna} AT TIME ZONE '{ZONA_CLINICA}')::date"
+
+
 _LISTA = ", ".join
 
 
@@ -524,8 +565,8 @@ AS $funcion$
         WHERE sc.id_embarazo = p_id_embarazo
           AND sc.id_medico = {SEGURIDAD}.medico_actual()
           AND sc.activo
-          AND sc.fecha_asignacion <= CURRENT_DATE
-          AND (sc.fecha_fin IS NULL OR sc.fecha_fin >= CURRENT_DATE)
+          AND sc.fecha_asignacion <= {HOY_CLINICO}
+          AND (sc.fecha_fin IS NULL OR sc.fecha_fin >= {HOY_CLINICO})
     )
 $funcion$;
 
@@ -1047,8 +1088,8 @@ CREATE TABLE {PRIVADO}.seudonimo_embarazo (
 # un seguimiento PRINCIPAL, uno de APOYO y uno de REEMPLAZO, y los tres conceden
 # lo mismo. Sin el DISTINCT el mismo medico veria el embarazo repetido.
 VIGENCIA = (
-    "sc.activo AND sc.fecha_asignacion <= CURRENT_DATE "
-    "AND (sc.fecha_fin IS NULL OR sc.fecha_fin >= CURRENT_DATE)"
+    f"sc.activo AND sc.fecha_asignacion <= {HOY_CLINICO} "
+    f"AND (sc.fecha_fin IS NULL OR sc.fecha_fin >= {HOY_CLINICO})"
 )
 
 # Umbral de celda de la superficie administrativa. Por debajo de este numero de
@@ -1088,6 +1129,36 @@ COMMENT ON VIEW {PUBLICACION}.v_embarazo IS
 'operacionales.';
 
 CREATE VIEW {PUBLICACION}.v_lectura AS
+-- El orden de las sesiones dentro del episodio, calculado desde el tiempo.
+--
+-- ``secuencia_sesion`` salia de ``dense_rank() OVER (ORDER BY f.id_sesion)``, y
+-- eso presupone que un identificador menor es una sesion clinicamente anterior.
+-- En este sistema no lo es: el nodo edge captura sin conexion y sincroniza
+-- despues, asi que una sesion tomada el martes puede recibir un id mayor que
+-- otra tomada el jueves si se sincronizo mas tarde. La serie publicada quedaba
+-- ordenada por orden de llegada al servidor, no por orden de ocurrencia, y la
+-- adherencia medida sobre ella describia la red y no a la paciente.
+--
+-- Ahora se ordena por el primer instante de cada sesion. ``id_sesion`` sigue
+-- presente **solo** como desempate estable -- dos sesiones con el mismo minimo
+-- tienen que recibir siempre la misma secuencia, no una distinta en cada
+-- consulta -- y no se publica.
+WITH sesiones AS (
+    SELECT f.id_embarazo,
+           f.id_sesion,
+           min(f.fecha_hora) AS inicio_sesion
+    FROM {ANALITICO}.fact_lectura_biometrica f
+    GROUP BY f.id_embarazo, f.id_sesion
+),
+orden AS (
+    SELECT id_embarazo,
+           id_sesion,
+           row_number() OVER (
+               PARTITION BY id_embarazo
+               ORDER BY inicio_sesion, id_sesion
+           ) AS secuencia_sesion
+    FROM sesiones
+)
 SELECT sem.seudonimo AS seudonimo_embarazo,
        sp.seudonimo  AS seudonimo_paciente,
        dt.semana_gestacion,
@@ -1100,14 +1171,13 @@ SELECT sem.seudonimo AS seudonimo_embarazo,
        f.estado_hr,
        f.estado_spo2,
        f.estado_mov,
-       f.fecha_hora::date AS fecha_captura,
-       -- Numero de la sesion dentro del episodio, no su clave operacional. Es
-       -- lo que permite medir adherencia sin publicar un id de la base.
-       dense_rank() OVER (
-           PARTITION BY f.id_embarazo ORDER BY f.id_sesion
-       ) AS secuencia_sesion,
+       {_dia_clinico('f.fecha_hora')} AS fecha_captura,
+       -- Numero cronologico de la sesion dentro del episodio, no su clave
+       -- operacional: permite medir adherencia sin publicar un id de la base.
+       o.secuencia_sesion,
        dc.provincia
 FROM {ANALITICO}.fact_lectura_biometrica f
+JOIN orden o ON o.id_embarazo = f.id_embarazo AND o.id_sesion = f.id_sesion
 JOIN {PRIVADO}.seudonimo_embarazo sem ON sem.id_embarazo = f.id_embarazo
 JOIN {PRIVADO}.seudonimo_paciente sp ON sp.id_paciente = f.id_paciente
 JOIN {ANALITICO}.dim_tiempo_gestacional dt
@@ -1118,7 +1188,10 @@ LEFT JOIN {ANALITICO}.dim_clinica dc ON dc.id_clinica = f.id_clinica;
 COMMENT ON VIEW {PUBLICACION}.v_lectura IS
 'Serie longitudinal de lecturas, seudonimizada. Conserva las variables '
 'clinicas y los estados que las alertas necesitan; no publica id_lectura, '
-'id_sesion, id_paciente, id_medico ni id_embarazo.';
+'id_sesion, id_paciente, id_medico ni id_embarazo. ``secuencia_sesion`` numera '
+'las sesiones por el instante de su primera lectura -- no por su identificador, '
+'que en un sistema offline-first refleja el orden de sincronizacion y no el de '
+'ocurrencia --, con el id como unico desempate estable.';
 
 CREATE VIEW {PUBLICACION}.v_entitlement_medico AS
 SELECT DISTINCT lower(u.email) AS upn_medico,
@@ -1142,7 +1215,7 @@ COMMENT ON VIEW {PUBLICACION}.v_entitlement_medico IS
 
 CREATE VIEW {PUBLICACION}.v_resumen_administrativo AS
 SELECT dc.provincia,
-       date_trunc('month', f.fecha_hora)::date AS mes,
+       {_mes_clinico('f.fecha_hora')} AS mes,
        ds.codigo_nivel AS codigo_semaforo,
        count(*)                          AS lecturas,
        count(DISTINCT f.id_embarazo)     AS embarazos,
@@ -1151,7 +1224,7 @@ SELECT dc.provincia,
 FROM {ANALITICO}.fact_lectura_biometrica f
 JOIN {ANALITICO}.dim_semaforo ds ON ds.id_semaforo = f.id_semaforo
 LEFT JOIN {ANALITICO}.dim_clinica dc ON dc.id_clinica = f.id_clinica
-GROUP BY dc.provincia, date_trunc('month', f.fecha_hora), ds.codigo_nivel
+GROUP BY dc.provincia, {_mes_clinico('f.fecha_hora')}, ds.codigo_nivel
 HAVING count(DISTINCT f.id_embarazo) >= {MINIMO_DE_CELDA};
 
 COMMENT ON VIEW {PUBLICACION}.v_resumen_administrativo IS
