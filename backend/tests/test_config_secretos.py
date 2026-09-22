@@ -72,12 +72,23 @@ RENDERIZAR_ALEMBIC_SIN_CONFTEST = (
 )
 
 
-def ejecutar(codigo: str) -> subprocess.CompletedProcess:
+def ejecutar(codigo: str, **variables: str) -> subprocess.CompletedProcess:
+    """El codigo en un subproceso sin JWT_SECRET_KEY, con las variables dadas.
+
+    ``variables`` existe para las URLs por proceso de SCRUM-98: alembic exige
+    ALEMBIC_DATABASE_URL y el ETL exige ETL_DATABASE_URL, asi que una prueba que
+    los ejercite tiene que aportarlas. Se pasan explicitamente, con un valor
+    ficticio, en lugar de heredarlas del entorno: lo que estas pruebas afirman
+    es el trato de JWT_SECRET_KEY, y heredar una URL real haria que el resultado
+    dependiera de la maquina.
+    """
+    entorno = entorno_sin_jwt()
+    entorno.update(variables)
     return subprocess.run(
         [sys.executable, "-c", codigo],
         capture_output=True,
         text=True,
-        env=entorno_sin_jwt(),
+        env=entorno,
         cwd=str(DIRECTORIO_BACKEND),
     )
 
@@ -146,7 +157,9 @@ def test_alembic_renderiza_la_migracion_sin_secreto():
     ``app.etl.modelos``. Si la variable fuese obligatoria en la configuracion
     compartida, las migraciones dejarian de poder renderizarse.
     """
-    resultado = ejecutar(RENDERIZAR_ALEMBIC_SIN_CONFTEST)
+    # ALEMBIC_DATABASE_URL es obligatoria desde SCRUM-98 y no tiene respaldo, asi
+    # que el render la necesita. Es ficticia: ``--sql`` no abre conexion.
+    resultado = ejecutar(RENDERIZAR_ALEMBIC_SIN_CONFTEST, ALEMBIC_DATABASE_URL=URL_FICTICIA)
 
     assert resultado.returncode == 0, resultado.stderr
 
@@ -442,6 +455,9 @@ def test_la_api_no_arranca_con_jwt_en_blanco_y_lo_reporta_como_ausencia():
 def test_alembic_y_el_etl_siguen_sin_depender_de_jwt_en_blanco():
     entorno = entorno_sin_jwt()
     entorno["JWT_SECRET_KEY"] = "   "
+    # Obligatoria desde SCRUM-98, y sin respaldo a DATABASE_URL. Ficticia: el
+    # render con ``--sql`` no abre ninguna conexion.
+    entorno["ALEMBIC_DATABASE_URL"] = URL_FICTICIA
 
     resultado = subprocess.run(
         [sys.executable, "-c", "import app.etl, app.loader;" + RENDERIZAR_ALEMBIC_SIN_CONFTEST],

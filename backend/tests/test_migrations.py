@@ -45,7 +45,7 @@ from tests.test_models import ONDELETE_ESPERADOS, TABLAS_ESPERADAS
 # SCRUM-69 adds the third, the analytic schema, which touches nothing here.
 # SCRUM-97 adds the fourth: ck_usuario_email_canonico and the role/link
 # triggers, on tables that already existed.
-CANTIDAD_DE_REVISIONES_ESPERADA = 4
+CANTIDAD_DE_REVISIONES_ESPERADA = 5
 
 # Shape of the deployed schema, pinned so a silent drift in either the models or
 # the revisions fails here. UNIQUE went from 18 to 17 when the 1:1 between
@@ -54,6 +54,22 @@ CANTIDAD_DE_REVISIONES_ESPERADA = 4
 # UNIQUE and one CHECK, and no index of its own. SCRUM-97 adds one CHECK to an
 # existing table -- ck_usuario_email_canonico -- and nothing else counted here:
 # its triggers and function are not constraints of this inventory.
+#
+# SCRUM-98 subfase 5 anade el mapa de seudonimos: dos tablas en el schema
+# ``privado``, cada una con su PRIMARY KEY, su UNIQUE y una llave foranea hacia
+# ``operacional`` con ON DELETE RESTRICT. No viven en ``operacional``, asi que no
+# entran en ``ONDELETE_ESPERADOS`` -- que inventaria el modelo operativo -- pero
+# si aparecen en el SQL renderizado. Su aporte se declara aparte para que siga
+# siendo visible cual de los dos esquemas lo produce.
+APORTE_DEL_MAPA = {
+    "primary_key": 2,
+    "foreign_key": 2,
+    "on_delete_restrict": 2,
+    # ``unique`` no aparece: las dos restricciones del mapa se renderizan como
+    # ``CONSTRAINT uq_... UNIQUE`` en la columna, sin el ``UNIQUE (`` que esta
+    # cifra cuenta.
+}
+
 CANTIDADES_ESPERADAS = {
     "tablas": 23,
     "primary_key": 23,
@@ -62,7 +78,9 @@ CANTIDADES_ESPERADAS = {
     "on_delete_cascade": 10,
     "unique": 18,
     "check": 31,
-    "indices": 13,
+    # 14 desde SCRUM-98: ix_lectura_biometrica_id_sesion, que la politica de
+    # esa tabla necesita y que la cascada del borrado tampoco tenia.
+    "indices": 14,
 }
 
 CREATE_TABLE = re.compile(
@@ -183,7 +201,19 @@ def _sentencias(sql: str) -> list[str]:
     return [sentencia for sentencia in sql.split(SEPARADOR_DE_SENTENCIAS) if sentencia.strip()]
 
 
+# El schema de las superficies publicadas. Sus vistas leen ``analitico``,
+# ``privado`` y ``operacional`` a la vez -- eso es lo que hacen --, asi que no
+# pertenecen a ninguna de las dos particiones que este modulo separa y se
+# excluyen de la del esquema analitico. La garantia que esa particion protege es
+# que ninguna **tabla** analitica referencie una operacional; una vista que lee
+# de los dos esquemas no es eso, y la comprueba
+# ``test_el_unico_cruce_de_esquema_es_el_del_mapa_de_seudonimos``.
+ESQUEMA_PUBLICACION = "publicacion"
+
+
 def _es_del_esquema_analitico(sentencia: str) -> bool:
+    if ESQUEMA_PUBLICACION in sentencia:
+        return False
     return ESQUEMA_ANALITICO in sentencia
 
 
@@ -285,7 +315,11 @@ def test_el_esquema_se_crea_antes_que_cualquier_tabla(sql_upgrade):
 def test_el_esquema_no_adopta_uno_preexistente(sql_upgrade):
     """Without IF NOT EXISTS the migration refuses to reuse an unknown schema."""
     assert "CREATE SCHEMA IF NOT EXISTS" not in sql_upgrade
-    assert sql_upgrade.count("CREATE SCHEMA") == 1
+    # Dos desde SCRUM-98: ``operacional`` y ``seguridad``, el de los helpers.
+    # Cuatro en este render: operacional, seguridad (SCRUM-98 subfase 3) y los
+    # dos de la publicacion (subfase 5). El de ``analitico`` no cuenta aqui
+    # porque ``sql_upgrade`` aparta las sentencias de ese esquema.
+    assert sql_upgrade.count("CREATE SCHEMA") == 4
 
 
 # --------------------------------------------------------------------------
@@ -340,15 +374,22 @@ def test_cada_tabla_es_equivalente_a_la_de_la_metadata(nombre_tabla, sql_upgrade
 
 
 def test_cantidad_de_llaves_foraneas(sql_upgrade):
+    """Las del modelo operativo, mas las dos del mapa privado."""
     referencias = sql_upgrade.count(f"REFERENCES {SCHEMA_OPERACIONAL}.")
 
-    assert referencias == len(ONDELETE_ESPERADOS)
+    assert referencias == len(ONDELETE_ESPERADOS) + APORTE_DEL_MAPA["foreign_key"]
 
 
 @pytest.mark.parametrize("politica", ["RESTRICT", "CASCADE"])
 def test_cantidad_de_politicas_on_delete(politica, sql_upgrade):
-    """The RESTRICT/CASCADE split is pinned by ONDELETE_ESPERADOS in test_models."""
+    """The RESTRICT/CASCADE split is pinned by ONDELETE_ESPERADOS in test_models.
+
+    Las dos del mapa privado son RESTRICT, y no por comodidad: es lo que impide
+    borrar una paciente por debajo de los datos ya publicados.
+    """
     esperadas = sum(1 for p in ONDELETE_ESPERADOS.values() if p == politica)
+    if politica == "RESTRICT":
+        esperadas += APORTE_DEL_MAPA["on_delete_restrict"]
 
     assert sql_upgrade.count(f"ON DELETE {politica}") == esperadas
 
@@ -356,7 +397,7 @@ def test_cantidad_de_politicas_on_delete(politica, sql_upgrade):
 def test_ninguna_llave_foranea_queda_sin_politica(sql_upgrade):
     con_politica = sql_upgrade.count("ON DELETE ")
 
-    assert con_politica == len(ONDELETE_ESPERADOS)
+    assert con_politica == len(ONDELETE_ESPERADOS) + APORTE_DEL_MAPA["foreign_key"]
 
 
 def test_toda_referencia_lleva_el_esquema(sql_upgrade):
@@ -457,8 +498,19 @@ def test_id_sesion_conserva_su_llave_foranea_en_cascada(sql_upgrade):
     ],
 )
 def test_cantidades_de_la_estructura_desplegada(clave, patron, sql_upgrade):
-    """Pin the shape of the schema so an accidental drop or addition fails loudly."""
-    assert sql_upgrade.count(patron) == CANTIDADES_ESPERADAS[clave]
+    """Pin the shape of the schema so an accidental drop or addition fails loudly.
+
+    ``WITH CHECK (`` de las policies de SCRUM-98 contiene ``CHECK (``, y contarlo
+    mezclaria dos cosas distintas: las restricciones de columna del modelo y la
+    clausula de escritura de una politica. Se descuenta, asi que esta cifra
+    sigue describiendo lo que siempre describio.
+    """
+    encontrados = sql_upgrade.count(patron)
+    encontrados -= APORTE_DEL_MAPA.get(clave, 0)
+    if clave == "check":
+        encontrados -= sql_upgrade.count("WITH CHECK (")
+
+    assert encontrados == CANTIDADES_ESPERADAS[clave]
 
 
 def test_las_cantidades_pinneadas_siguen_a_la_metadata():
@@ -554,7 +606,133 @@ def test_el_esquema_se_elimina_despues_de_sus_objetos(sql_downgrade):
     assert drop_schema > ultimo_drop_table
 
 
-def test_el_downgrade_no_usa_cascade(sql_downgrade):
-    """CASCADE would silently drop objects this revision never created."""
-    assert "CASCADE" not in sql_downgrade
+# Los tres schemas que esta cadena crea entera y puede por tanto eliminar
+# entera. El CASCADE alcanza exactamente lo que ella misma puso dentro.
+SCHEMAS_QUE_SE_ELIMINAN_ENTEROS = ("seguridad", "publicacion", "privado")
+
+
+def test_el_downgrade_no_usa_cascade_sobre_tablas(sql_downgrade):
+    """CASCADE would silently drop objects this revision never created.
+
+    Las unicas excepciones son los ``DROP SCHEMA ... CASCADE`` de los tres
+    schemas que esta cadena crea por completo: ``seguridad`` con sus nueve
+    funciones, y ``publicacion`` y ``privado`` con sus vistas y su mapa. Ninguno
+    contiene nada que no haya creado ella. Sobre una **tabla** seguiria siendo
+    inaceptable, y por eso la prueba distingue el objeto en vez de prohibir la
+    palabra.
+    """
+    permitidos = {
+        f"DROP SCHEMA {schema} CASCADE" for schema in SCHEMAS_QUE_SE_ELIMINAN_ENTEROS
+    }
+    for linea in sql_downgrade.splitlines():
+        if "CASCADE" not in linea:
+            continue
+        assert any(permitido in linea for permitido in permitidos), linea
     assert "IF EXISTS" not in sql_downgrade
+
+
+# ---------------------------------------------------------------------------
+# El dia clinico, sin servidor
+# ---------------------------------------------------------------------------
+
+
+def _revision_de_rls():
+    """El modulo de la revision de SCRUM-98, cargado por ruta.
+
+    Una revision de Alembic no es importable por nombre de paquete, y tampoco
+    debe importar codigo de la aplicacion: su SQL tiene que quedar congelado.
+    Por eso la zona horaria se declara dentro de la revision y es *esta* prueba
+    la que impide que se separe de la del ETL.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    ruta = (
+        Path(__file__).resolve().parents[1]
+        / "alembic"
+        / "versions"
+        / "3b4a352bc39a_enable_row_level_security_and_clinical_.py"
+    )
+    spec = importlib.util.spec_from_file_location("revision_rls", ruta)
+    modulo = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(modulo)
+    return modulo
+
+
+def test_la_zona_clinica_de_la_revision_es_la_del_etl():
+    """Un solo dia clinico para todo el sistema: el de Panama.
+
+    Si alguien cambiara la zona en un sitio y no en el otro, la vigencia de una
+    asignacion y el dia de una lectura dejarian de coincidir entre el ETL y las
+    politicas. Esta prueba es lo que mantiene las dos definiciones atadas sin
+    que la migracion tenga que importar la aplicacion.
+    """
+    from app.etl.reglas import ZONA_HORARIA_CLINICA
+
+    assert _revision_de_rls().ZONA_CLINICA == str(ZONA_HORARIA_CLINICA)
+
+
+def test_la_revision_no_depende_del_timezone_de_la_sesion(sql_upgrade):
+    """Ni ``CURRENT_DATE`` ni un ``::date`` desnudo sobre un timestamptz.
+
+    Las dos expresiones las resuelve el parametro ``TimeZone`` de la sesion, de
+    modo que el mismo instante daba dias distintos segun quien preguntara. Se
+    comprueba sobre el SQL renderizado, que es lo que la base va a recibir.
+    """
+    assert "CURRENT_DATE" not in sql_upgrade
+    assert "f.fecha_hora::date" not in sql_upgrade
+    assert "date_trunc('month', f.fecha_hora)" not in sql_upgrade
+
+
+def test_cada_conversion_de_instante_nombra_la_zona_clinica():
+    """Y lo hace de forma explicita, no por omision."""
+    revision = _revision_de_rls()
+    zona = revision.ZONA_CLINICA
+
+    for expresion in (
+        revision.HOY_CLINICO,
+        revision._dia_clinico("f.fecha_hora"),
+        revision._mes_clinico("f.fecha_hora"),
+    ):
+        assert f"AT TIME ZONE '{zona}'" in expresion, expresion
+
+
+def test_las_fechas_que_ya_son_date_no_se_convierten():
+    """``dim_embarazo.fecha_inicio`` es ``DATE``: no tiene zona que aplicar.
+
+    Convertirla seria un error distinto -- trataria una fecha civil como si
+    fuera un instante --, asi que se deja como estaba.
+    """
+    vistas = _revision_de_rls().VISTAS
+
+    assert "date_trunc('month', de.fecha_inicio)::date" in vistas
+    assert "de.fecha_inicio AT TIME ZONE" not in vistas
+
+
+def test_la_ventana_de_secuencia_ordena_por_tiempo_y_desempata():
+    """``secuencia_sesion`` se ordena por el instante, con ``id_sesion`` detras.
+
+    Las dos mitades importan y por motivos distintos.
+
+    El **instante primero**: ``id_sesion`` es una clave surrogate que el servidor
+    asigna al recibir la sesion, no al ocurrir, y en un sistema offline-first eso
+    es orden de sincronizacion. Ordenar por el invertiria la serie justo en el
+    escenario que esta tesis modela.
+
+    El **desempate despues**: sin un segundo criterio, dos sesiones que empiezan
+    en el mismo instante pueden intercambiar su numero entre ejecuciones. Eso no
+    se puede comprobar ejecutando la consulta -- PostgreSQL reutiliza el plan
+    dentro de una sesion y el empate no se manifiesta, cosa que se verifico
+    mutando la ventana y viendo que ninguna prueba de runtime moria. Donde si es
+    determinista es en el texto del SQL, y aqui es donde se fija.
+    """
+    revision = _revision_de_rls()
+
+    ventana = re.search(
+        r"row_number\(\)\s*OVER\s*\((.*?)\)", revision.VISTAS, re.S
+    )
+    assert ventana is not None, "no hay ventana row_number() en las vistas"
+
+    interior = " ".join(ventana.group(1).split())
+    assert "PARTITION BY id_embarazo" in interior, interior
+    assert "ORDER BY inicio_sesion, id_sesion" in interior, interior

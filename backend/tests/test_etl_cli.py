@@ -13,7 +13,6 @@ from pathlib import Path
 import pytest
 from sqlalchemy.exc import IntegrityError, OperationalError
 
-from app.config import settings
 from app.etl import (
     CandadoOcupado,
     CargaInconsistente,
@@ -76,7 +75,7 @@ def test_un_destino_que_no_es_postgresql_se_rechaza_sin_crear_nada(
     cli, capsys, monkeypatch, tmp_path
 ):
     archivo = tmp_path / "no_debe_existir.db"
-    monkeypatch.setattr(settings, "database_url", f"sqlite:///{archivo}")
+    monkeypatch.setenv("ETL_DATABASE_URL", f"sqlite:///{archivo}")
 
     assert cli.main(["ejecutar"]) == cli.CODIGO_DE_ERROR
     salida = capsys.readouterr()
@@ -86,9 +85,7 @@ def test_un_destino_que_no_es_postgresql_se_rechaza_sin_crear_nada(
 
 
 def test_una_url_mal_formada_no_se_repite(cli, capsys, monkeypatch):
-    monkeypatch.setattr(
-        settings, "database_url", f"postgresql+psycopg//usuario:{CLAVE_FICTICIA}@host/db"
-    )
+    monkeypatch.setenv("ETL_DATABASE_URL", f"postgresql+psycopg//usuario:{CLAVE_FICTICIA}@host/db")
 
     assert cli.main(["conciliar"]) == cli.CODIGO_DE_ERROR
     salida = capsys.readouterr()
@@ -113,7 +110,7 @@ def test_una_url_mal_formada_no_se_repite(cli, capsys, monkeypatch):
 def test_cada_fallo_tiene_su_codigo_y_no_revela_credenciales(
     cli, capsys, monkeypatch, error, codigo
 ):
-    monkeypatch.setattr(settings, "database_url", URL_FICTICIA)
+    monkeypatch.setenv("ETL_DATABASE_URL", URL_FICTICIA)
 
     def falla(engine, **_):
         raise error
@@ -130,7 +127,7 @@ def test_cada_fallo_tiene_su_codigo_y_no_revela_credenciales(
 
 @pytest.mark.parametrize(("correcta", "codigo"), [(True, 0), (False, 3)])
 def test_conciliar_devuelve_0_o_3(cli, capsys, monkeypatch, correcta, codigo):
-    monkeypatch.setattr(settings, "database_url", URL_FICTICIA)
+    monkeypatch.setenv("ETL_DATABASE_URL", URL_FICTICIA)
     monkeypatch.setattr(cli, "conciliar_sin_escribir", lambda engine: _informe(correcta))
 
     assert cli.main(["conciliar"]) == codigo

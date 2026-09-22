@@ -5,16 +5,24 @@ from alembic import context
 from sqlalchemy import CheckConstraint, MetaData, engine_from_config, pool
 
 import app.etl.modelos  # noqa: F401  -- registers the analytic tables on BaseAnalitica.metadata
+import app.models.privado  # noqa: F401  -- registers the pseudonym map on BasePrivada.metadata
 import app.models  # noqa: F401  -- registers every model on Base.metadata
-from app.config import settings
+from app.config import VARIABLE_URL_ALEMBIC, exigir_url_de_entorno
 from app.db.base import NAMING_CONVENTION, Base
 from app.db.base_analitica import BaseAnalitica
+from app.db.base_privada import BasePrivada
 
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-config.set_main_option("sqlalchemy.url", settings.database_url)
+# La URL de las migraciones es la suya, ``ALEMBIC_DATABASE_URL``, y **no**
+# ``DATABASE_URL``. No hay respaldo de una a la otra: ejecutar el DDL con la
+# credencial restringida de la API fallaría, y -- lo que de verdad importa --
+# servir la API con la credencial que posee los objetos anularía RLS sin que
+# nada lo dijera. ``exigir_url_de_entorno`` levanta si falta, así que un entorno
+# incompleto detiene la migración en vez de aplicarla con el rol equivocado.
+config.set_main_option("sqlalchemy.url", exigir_url_de_entorno(VARIABLE_URL_ALEMBIC))
 
 # One registry per schema (SCRUM-69): the operational one keeps its own contract
 # of 23 tables and the analytic one holds the star schema. Alembic compares the
@@ -43,7 +51,7 @@ def _esquema_referido(tabla, esquema_destino, restriccion, esquema_referido):
     return esquema_referido or tabla.schema
 
 
-for registro in (Base.metadata, BaseAnalitica.metadata):
+for registro in (Base.metadata, BaseAnalitica.metadata, BasePrivada.metadata):
     for tabla in registro.tables.values():
         tabla.to_metadata(target_metadata, referred_schema_fn=_esquema_referido)
 

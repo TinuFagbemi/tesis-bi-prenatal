@@ -35,10 +35,18 @@ responsible; neither creates monitoring sessions, and admitting either would
 turn an administrative credential into a bypass into clinical data. Both are
 answered 403.
 
-What SCRUM-70 does **not** check, and must not be read as checking: that the
-authenticated patient owns the ``id_embarazo`` the package names. RBAC limits
-operations by role; the correlation ``usuario_paciente -> paciente -> embarazo``
-is row-level isolation and belongs to SCRUM-71.
+**Row-level isolation (SCRUM-98).** That gap is now closed, in two places at
+once. The handler resolves the caller's clinical context, installs it in
+PostgreSQL for this transaction, and refuses a package whose ``id_embarazo``
+does not belong to the connected patient -- **before** the idempotency key is
+claimed, so a rejected attempt leaves the key free. Underneath, the policies on
+``embarazo``, ``sesion_monitoreo`` and ``lectura_biometrica`` make the same rule
+the database's: a foreign pregnancy is not there to be written to, whatever a
+query in this process forgets to filter.
+
+A foreign pregnancy and a non-existent one answer the same 404, with the same
+sentence. Telling them apart would turn the endpoint into an oracle for which
+pregnancies exist.
 
 **The audit entry rides the business transaction.** A created package is
 recorded with ``SESION_MONITOREO_REGISTRADA`` *inside* the same transaction,
@@ -55,13 +63,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.api.dependencias import exigir_roles
+from app.api.dependencias import exigir_contexto_de_rol
 from app.db.session import get_db
 from app.models.enums import NombreRol
 from app.schemas.monitoreo import SesionMonitoreoCreada, SesionMonitoreoEntrada
 from app.services import auditoria
 from app.services.auditoria import AccionAuditada
-from app.services.principal import PrincipalAutenticado
+from app.services.contexto import ContextoClinico
 from app.services.errores import (
     MENSAJE_INESPERADO,
     clasificar_error_de_base,
@@ -82,7 +90,11 @@ from app.services.idempotencia import (
     registrar_colision,
     registrar_replay,
 )
-from app.services.ingesta import ReferenciaInexistente, ReglaDeNegocioViolada
+from app.services.ingesta import (
+    ReferenciaInexistente,
+    ReglaDeNegocioViolada,
+    verificar_propiedad_del_embarazo,
+)
 
 router = APIRouter(prefix="/api/v1", tags=["monitoreo"])
 
@@ -133,7 +145,10 @@ PARAMETRO_DE_LA_CLAVE = {
 # The allowlist of this operation, built once. Declaring it at module level
 # rather than inline in the decorator keeps the guard visible next to the
 # contract it enforces, and lets a test import exactly what production uses.
-EXIGIR_PACIENTE = exigir_roles(
+# La guardia de rol **y** el contexto clinico, en una sola dependencia. Resolver
+# el perfil e instalarlo en PostgreSQL ocurre sobre la sesion de la peticion, de
+# modo que la identidad viaja en la misma transaccion que despues escribe.
+EXIGIR_PACIENTE = exigir_contexto_de_rol(
     NombreRol.PACIENTE, entidad=auditoria.ENTIDAD_SESION_MONITOREO
 )
 
@@ -231,27 +246,32 @@ def registrar_sesion_de_monitoreo(
     entrada: SesionMonitoreoEntrada,
     respuesta: Response,
     peticion: Request,
-    principal: PrincipalAutenticado = Depends(EXIGIR_PACIENTE),
+    contexto: ContextoClinico = Depends(EXIGIR_PACIENTE),
     clave: str = Depends(exigir_clave_de_idempotencia),
     sesion_bd: Session = Depends(get_db),
 ) -> SesionMonitoreoCreada:
     """Persist one monitoring session and every reading it carries, exactly once.
 
-    Five things happen here and nothing else: the service is called, the
-    transaction is ended one way or the other, the event is recorded, failures
-    become status codes, and the answer is built. The order of the steps inside
-    the package -- claim first, then references, then rows -- belongs to
-    ``procesar_ingesta_idempotente`` and is documented there.
+    Six things happen here and nothing else: the pregnancy is confirmed to be
+    the caller's, the service is called, the transaction is ended one way or the
+    other, the event is recorded, failures become status codes, and the answer is
+    built. The order of the steps inside the package -- claim first, then
+    references, then rows -- belongs to ``procesar_ingesta_idempotente`` and is
+    documented there.
 
-    ``principal`` is the authenticated PACIENTE account, already verified against
-    PostgreSQL by ``app.api.dependencias``. It is used for one thing: attributing
-    the audit entry. It is **not** used to filter or validate ``id_embarazo`` --
-    that correlation is SCRUM-71 and is not implemented here.
+    ``contexto`` is the authenticated PACIENTE account **with its clinical
+    profile already resolved and installed in this transaction** by
+    ``app.api.dependencias``. It is used for two things, and the second one is
+    new: attributing the audit entry, and deciding whether ``id_embarazo``
+    belongs to the connected patient. That correlation was SCRUM-71's and is
+    implemented here now -- ``verificar_propiedad_del_embarazo`` is the first
+    statement of the handler, before a single row is claimed or written.
 
-    ``principal`` is also **not** part of the idempotency fingerprint. The
+    The caller is still **not** part of the idempotency fingerprint. The
     fingerprint describes the package, and adding the caller to it would make the
     same package sent by a different account a different package, breaking every
-    replay that already works.
+    replay that already works. What changed is the order: ownership is settled
+    **before** the key is claimed, so a foreign pregnancy never consumes one.
 
     **The order of the parameters is the order of the answers**, because FastAPI
     resolves dependencies as it finds them: authorisation first, then the
@@ -263,6 +283,10 @@ def registrar_sesion_de_monitoreo(
     All data is fictitious and simulated.
     """
     try:
+        # Antes de la reclamacion, y por tanto antes de la primera escritura.
+        verificar_propiedad_del_embarazo(
+            sesion_bd, entrada.id_embarazo, contexto.id_paciente
+        )
         procesado = procesar_ingesta_idempotente(
             sesion_bd, entrada, recurso=RECURSO_SESIONES_MONITOREO, clave=clave
         )
@@ -281,7 +305,7 @@ def registrar_sesion_de_monitoreo(
             auditoria.registrar(
                 sesion_bd,
                 AccionAuditada.SESION_MONITOREO_REGISTRADA,
-                id_usuario=principal.id_usuario,
+                id_usuario=contexto.id_usuario,
                 ip_origen=auditoria.direccion_de_origen(
                     peticion.client.host if peticion.client else None
                 ),

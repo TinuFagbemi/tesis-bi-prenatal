@@ -54,7 +54,11 @@ from app.main import app
 from app.models.enums import NombreRol
 from app.services.auditoria import AccionAuditada
 from app.services.passwords import PREFIJO_ARGON2ID, verificar
-from tests.conftest import construir_config_alembic
+from tests.conftest import (
+    construir_config_alembic,
+    clausula_owner,
+    url_del_migrador,
+)
 from tests.test_etl_postgresql import PAQUETE_INCREMENTO
 from tests.test_generate_mock_data import cargar_generador
 from tests.test_ingestion_schemas import paquete
@@ -110,7 +114,10 @@ class ServidorDePruebas:
     def crear(self, sufijo: str, *, plantilla: str | None = None) -> str:
         nombre = f"{PREFIJO_DE_BASE}{self.ejecucion}_{sufijo}"
         assert PATRON_DE_BASE.match(nombre), nombre
-        sentencia = f"CREATE DATABASE {self._citar(nombre)}"
+        sentencia = (
+            f"CREATE DATABASE {self._citar(nombre)}"
+            f"{clausula_owner(self.engine.dialect.identifier_preparer)}"
+        )
         if plantilla is not None:
             assert plantilla in self.creadas
             sentencia += f" TEMPLATE {self._citar(plantilla)}"
@@ -155,7 +162,7 @@ class BaseTemporal:
 
 def migrar(url: str, destino: str) -> None:
     with pytest.MonkeyPatch.context() as parche:
-        parche.setattr(settings, "database_url", url)
+        parche.setenv("ALEMBIC_DATABASE_URL", url_del_migrador(url))
         command.upgrade(construir_config_alembic(), destino)
 
 
@@ -716,18 +723,33 @@ def test_las_columnas_de_la_tabla_son_las_esperadas(base):
 # ---------------------------------------------------------------------------
 
 
+REVISION_SCRUM_97 = "54053d46abd6"
+REVISION_ANALITICA = "60facdbacf51"
+
+
 def test_scrum70_no_anadio_ninguna_revision(base):
     """El esquema de SCRUM-51/52 ya preveia esto: SCRUM-70 no creo revision.
 
-    Desde SCRUM-97 el head es la revision de cuentas, y se apoya directamente en
-    la analitica de SCRUM-69: entre ambas no hay nada de SCRUM-70.
+    La revision de cuentas (SCRUM-97) se apoya directamente en la analitica de
+    SCRUM-69: entre ambas no hay nada de SCRUM-70, y eso es lo que se comprueba.
+
+    El *head* no se fija a un literal a proposito. Los tickets posteriores apilan
+    revisiones encima -- SCRUM-98 ya apilo la suya --, y clavarlo convertiria
+    esta prueba en un recordatorio de actualizar una constante en vez de una
+    afirmacion sobre SCRUM-70. Lo que si se exige es que la cadena tenga una
+    sola cabeza, que la base desplegada este exactamente en ella, y que la
+    revision de cuentas siga colgando de la analitica sin nada en medio.
     """
     script = ScriptDirectory.from_config(construir_config_alembic())
     [head] = script.get_heads()
 
     assert base.escalar("SELECT version_num FROM alembic_version") == head
-    assert head == "54053d46abd6"
-    assert script.get_revision(head).down_revision == "60facdbacf51"
+    assert (
+        script.get_revision(REVISION_SCRUM_97).down_revision == REVISION_ANALITICA
+    )
+    assert REVISION_SCRUM_97 in {
+        revision.revision for revision in script.walk_revisions("base", head)
+    }
 
 
 def test_el_hash_argon2id_cabe_en_la_columna_desplegada(base):

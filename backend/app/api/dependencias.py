@@ -26,6 +26,13 @@ retry credentials that are perfectly valid.
 pregnancy she is sending readings for is **not** checked here and is not checked
 anywhere in SCRUM-70. RBAC limits operations by role; row-level isolation
 belongs to SCRUM-71.
+
+**The clinical context (SCRUM-98).** :func:`contexto_actual` is the second half
+of that story: it resolves which clinical profile the caller is and hands that
+identity to PostgreSQL for the length of the request's transaction. It is a
+separate dependency from :func:`usuario_actual` on purpose -- authentication
+happens on every protected route, and a clinical context only where rows are at
+stake -- and it composes the first rather than repeating it.
 """
 
 from __future__ import annotations
@@ -46,6 +53,12 @@ from app.models.enums import NombreRol
 from app.services import auditoria
 from app.services.auditoria import AccionAuditada, FalloDeAuditoria
 from app.services.errores import diagnostico_seguro
+from app.db.contexto import instalar_contexto
+from app.services.contexto import (
+    ContextoClinico,
+    ContextoNoResoluble,
+    resolver_contexto,
+)
 from app.services.principal import PrincipalAutenticado, resolver_principal
 from app.services.tokens import TokenInvalido, validar
 
@@ -103,7 +116,10 @@ def obtener_configuracion_jwt() -> ConfiguracionJWT:
 # literals and nothing else, so no caller can pass text that came from a request.
 CONTEXTO_AUTENTICACION = "autenticacion"
 CONTEXTO_RESOLUCION_DEL_PRINCIPAL = "resolucion del principal"
-ContextoDeFallo = Literal["autenticacion", "resolucion del principal"]
+CONTEXTO_LECTURA_CLINICA = "lectura clinica"
+ContextoDeFallo = Literal[
+    "autenticacion", "resolucion del principal", "lectura clinica"
+]
 
 _FORMATO_FALLO_DE_BASE = "Fallo de base de datos en %s: %s"
 
@@ -273,3 +289,137 @@ def exigir_roles(
         )
 
     return verificar_rol
+
+
+# The body of every refusal on the clinical-context path. One sentence, the same
+# for a missing link, a link the role does not allow and an ambiguous one: the
+# three are "this account has no clinical scope", and telling them apart would
+# publish the shape of somebody's record to whoever probes the endpoint.
+MENSAJE_SIN_CONTEXTO_CLINICO = (
+    "La cuenta no tiene un perfil clinico utilizable para esta operacion."
+)
+
+
+def _contexto_para(
+    peticion: Request,
+    principal: PrincipalAutenticado,
+    sesion_bd: Session,
+    sesion_auditoria: Session,
+) -> ContextoClinico:
+    """Instala la identidad en PostgreSQL y resuelve el perfil clinico.
+
+    Tres pasos, y el orden es la seguridad:
+
+    1. el ``id_usuario`` **que el token ya probo** se entrega a PostgreSQL con
+       ``set_config(..., true)`` -- local a la transaccion, de modo que muere
+       con ella y no puede viajar a la siguiente peticion por una conexion
+       reutilizada;
+    2. el perfil se resuelve desde las relaciones que guarda PostgreSQL, nunca
+       desde algo que el cliente enviara;
+    3. se devuelve el contexto tipado, que un handler no puede ensanchar.
+
+    **Por que instalar va primero.** El paso 2 consulta ``usuario_paciente`` y
+    ``usuario_medico``, y desde esta revision las dos llevan FORCE RLS con una
+    politica que filtra por ``seguridad.usuario_actual_id()``. Resolver antes de
+    instalar dejaba esa consulta sin identidad: bajo un rol realmente
+    restringido devolvia cero filas, el perfil salia «sin vinculo» y toda ruta
+    de PACIENTE o de MEDICO respondia 403. No se vio antes porque las suites
+    HTTP se conectaban con el usuario de inicializacion del contenedor, que es
+    superusuario y no esta sujeto a ninguna politica.
+
+    Instalar primero no adelanta ninguna autorizacion. Lo que se instala es la
+    identidad autenticada, no un permiso: el valor sale de
+    ``PrincipalAutenticado.id_usuario``, que SCRUM-70 ya verifico contra la
+    firma del token y contra el estado de la cuenta. Las politicas siguen
+    decidiendo que filas corresponden a esa identidad, y el paso 2 sigue siendo
+    quien puede negar el contexto.
+
+    ``sesion_bd`` es la sesion de la peticion, asi que la identidad queda
+    instalada exactamente en la conexion que ejecutara las sentencias
+    protegidas. Pedir ``get_db`` otra vez no abre una segunda sesion: FastAPI
+    cachea la dependencia por peticion, y por eso la auditoria usa
+    ``get_db_auditoria``.
+
+    **Un rechazo es 403 y no dice mas.** La identidad es valida -- el token
+    verifico y la cuenta esta activa --, asi que 401 seria falso; la fila que el
+    llamante queria puede ni existir, asi que 404 afirmaria algo que esta capa no
+    ha comprobado. Lo cierto es que la cuenta no tiene alcance clinico, y eso es
+    403. La entrada que explica por que va a la traza de auditoria, donde una
+    administradora puede leerla, y no a la respuesta.
+    """
+    try:
+        instalar_contexto(sesion_bd, principal.id_usuario)
+    except SQLAlchemyError as error:
+        # El contexto no pudo instalarse, asi que las sentencias protegidas
+        # correrian sin identidad. Bajo las politicas eso significa cero filas,
+        # que es seguro pero silencioso; un 500 saneado lo dice.
+        raise fallo_de_base(
+            sesion_bd, CONTEXTO_RESOLUCION_DEL_PRINCIPAL, error
+        ) from None
+
+    try:
+        contexto = resolver_contexto(sesion_bd, principal)
+    except ContextoNoResoluble as error:
+        try:
+            auditoria.registrar_con_commit(
+                sesion_auditoria,
+                AccionAuditada.CONTEXTO_CLINICO_AUSENTE,
+                id_usuario=principal.id_usuario,
+                ip_origen=auditoria.direccion_de_origen(
+                    peticion.client.host if peticion.client else None
+                ),
+                nombre_entidad=auditoria.ENTIDAD_USUARIO,
+                id_entidad=str(principal.id_usuario),
+            )
+        except FalloDeAuditoria:
+            # Ya registrado, saneado, por el servicio de auditoria. El rechazo
+            # se mantiene: no se concedio nada, asi que no hay nada que cerrar.
+            pass
+        raise HTTPException(
+            status_code=HTTPStatus.FORBIDDEN, detail=MENSAJE_SIN_CONTEXTO_CLINICO
+        ) from error
+
+    # ``resolver_contexto`` deriva el perfil del mismo ``id_usuario`` que se
+    # instalo, asi que no hay una segunda identidad que instalar ni un valor que
+    # corregir: la asercion lo deja escrito para que un cambio futuro en el
+    # resolutor no pueda separarlos en silencio.
+    assert contexto.id_usuario == principal.id_usuario
+
+    return contexto
+
+
+def contexto_actual(
+    peticion: Request,
+    principal: PrincipalAutenticado = Depends(usuario_actual),
+    sesion_bd: Session = Depends(get_db),
+    sesion_auditoria: Session = Depends(get_db_auditoria),
+) -> ContextoClinico:
+    """El contexto de una ruta que no restringe el rol. Ver :func:`_contexto_para`."""
+    return _contexto_para(peticion, principal, sesion_bd, sesion_auditoria)
+
+
+def exigir_contexto_de_rol(
+    *roles_admitidos: NombreRol, entidad: str
+) -> Callable[..., ContextoClinico]:
+    """El rol y el contexto clinico, en una dependencia y en ese orden.
+
+    Componer las dos en vez de pedirlas por separado fija la precedencia: el rol
+    se comprueba primero, asi que una identidad que no puede hacer la operacion
+    recibe 403 sin que se resuelva ni se instale nada. Solo despues se busca el
+    perfil clinico y se entrega la identidad a PostgreSQL.
+
+    Lo que devuelve es el contexto, no el principal: un handler que recibiera
+    ambos podria filtrar por uno y auditar con el otro. El contexto lleva
+    ``id_usuario``, asi que no hace falta el segundo.
+    """
+    verificar_rol = exigir_roles(*roles_admitidos, entidad=entidad)
+
+    def resolver(
+        peticion: Request,
+        principal: PrincipalAutenticado = Depends(verificar_rol),
+        sesion_bd: Session = Depends(get_db),
+        sesion_auditoria: Session = Depends(get_db_auditoria),
+    ) -> ContextoClinico:
+        return _contexto_para(peticion, principal, sesion_bd, sesion_auditoria)
+
+    return resolver

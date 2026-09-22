@@ -220,6 +220,11 @@ class LecturaBiometrica(Base):
     id_sesion: Mapped[int] = mapped_column(
         ForeignKey("sesion_monitoreo.id_sesion", ondelete="CASCADE"),
         nullable=False,
+        # Indexada desde SCRUM-98. La politica de esta tabla pregunta por la
+        # sesion a la que pertenece cada fila, y esta es la tabla mas grande del
+        # esquema: sin el indice, cada lectura protegida recorreria el hecho
+        # entero. Tambien cubre la cascada del borrado, que nunca lo tuvo.
+        index=True,
     )
     id_tiempo_gest: Mapped[int] = mapped_column(
         ForeignKey("tiempo_gestacional.id_tiempo_gest", ondelete="RESTRICT"),

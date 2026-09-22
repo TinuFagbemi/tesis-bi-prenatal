@@ -30,6 +30,7 @@ from app.api.v1.sesiones import CABECERA_IDEMPOTENCIA
 from app.api.v1 import sesiones as modulo_router  # noqa: F401 -- rutas del AST
 from app.services import idempotencia as modulo_idempotencia
 from app.db.session import get_db
+from app.models.seguridad import AuditoriaLog
 from tests.conftest import identidad_simulada
 from app.main import app
 from app.services.errores import (
@@ -166,6 +167,30 @@ class ResultadoFalso:
     def scalar_one_or_none(self):
         return self._valor
 
+    def scalar(self):
+        """``Session.scalar`` lo pide desde SCRUM-98, en la comprobacion de
+        propiedad del embarazo."""
+        return self._valor
+
+
+class ResultadoDeVinculo:
+    """Respuesta de las consultas a los puentes de identidad (SCRUM-98)."""
+
+    def __init__(self, filas):
+        self._filas = list(filas)
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return list(self._filas)
+
+    def scalar(self):
+        return self._filas[0] if self._filas else None
+
+    def first(self):
+        return (self._filas[0],) if self._filas else None
+
 
 class SesionFalsa:
     """Doble de la Session: cuenta commits y rollbacks, y guiona el SQL.
@@ -177,6 +202,12 @@ class SesionFalsa:
 
     Por omisión no hay reclamación previa y la reclamación tiene éxito, que es
     el escenario de las pruebas heredadas: primera solicitud, paquete nuevo.
+
+    Desde SCRUM-98 responde ademas a tres sentencias mas, para que el camino
+    real de la ruta corra entero sobre el doble: las dos consultas de los
+    puentes de identidad, el ``set_config`` que instala el contexto y la
+    comprobacion de propiedad del embarazo. Se distinguen por el texto de la
+    sentencia, que es lo unico que las diferencia sin una base detras.
     """
 
     def __init__(
@@ -207,7 +238,50 @@ class SesionFalsa:
         self.id_reclamado = id_reclamado
         self.valores_actualizados = None
 
+    # Perfil que el doble atribuye a quien pregunta, y embarazo que reconoce
+    # como suyo. Ninguno corresponde a una fila del dataset simulado.
+    id_paciente = 9_000_101
+    # Si la prueba lo pone en falso, el doble deja de reconocer el embarazo
+    # como propio y la ruta debe responder 404 sin escribir nada.
+    embarazo_propio = True
+
+    def scalar(self, sentencia, *args, **kwargs):
+        """``Session.scalar`` es otro metodo, no un atajo de ``execute``.
+
+        La comprobacion de propiedad del embarazo lo usa, asi que el doble tiene
+        que ofrecerlo; se enruta por ``execute`` para que la respuesta siga
+        decidiendose en un solo sitio.
+        """
+        return self.execute(sentencia, *args, **kwargs).scalar()
+
     def execute(self, sentencia, *args, **kwargs):
+        texto = str(sentencia)
+        # Ni el contexto ni la comprobacion de propiedad entran en ``pasos``:
+        # esa lista afirma el orden del *paquete* -- reclamar, escribir,
+        # confirmar --, y son otra cosa, con sus propias pruebas.
+        if "set_config" in texto:
+            return ResultadoFalso(None)
+        if "usuario_paciente" in texto:
+            return ResultadoDeVinculo([self.id_paciente])
+        if "usuario_medico" in texto:
+            return ResultadoDeVinculo([])
+        if "embarazo" in texto and "id_paciente" in texto:
+            # La comprobacion de propiedad. El doble dice que si, para que las
+            # pruebas heredadas sigan ejerciendo lo suyo; las de aislamiento
+            # real viven en test_rls_postgresql.py.
+            return ResultadoFalso(1 if self.embarazo_propio else None)
+        if "auditoria_log" in texto:
+            # La entrada de auditoria del paquete. Desde SCRUM-98 el servicio la
+            # inserta con el nucleo y no con ``add``: un INSERT del ORM vuelve
+            # con RETURNING, y eso exigiria SELECT sobre una traza que la
+            # credencial de la API solo puede escribir. El doble materializa los
+            # valores para que las pruebas sigan afirmando sobre lo que se
+            # escribe, y conserva el nombre del paso -- ``add`` -- porque lo que
+            # ese paso significa, «aqui se anadio la fila de auditoria», no ha
+            # cambiado.
+            self.agregados.append(AuditoriaLog(**(args[0] if args else {})))
+            self.pasos.append("add")
+            return ResultadoFalso(None)
         if isinstance(sentencia, Select):
             self.selects += 1
             self.pasos.append("select")
@@ -223,17 +297,6 @@ class SesionFalsa:
             self.valores_actualizados = dict(sentencia.compile().params)
             return ResultadoFalso(None, rowcount=self.filas_completadas)
         raise AssertionError(f"sentencia inesperada: {type(sentencia).__name__}")
-
-    def add(self, entidad) -> None:
-        """Registra la entrada de auditoria que el router anade al paquete.
-
-        Desde SCRUM-70 el endpoint inserta una fila de ``auditoria_log`` dentro
-        de la misma transaccion, antes del unico commit. El doble la guarda en
-        lugar de descartarla, para que una prueba pueda afirmar que se escribio
-        --y, sobre todo, que **no** se escribio cuando hubo rollback.
-        """
-        self.agregados.append(entidad)
-        self.pasos.append("add")
 
     def flush(self) -> None:
         self.flushes += 1

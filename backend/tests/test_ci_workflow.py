@@ -18,8 +18,12 @@ Todos los datos son simulados y completamente ficticios.
 
 from __future__ import annotations
 
+import re
 import shlex
+import textwrap
 from pathlib import Path
+
+import pytest
 
 RAIZ = Path(__file__).resolve().parents[2]
 RUTA_CI = RAIZ / ".github" / "workflows" / "ci.yml"
@@ -120,3 +124,70 @@ def test_cada_suite_de_postgresql_queda_fuera_del_bloque_offline():
 
     assert suites
     assert suites <= ignorados, f"Sin excluir del bloque offline: {suites - ignorados}"
+
+
+# ---------------------------------------------------------------------------
+# Los heredocs de Python del workflow, compilados de verdad
+# ---------------------------------------------------------------------------
+#
+# Existe por un defecto que ninguna otra comprobacion veia: un step incrusta un
+# programa de Python con ``python - <<'PY' ... PY``, y para YAML ese programa es
+# un bloque de texto cualquiera. Una edicion dejo dentro un bloque con sangria
+# sobrante y una f-string con las comillas mal cerradas. El YAML seguia siendo
+# valido, el workflow seguia siendo valido, y el defecto solo aparecia al
+# ejecutar el job -- donde el interprete abortaba con ``IndentationError`` antes
+# de tocar la base de datos.
+#
+# Compilar no ejecuta nada: ``compile()`` analiza y genera bytecode sin correr
+# una sola linea, asi que esta prueba no conecta a ningun sitio ni necesita
+# servicios. Lo que demuestra es lo unico que hacia falta y faltaba: que el
+# texto que bash le va a entregar a Python es Python.
+
+HEREDOC = re.compile(r"<<'PY'\n(.*?)\n\s*PY(?:\n|$)", re.S)
+NOMBRE_DE_STEP = re.compile(r"- name: (.+)")
+
+
+def heredocs_de_python() -> list[tuple[str, str]]:
+    """``(nombre del step, programa)`` por cada heredoc del workflow."""
+    texto = RUTA_CI.read_text(encoding="utf-8")
+    nombres = [(m.start(), m.group(1).strip()) for m in NOMBRE_DE_STEP.finditer(texto)]
+
+    encontrados = []
+    for bloque in HEREDOC.finditer(texto):
+        anteriores = [nombre for pos, nombre in nombres if pos < bloque.start()]
+        # ``textwrap.dedent`` retira la sangria del bloque YAML, que es
+        # exactamente lo que hace bash: el heredoc sin comillas de cierre
+        # conserva el texto tal cual, incluida esa sangria comun.
+        encontrados.append(
+            (anteriores[-1] if anteriores else "(sin step)",
+             textwrap.dedent(bloque.group(1)) + "\n")
+        )
+    return encontrados
+
+
+def test_el_workflow_tiene_heredocs_de_python():
+    """Si dejaran de existir, las dos pruebas de abajo pasarian sin mirar nada."""
+    assert len(heredocs_de_python()) >= 4
+
+
+@pytest.mark.parametrize(
+    "nombre, programa",
+    heredocs_de_python(),
+    ids=[nombre for nombre, _ in heredocs_de_python()],
+)
+def test_cada_heredoc_de_python_compila(nombre, programa):
+    try:
+        compile(programa, f"<{nombre}>", "exec")
+    except SyntaxError as error:
+        linea = (error.text or "").rstrip()
+        pytest.fail(
+            f"El programa incrustado en el step {nombre!r} no compila: "
+            f"{type(error).__name__}: {error.msg} (linea {error.lineno}: {linea!r}). "
+            "El job fallaria al ejecutarlo, no al validarlo."
+        )
+
+
+def test_el_detector_encuentra_un_heredoc_roto():
+    """El detector sirve solo si falla cuando tiene que fallar."""
+    with pytest.raises(SyntaxError):
+        compile("if True:\n    x = 1\n        y = 2\n", "<roto>", "exec")

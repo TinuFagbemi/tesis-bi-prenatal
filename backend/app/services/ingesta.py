@@ -103,6 +103,45 @@ class ResultadoIngesta:
     ids_lectura: tuple[int, ...]
 
 
+# El mismo texto para «no existe» y para «no es tuyo». Dos mensajes distintos
+# convertirian el 404 en un oraculo: bastaria comparar las respuestas para
+# saber que embarazos existen.
+_MENSAJE_EMBARAZO = "No existe un embarazo con id_embarazo={id_embarazo}."
+
+
+def verificar_propiedad_del_embarazo(
+    sesion_bd: Session, id_embarazo: int, id_paciente: int | None
+) -> None:
+    """La gestante conectada debe ser la duena del embarazo, o no hay paquete.
+
+    **Va antes de reclamar la clave de idempotencia**, y ese orden es el punto.
+    La reclamacion es la primera escritura del paquete; comprobarla despues
+    dejaria que un embarazo ajeno consumiera una clave que luego nadie podria
+    reutilizar. Comprobandola antes, un intento contra otra paciente no toca una
+    sola fila y la clave sigue libre.
+
+    **Ajeno e inexistente responden lo mismo.** La consulta no distingue entre
+    «ese embarazo no existe» y «existe y no es tuyo»: con RLS activa la fila
+    ajena sencillamente no esta, y ese es justamente el contrato externo
+    aprobado. Preguntarle a la base por la fila y contar cuantas vuelven es lo
+    que hace imposible filtrar la diferencia por descuido.
+
+    ``id_paciente`` es ``None`` para un rol sin perfil de gestante. Se trata
+    igual que un embarazo invisible: fallo cerrado, y el mismo 404.
+    """
+    if id_paciente is None:
+        raise ReferenciaInexistente(_MENSAJE_EMBARAZO.format(id_embarazo=id_embarazo))
+
+    propio = sesion_bd.scalar(
+        select(Embarazo.id_embarazo).where(
+            Embarazo.id_embarazo == id_embarazo,
+            Embarazo.id_paciente == id_paciente,
+        )
+    )
+    if propio is None:
+        raise ReferenciaInexistente(_MENSAJE_EMBARAZO.format(id_embarazo=id_embarazo))
+
+
 def _leer_embarazo(sesion_bd: Session, id_embarazo: int) -> date:
     """Start date of the pregnancy, or refuse because it is not there.
 
@@ -115,7 +154,7 @@ def _leer_embarazo(sesion_bd: Session, id_embarazo: int) -> date:
     ).one_or_none()
     if fila is None:
         raise ReferenciaInexistente(
-            f"No existe un embarazo con id_embarazo={id_embarazo}."
+            _MENSAJE_EMBARAZO.format(id_embarazo=id_embarazo)
         )
     return fila[0]
 

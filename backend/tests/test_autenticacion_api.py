@@ -35,6 +35,7 @@ from app.db.session import get_db
 from app.main import app
 from app.models.enums import NombreRol
 from app.api.dependencias import MENSAJE_ERROR_INTERNO
+from app.models.seguridad import AuditoriaLog
 from app.services.passwords import hashear
 from app.services.tokens import emitir
 
@@ -55,15 +56,36 @@ ID_USUARIO = 130
 
 
 class ResultadoFalso:
-    def __init__(self, fila) -> None:
+    def __init__(self, fila, *, valores=()) -> None:
         self._fila = fila
+        self._valores = list(valores)
 
     def one_or_none(self):
         return self._fila
 
+    def scalar(self):
+        return self._fila
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return list(self._valores)
+
 
 class SesionDeCuentas:
-    """Doble de Session que responde la consulta de cuenta con una fila guionada."""
+    """Doble de Session que responde la consulta de cuenta con una fila guionada.
+
+    Desde SCRUM-98 tiene que responder tres sentencias mas, porque la guardia de
+    las rutas administrativas dejo de comprobar solo el rol: instala el contexto
+    clinico en la transaccion y resuelve el perfil. Se distinguen por el texto,
+    que es lo unico que las diferencia sin una base detras.
+
+    Los dos puentes responden **vacio** a proposito: un ADMIN no tiene vinculo
+    clinico, y eso es lo que ``resolver_contexto`` espera de el. Una cuenta
+    administrativa con vinculo seria un contexto no resoluble, que tiene sus
+    propias pruebas.
+    """
 
     def __init__(self, fila=None) -> None:
         self.fila = fila
@@ -73,6 +95,16 @@ class SesionDeCuentas:
         self.rollbacks = 0
 
     def execute(self, sentencia, *args, **kwargs):
+        texto = str(sentencia)
+        if "set_config" in texto:
+            return ResultadoFalso(None)
+        if "usuario_paciente" in texto or "usuario_medico" in texto:
+            return ResultadoFalso(None, valores=())
+        if "auditoria_log" in texto:
+            # Insertada con el nucleo, no con ``add``: la traza se escribe y no
+            # se lee, asi que el INSERT no puede volver con RETURNING.
+            self.agregados.append(AuditoriaLog(**(args[0] if args else {})))
+            return ResultadoFalso(None)
         self.consultas += 1
         return ResultadoFalso(self.fila)
 

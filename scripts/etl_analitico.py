@@ -15,8 +15,11 @@ futura invocaría este mismo comando.
 ``conciliar`` repite la conciliación completa en una transacción de solo
 lectura y termina.
 
-La conexión sale de la configuración del proyecto (``DATABASE_URL``). Nunca se
-recibe por argumento, nunca se imprime y nunca aparece en un mensaje de error.
+La conexión sale de ``ETL_DATABASE_URL``, que es la credencial del rol técnico
+del ETL y no la de la API: el ETL lee el universo operacional completo, y la API
+no debe poder hacerlo. No hay respaldo a ``DATABASE_URL``; si la variable falta,
+el proceso se detiene. Nunca se recibe por argumento, nunca se imprime y nunca
+aparece en un mensaje de error.
 Tampoco se imprime nunca un nombre, una cédula, un teléfono, un correo ni un
 valor biométrico: solo identificadores técnicos, conteos y códigos.
 
@@ -44,7 +47,11 @@ sys.path.insert(0, str(RAIZ_DEL_REPOSITORIO / "backend"))
 from sqlalchemy import create_engine  # noqa: E402  -- tras ajustar sys.path
 from sqlalchemy.exc import SQLAlchemyError  # noqa: E402
 
-from app.config import settings  # noqa: E402
+from app.config import (  # noqa: E402
+    VARIABLE_URL_ETL,
+    UrlDeEntornoInvalida,
+    exigir_url_de_entorno,
+)
 from app.etl import (  # noqa: E402
     RESULTADO_FALLO,
     CandadoOcupado,
@@ -59,9 +66,7 @@ from app.etl import (  # noqa: E402
 )
 from app.loader import (  # noqa: E402
     ErrorDeCarga,
-    MotorNoSoportado,
     sanear_mensaje,
-    verificar_url,
 )
 
 CODIGO_DE_EXITO = 0
@@ -104,19 +109,15 @@ def main(argv: list[str] | None = None) -> int:
     argumentos = construir_parser().parse_args(argv)
 
     try:
-        # Sobre la URL, sin conectarse: un destino que no es PostgreSQL se
-        # rechaza antes de que exista un engine que pueda crear algo.
-        verificar_url(settings.database_url)
-    except MotorNoSoportado:
-        return _fallo(
-            "DATABASE_URL no apunta a una base PostgreSQL válida. El ETL solo "
-            "opera contra PostgreSQL; el valor configurado no se muestra porque "
-            "puede contener credenciales.",
-            CODIGO_DE_ERROR,
-        )
+        # Sobre la URL, sin conectarse: la variable debe existir y el destino
+        # debe ser PostgreSQL, todo antes de que haya un engine que pueda crear
+        # algo. Una variable ausente detiene el ETL; no se cae sobre DATABASE_URL.
+        url = exigir_url_de_entorno(VARIABLE_URL_ETL)
+    except UrlDeEntornoInvalida as error:
+        return _fallo(str(error), CODIGO_DE_ERROR)
 
     try:
-        engine = create_engine(settings.database_url)
+        engine = create_engine(url)
         try:
             if argumentos.orden == "ejecutar":
                 resultado = ejecutar_etl(engine)

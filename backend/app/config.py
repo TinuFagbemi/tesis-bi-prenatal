@@ -41,6 +41,13 @@ EXPIRACION_MINIMA_MINUTOS = 1
 EXPIRACION_MAXIMA_MINUTOS = 1440
 EXPIRACION_POR_OMISION_MINUTOS = 30
 
+# Ambientes que operan sobre el dataset simulado, y por tanto los únicos donde
+# este proyecto puede comportarse de forma permisiva. Vive aquí, junto a
+# ``app_env``, porque es el valor con el que se compara; ``app.loader`` y
+# ``app.db.privilegios`` lo importan de este módulo en lugar de declararlo cada
+# uno por su cuenta.
+AMBIENTES_PERMITIDOS = frozenset({"development", "test", "ci"})
+
 MENSAJE_SECRETO_AUSENTE = (
     "Falta la variable de entorno JWT_SECRET_KEY. La API no arranca sin "
     "material de firma: no existe un valor por omision. Genera uno con "
@@ -76,7 +83,16 @@ class Settings(BaseSettings):
 
     app_name: str = "FetalAlert API"
     app_env: str = "development"
-    database_url: str = "postgresql+psycopg://fetalalert_dev:dev_only_change_me@localhost:5433/fetalalert_dev"
+    # **El valor por omisión nombra al rol restringido, no al propietario.**
+    # Antes apuntaba a ``fetalalert_dev``, que es el migrador y dueño de las
+    # tablas: un despliegue que olvidara definir la variable habría arrancado
+    # con la credencial que omite toda política RLS, y el olvido no se habría
+    # notado. Ahora el defecto nombra a ``fetalalert_api`` y lleva una
+    # contraseña que no abre nada, así que un entorno sin configurar falla al
+    # conectar en vez de funcionar con demasiados privilegios.
+    database_url: str = (
+        "postgresql+psycopg://fetalalert_api:sin_configurar@localhost:5432/fetalalert"
+    )
 
     # ``SecretStr`` and not ``str``: its ``repr`` is ``SecretStr('**********')``,
     # so the value cannot reach a log, a traceback or a settings dump by being
@@ -180,3 +196,130 @@ def exigir_configuracion_jwt(configuracion: Settings | None = None) -> Configura
         secreto=secreto,
         expiracion=timedelta(minutes=configuracion.jwt_expiration_minutes),
     )
+
+
+# ---------------------------------------------------------------------------
+# URLs de los procesos que no son la API (SCRUM-98)
+# ---------------------------------------------------------------------------
+
+# Tres procesos, tres credenciales, tres variables. La separación es el punto:
+# la API corre con un rol restringido, las migraciones con el rol que posee los
+# objetos y el ETL con un rol técnico propio. Una sola URL para los tres
+# obligaría a darle a la API los privilegios del migrador.
+VARIABLE_URL_API = "DATABASE_URL"
+VARIABLE_URL_ALEMBIC = "ALEMBIC_DATABASE_URL"
+VARIABLE_URL_ETL = "ETL_DATABASE_URL"
+
+# Motor exigido. Se comprueba sobre la URL, sin conectarse, para que un destino
+# equivocado se rechace antes de que exista un engine que pueda crear algo.
+MOTOR_REQUERIDO = "postgresql"
+
+
+class UrlDeEntornoInvalida(RuntimeError):
+    """El proceso no recibió una URL utilizable, y no va a inventarse una.
+
+    Lleva solo el mensaje saneado: el valor rechazado nunca se adjunta, porque
+    una URL de conexión contiene credenciales.
+    """
+
+
+def _leer_del_entorno(variable: str) -> str | None:
+    """El valor de **una** variable, de ``os.environ`` o del ``.env`` del repo.
+
+    Se construye un modelo con un único campo, en la llamada, y ese detalle es
+    la corrección: una clase con los dos campos declarados leería ambas
+    variables cada vez, de modo que pedir la del ETL cargaría también la del
+    migrador en memoria del mismo proceso. Un proceso solo debe tener a la vista
+    la credencial que le corresponde.
+
+    Nada de esto vive en ``Settings``. ``app.config`` lo importa la API, y un
+    campo allí bastaría para que el proceso web cargase la credencial del
+    migrador solo por existir en el entorno.
+
+    Leer el ``.env`` -- y no solo ``os.environ`` -- es lo que mantiene el flujo
+    de trabajo local del repositorio: cada desarrolladora define sus
+    credenciales en su propio ``.env``, que no se versiona.
+    """
+    modelo = type(
+        "_UrlDeUnProceso",
+        (BaseSettings,),
+        {
+            "model_config": SettingsConfigDict(
+                env_file=ENV_FILE, env_file_encoding="utf-8", extra="ignore"
+            ),
+            "__annotations__": {"valor": "str | None"},
+            "valor": Field(default=None, validation_alias=variable),
+        },
+    )
+    return modelo().valor
+
+
+# Mensaje de una variable ausente. Dice qué falta y quién la usa, y no propone
+# ningún valor: no existe un valor por omisión, a propósito.
+_FORMATO_AUSENTE = (
+    "Falta la variable de entorno {variable}. {proceso} no arranca sin ella y "
+    "**no** reutiliza {alternativa}: esa credencial tiene más privilegios de los "
+    "que este proceso debe tener, y heredarla en silencio anularía la separación "
+    "de roles. Defínela en el entorno o en el archivo .env, que no se versiona."
+)
+
+_DESCRIPCION = {
+    VARIABLE_URL_ALEMBIC: (
+        "El proceso de migraciones",
+        "DATABASE_URL",
+    ),
+    VARIABLE_URL_ETL: (
+        "El ETL analítico",
+        "DATABASE_URL",
+    ),
+}
+
+
+def exigir_url_de_entorno(variable: str) -> str:
+    """La URL PostgreSQL de un proceso, o una negativa a operar.
+
+    Sin valor por omisión y **sin respaldo**: si la variable falta, esta
+    función levanta en lugar de caer sobre ``DATABASE_URL``. Un respaldo
+    silencioso es exactamente el fallo que la separación de credenciales existe
+    para evitar -- las migraciones correrían con el rol restringido de la API,
+    o peor, la API acabaría corriendo con el rol que posee las tablas.
+
+    Se valida solo la forma, sin abrir conexión: presente, no vacía, y
+    PostgreSQL. Si el rol al otro lado tiene los privilegios correctos es otra
+    pregunta, y la responde ``app.db.privilegios`` en el arranque.
+    """
+    if variable not in _DESCRIPCION:
+        raise UrlDeEntornoInvalida(
+            f"'{variable}' no es una variable de conexión reconocida por este proyecto."
+        )
+
+    crudo = _leer_del_entorno(variable)
+
+    if crudo is None or not crudo.strip():
+        proceso, alternativa = _DESCRIPCION[variable]
+        raise UrlDeEntornoInvalida(
+            _FORMATO_AUSENTE.format(
+                variable=variable, proceso=proceso, alternativa=alternativa
+            )
+        )
+
+    valor = crudo.strip()
+
+    try:
+        analizada = make_url(valor)
+    except Exception:  # noqa: BLE001 -- el mensaje del parser puede repetir la URL
+        # ``from None`` y no ``from error``: el texto del parser suele incluir el
+        # valor que no pudo leer, y ese valor es una credencial.
+        raise UrlDeEntornoInvalida(
+            f"El valor de {variable} no es una URL de conexión válida. Su "
+            "contenido no se muestra porque puede contener credenciales."
+        ) from None
+
+    if analizada.get_backend_name() != MOTOR_REQUERIDO:
+        raise UrlDeEntornoInvalida(
+            f"{variable} no apunta a una base PostgreSQL. Este proyecto solo "
+            "opera contra PostgreSQL; el valor configurado no se muestra porque "
+            "puede contener credenciales."
+        )
+
+    return valor

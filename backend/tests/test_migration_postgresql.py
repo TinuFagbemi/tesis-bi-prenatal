@@ -45,9 +45,11 @@ from sqlalchemy import (
 )
 
 import app.models  # noqa: F401  -- registers every model on Base.metadata
-from app.config import settings
 from app.db.base import SCHEMA_OPERACIONAL, Base
-from tests.conftest import construir_config_alembic
+from tests.conftest import (
+    construir_config_alembic,
+    url_del_migrador,
+)
 from tests.test_migrations import CANTIDADES_ESPERADAS
 from tests.test_models import (
     COLUMNAS_NULLABLE_ESPERADAS,
@@ -207,9 +209,12 @@ def ciclo() -> ResultadoDelCiclo:
         )
 
     with pytest.MonkeyPatch.context() as parche:
-        # alembic/env.py resolves the URL from settings, not from the Config, so
-        # this is what actually keeps the cycle away from the development database.
-        parche.setattr(settings, "database_url", url)
+        # alembic/env.py resolves the URL from ALEMBIC_DATABASE_URL since
+        # SCRUM-98 -- not from the Config and no longer from settings -- so this
+        # is what actually keeps the cycle away from the development database.
+        # An environment variable takes precedence over the repository's .env,
+        # so a developer's own file cannot redirect this cycle either.
+        parche.setenv("ALEMBIC_DATABASE_URL", url_del_migrador(url))
 
         if estampada in revisiones_de_la_cadena:
             command.downgrade(config, "base")
