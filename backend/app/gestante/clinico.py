@@ -24,11 +24,12 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
+from app.models.enums import EstadoEmbarazo
 from app.schemas.clinico import EmbarazoResumen, LecturaResumen, SesionResumen
 
 # El unico estado que un episodio en curso puede declarar. Se compara contra el
 # valor del enum del dominio y no contra una cadena escrita a mano.
-ESTADO_EN_CURSO = "ACTIVO"
+ESTADO_EN_CURSO = EstadoEmbarazo.ACTIVO.value
 
 
 @dataclass(frozen=True)
