@@ -629,3 +629,110 @@ def test_el_downgrade_no_usa_cascade_sobre_tablas(sql_downgrade):
             continue
         assert any(permitido in linea for permitido in permitidos), linea
     assert "IF EXISTS" not in sql_downgrade
+
+
+# ---------------------------------------------------------------------------
+# El dia clinico, sin servidor
+# ---------------------------------------------------------------------------
+
+
+def _revision_de_rls():
+    """El modulo de la revision de SCRUM-98, cargado por ruta.
+
+    Una revision de Alembic no es importable por nombre de paquete, y tampoco
+    debe importar codigo de la aplicacion: su SQL tiene que quedar congelado.
+    Por eso la zona horaria se declara dentro de la revision y es *esta* prueba
+    la que impide que se separe de la del ETL.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    ruta = (
+        Path(__file__).resolve().parents[1]
+        / "alembic"
+        / "versions"
+        / "3b4a352bc39a_enable_row_level_security_and_clinical_.py"
+    )
+    spec = importlib.util.spec_from_file_location("revision_rls", ruta)
+    modulo = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(modulo)
+    return modulo
+
+
+def test_la_zona_clinica_de_la_revision_es_la_del_etl():
+    """Un solo dia clinico para todo el sistema: el de Panama.
+
+    Si alguien cambiara la zona en un sitio y no en el otro, la vigencia de una
+    asignacion y el dia de una lectura dejarian de coincidir entre el ETL y las
+    politicas. Esta prueba es lo que mantiene las dos definiciones atadas sin
+    que la migracion tenga que importar la aplicacion.
+    """
+    from app.etl.reglas import ZONA_HORARIA_CLINICA
+
+    assert _revision_de_rls().ZONA_CLINICA == str(ZONA_HORARIA_CLINICA)
+
+
+def test_la_revision_no_depende_del_timezone_de_la_sesion(sql_upgrade):
+    """Ni ``CURRENT_DATE`` ni un ``::date`` desnudo sobre un timestamptz.
+
+    Las dos expresiones las resuelve el parametro ``TimeZone`` de la sesion, de
+    modo que el mismo instante daba dias distintos segun quien preguntara. Se
+    comprueba sobre el SQL renderizado, que es lo que la base va a recibir.
+    """
+    assert "CURRENT_DATE" not in sql_upgrade
+    assert "f.fecha_hora::date" not in sql_upgrade
+    assert "date_trunc('month', f.fecha_hora)" not in sql_upgrade
+
+
+def test_cada_conversion_de_instante_nombra_la_zona_clinica():
+    """Y lo hace de forma explicita, no por omision."""
+    revision = _revision_de_rls()
+    zona = revision.ZONA_CLINICA
+
+    for expresion in (
+        revision.HOY_CLINICO,
+        revision._dia_clinico("f.fecha_hora"),
+        revision._mes_clinico("f.fecha_hora"),
+    ):
+        assert f"AT TIME ZONE '{zona}'" in expresion, expresion
+
+
+def test_las_fechas_que_ya_son_date_no_se_convierten():
+    """``dim_embarazo.fecha_inicio`` es ``DATE``: no tiene zona que aplicar.
+
+    Convertirla seria un error distinto -- trataria una fecha civil como si
+    fuera un instante --, asi que se deja como estaba.
+    """
+    vistas = _revision_de_rls().VISTAS
+
+    assert "date_trunc('month', de.fecha_inicio)::date" in vistas
+    assert "de.fecha_inicio AT TIME ZONE" not in vistas
+
+
+def test_la_ventana_de_secuencia_ordena_por_tiempo_y_desempata():
+    """``secuencia_sesion`` se ordena por el instante, con ``id_sesion`` detras.
+
+    Las dos mitades importan y por motivos distintos.
+
+    El **instante primero**: ``id_sesion`` es una clave surrogate que el servidor
+    asigna al recibir la sesion, no al ocurrir, y en un sistema offline-first eso
+    es orden de sincronizacion. Ordenar por el invertiria la serie justo en el
+    escenario que esta tesis modela.
+
+    El **desempate despues**: sin un segundo criterio, dos sesiones que empiezan
+    en el mismo instante pueden intercambiar su numero entre ejecuciones. Eso no
+    se puede comprobar ejecutando la consulta -- PostgreSQL reutiliza el plan
+    dentro de una sesion y el empate no se manifiesta, cosa que se verifico
+    mutando la ventana y viendo que ninguna prueba de runtime moria. Donde si es
+    determinista es en el texto del SQL, y aqui es donde se fija.
+    """
+    revision = _revision_de_rls()
+
+    ventana = re.search(
+        r"row_number\(\)\s*OVER\s*\((.*?)\)", revision.VISTAS, re.S
+    )
+    assert ventana is not None, "no hay ventana row_number() en las vistas"
+
+    interior = " ".join(ventana.group(1).split())
+    assert "PARTITION BY id_embarazo" in interior, interior
+    assert "ORDER BY inicio_sesion, id_sesion" in interior, interior

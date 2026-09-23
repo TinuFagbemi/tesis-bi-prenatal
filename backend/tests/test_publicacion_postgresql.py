@@ -1377,3 +1377,625 @@ def test_el_default_sortea_un_valor_distinto_en_cada_insercion(observador, medic
         "determinista y el mapa seria reversible."
     )
     assert uuid.UUID(primero).version == uuid.UUID(segundo).version == 4
+
+
+# ---------------------------------------------------------------------------
+# 9. El dia clinico es el de Panama, no el de la sesion
+# ---------------------------------------------------------------------------
+#
+# ``CURRENT_DATE`` y ``timestamptz::date`` dependen del parametro ``TimeZone``
+# de la sesion. Mientras la publicacion los usaba, el dia de una lectura y la
+# vigencia de una asignacion cambiaban segun quien preguntara: una conexion en
+# UTC y otra en Asia/Tokyo veian cosas distintas de los mismos datos.
+#
+# Estas pruebas no usan la expresion corregida como oraculo. Fijan un instante
+# concreto, saben a que dia panameno corresponde, y lo exigen.
+
+ZONA_CLINICA = "America/Panama"
+
+# 2025-03-01T03:30:00Z son las 22:30 del 2025-02-28 en Panama (UTC-5). El dia
+# clinico es el 28 de febrero, y ademas cruza la frontera del mes.
+INSTANTE_DE_FRONTERA = "2025-03-01T03:30:00+00:00"
+DIA_CLINICO_ESPERADO = "2025-02-28"
+MES_CLINICO_ESPERADO = "2025-02-01"
+
+TIMEZONES_DE_SESION = ("UTC", "Asia/Tokyo", "America/Panama", "Pacific/Kiritimati")
+
+
+@pytest.fixture
+def lectura_en_la_frontera(observador, dos_episodios_de_una_paciente):
+    """Una lectura publicada cuyo instante cae al otro lado de la medianoche UTC.
+
+    Se cuelga del escenario controlado que esta suite ya fabrica, asi que no
+    toca una fila del dataset canonico y se retira con el.
+    """
+    caso = dos_episodios_de_una_paciente
+    id_embarazo = caso["embarazos"][0]
+
+    with observador.connect() as conexion:
+        referencia = conexion.execute(
+            text(
+                """
+                SELECT f.id_sesion, f.id_paciente, f.id_medico, f.id_clinica,
+                       f.id_tiempo_gestacional, f.id_semaforo
+                FROM analitico.fact_lectura_biometrica f
+                ORDER BY f.id_lectura LIMIT 1
+                """
+            )
+        ).mappings().one()
+
+        id_lectura = conexion.execute(
+            text(
+                """
+                INSERT INTO analitico.fact_lectura_biometrica
+                    (id_lectura, id_sesion, id_paciente, id_medico, id_clinica,
+                     id_tiempo_gestacional, id_embarazo, id_semaforo,
+                     hr_valor, spo2_valor, mov_valor,
+                     estado_hr, estado_spo2, estado_mov, fecha_hora)
+                SELECT max(f.id_lectura) + 1, :sesion, :paciente, :medico,
+                       :clinica, :tiempo, :embarazo, :semaforo,
+                       80, 97, NULL, 'OK', 'OK', NULL,
+                       CAST(:instante AS timestamptz)
+                FROM analitico.fact_lectura_biometrica f
+                RETURNING id_lectura
+                """
+            ),
+            {
+                "sesion": referencia["id_sesion"],
+                "paciente": caso["id_paciente"],
+                "medico": referencia["id_medico"],
+                "clinica": referencia["id_clinica"],
+                "tiempo": referencia["id_tiempo_gestacional"],
+                "embarazo": id_embarazo,
+                "semaforo": referencia["id_semaforo"],
+                "instante": INSTANTE_DE_FRONTERA,
+            },
+        ).scalar_one()
+
+    yield {"id_lectura": id_lectura, "seudonimo": caso["autorizado"]}
+
+    with observador.connect() as conexion:
+        conexion.execute(
+            text("DELETE FROM analitico.fact_lectura_biometrica WHERE id_lectura = :l"),
+            {"l": id_lectura},
+        )
+
+
+def fecha_publicada(engine, seudonimo: str, timezone_de_sesion: str | None = None):
+    """La ``fecha_captura`` de la lectura de frontera, con esa zona de sesion."""
+    with engine.connect() as conexion:
+        if timezone_de_sesion is not None:
+            conexion.execute(text(f"SET TIME ZONE '{timezone_de_sesion}'"))
+        filas = conexion.execute(
+            text(
+                "SELECT fecha_captura FROM publicacion.v_lectura "
+                "WHERE seudonimo_embarazo = CAST(:s AS uuid) "
+                "AND hr_valor = 80 AND spo2_valor = 97"
+            ),
+            {"s": seudonimo},
+        ).scalars().all()
+        conexion.rollback()
+    return filas
+
+
+def test_la_fecha_publicada_es_el_dia_panameno_y_no_el_utc(
+    powerbi, lectura_en_la_frontera
+):
+    """22:30 del 28 de febrero en Panama, aunque en UTC ya sea el 1 de marzo.
+
+    El instante es 2025-03-01T03:30:00Z. Con ``timestamptz::date`` y una sesion
+    en UTC se publicaba 2025-03-01, que ademas cae en otro mes.
+    """
+    fechas = fecha_publicada(powerbi, lectura_en_la_frontera["seudonimo"])
+
+    assert fechas, "la lectura de frontera no aparecio publicada"
+    assert all(str(f) == DIA_CLINICO_ESPERADO for f in fechas), fechas
+
+
+@pytest.mark.parametrize("zona", TIMEZONES_DE_SESION)
+def test_la_fecha_publicada_no_cambia_con_el_timezone_de_la_sesion(
+    powerbi, lectura_en_la_frontera, zona
+):
+    """Cuatro zonas de sesion, incluida una a +14, y el mismo resultado."""
+    fechas = fecha_publicada(powerbi, lectura_en_la_frontera["seudonimo"], zona)
+
+    assert fechas
+    assert all(str(f) == DIA_CLINICO_ESPERADO for f in fechas), (zona, fechas)
+
+
+@pytest.mark.parametrize("zona", TIMEZONES_DE_SESION)
+def test_el_mes_administrativo_tampoco_depende_de_la_sesion(
+    powerbi, observador, lectura_en_la_frontera, zona
+):
+    """La frontera mensual: el instante cae en marzo UTC y en febrero panameno."""
+    with powerbi.connect() as conexion:
+        conexion.execute(text(f"SET TIME ZONE '{zona}'"))
+        meses = {
+            str(fila["mes"])
+            for fila in conexion.execute(
+                text("SELECT DISTINCT mes FROM publicacion.v_resumen_administrativo")
+            ).mappings()
+        }
+        conexion.rollback()
+
+    assert all(mes.endswith("-01") for mes in meses), meses
+    # El mes de la frontera, si aparece, es el panameno.
+    assert "2025-03-01" not in meses or MES_CLINICO_ESPERADO in meses
+
+
+def test_el_dia_clinico_publicado_coincide_con_la_regla_del_etl(
+    powerbi, observador, lectura_en_la_frontera
+):
+    """El oraculo no es la vista: es la regla del ETL, calculada en Python."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    instante = datetime.fromisoformat(INSTANTE_DE_FRONTERA)
+    esperado = instante.astimezone(ZoneInfo(ZONA_CLINICA)).date()
+
+    fechas = fecha_publicada(powerbi, lectura_en_la_frontera["seudonimo"])
+
+    assert str(esperado) == DIA_CLINICO_ESPERADO
+    assert all(f == esperado for f in fechas), (esperado, fechas)
+
+
+@pytest.mark.parametrize("zona", TIMEZONES_DE_SESION)
+def test_la_vigencia_medica_no_depende_del_timezone_de_la_sesion(
+    powerbi, medicos, zona
+):
+    """El alcance del medico es el mismo desde cualquier zona de sesion.
+
+    ``v_entitlement_medico`` decide quien puede leer que. Si su vigencia
+    dependiera de la sesion, dos conexiones legitimas autorizarian conjuntos
+    distintos de embarazos para el mismo medico.
+    """
+    upn = medicos[0]["upn"]
+
+    with powerbi.connect() as conexion:
+        conexion.execute(text(f"SET TIME ZONE '{zona}'"))
+        alcance = {
+            str(fila["seudonimo_embarazo"])
+            for fila in conexion.execute(
+                text(
+                    "SELECT seudonimo_embarazo FROM publicacion.v_entitlement_medico "
+                    "WHERE upn_medico = lower(:upn)"
+                ),
+                {"upn": upn},
+            ).mappings()
+        }
+        conexion.rollback()
+
+    with powerbi.connect() as conexion:
+        conexion.execute(text("SET TIME ZONE 'America/Panama'"))
+        referencia = {
+            str(fila["seudonimo_embarazo"])
+            for fila in conexion.execute(
+                text(
+                    "SELECT seudonimo_embarazo FROM publicacion.v_entitlement_medico "
+                    "WHERE upn_medico = lower(:upn)"
+                ),
+                {"upn": upn},
+            ).mappings()
+        }
+        conexion.rollback()
+
+    assert alcance == referencia
+    assert alcance, "el dataset no da al medico ninguna asignacion vigente"
+
+
+@pytest.mark.parametrize("zona", TIMEZONES_DE_SESION)
+def test_el_helper_de_seguimiento_vigente_no_depende_de_la_sesion(
+    observador, medicos, zona
+):
+    """Y la otra mitad del contrato: el helper que usan las politicas de RLS."""
+    identidad = escalar(
+        observador,
+        "SELECT u.id_usuario FROM operacional.usuario_medico um "
+        "JOIN operacional.usuario u ON u.id_usuario = um.id_usuario "
+        "WHERE um.id_medico = :m",
+        m=medicos[0]["id_medico"],
+    )
+
+    def alcance_con(zona_de_sesion: str) -> int:
+        with observador.connect() as conexion:
+            conexion.execute(text(f"SET TIME ZONE '{zona_de_sesion}'"))
+            conexion.execute(
+                text("SELECT set_config('fetalalert.id_usuario', :v, false)"),
+                {"v": str(identidad)},
+            )
+            total = conexion.execute(
+                text(
+                    "SELECT count(*) FROM operacional.embarazo e "
+                    "WHERE seguridad.embarazo_en_seguimiento_vigente(e.id_embarazo)"
+                )
+            ).scalar_one()
+            conexion.execute(text("RESET TIME ZONE"))
+            return total
+
+    assert alcance_con(zona) == alcance_con("America/Panama")
+
+
+# ---------------------------------------------------------------------------
+# 10. secuencia_sesion sigue la cronologia clinica, no el identificador
+# ---------------------------------------------------------------------------
+#
+# ``id_sesion`` es una clave surrogate: la asigna el servidor cuando recibe la
+# sesion. En un sistema offline-first eso es orden de **sincronizacion**, no de
+# **ocurrencia**: el nodo edge captura sin conexion y sube cuando puede, asi que
+# una sesion tomada antes puede recibir un id mayor.
+#
+# El escenario de abajo construye exactamente esa discrepancia y exige que la
+# serie publicada siga el tiempo.
+
+INSTANTE_TEMPRANO = "2024-06-10T14:00:00+00:00"
+INSTANTE_TARDIO = "2024-06-20T14:00:00+00:00"
+
+
+@pytest.fixture
+def secuencia_invertida(observador, dos_episodios_de_una_paciente):
+    """Dos sesiones del mismo embarazo con id y cronologia en sentidos opuestos.
+
+    ``id_sesion`` A < B, pero la sesion A ocurrio **despues** que la B. La sesion
+    tardia lleva ademas tres lecturas, para comprobar que todas comparten
+    secuencia.
+
+    Se cuelga del escenario controlado de esta suite: ni una fila del dataset
+    canonico se toca, y todo se retira al terminar.
+    """
+    caso = dos_episodios_de_una_paciente
+    id_embarazo = caso["embarazos"][0]
+
+    with observador.connect() as conexion:
+        referencia = conexion.execute(
+            text(
+                """
+                SELECT id_paciente, id_medico, id_clinica, id_tiempo_gestacional,
+                       id_semaforo
+                FROM analitico.fact_lectura_biometrica ORDER BY id_lectura LIMIT 1
+                """
+            )
+        ).mappings().one()
+        base_sesion = conexion.execute(
+            text("SELECT max(id_sesion) FROM analitico.fact_lectura_biometrica")
+        ).scalar_one()
+        base_lectura = conexion.execute(
+            text("SELECT max(id_lectura) FROM analitico.fact_lectura_biometrica")
+        ).scalar_one()
+
+        # A recibe el id menor y el instante MAS TARDIO; B al reves.
+        sesiones = {
+            "A": {"id_sesion": base_sesion + 1, "instante": INSTANTE_TARDIO, "lecturas": 1},
+            "B": {"id_sesion": base_sesion + 2, "instante": INSTANTE_TEMPRANO, "lecturas": 3},
+        }
+
+        creadas = []
+        siguiente = base_lectura
+        for datos in sesiones.values():
+            for _ in range(datos["lecturas"]):
+                siguiente += 1
+                conexion.execute(
+                    text(
+                        """
+                        INSERT INTO analitico.fact_lectura_biometrica
+                            (id_lectura, id_sesion, id_paciente, id_medico,
+                             id_clinica, id_tiempo_gestacional, id_embarazo,
+                             id_semaforo, hr_valor, spo2_valor, mov_valor,
+                             estado_hr, estado_spo2, estado_mov, fecha_hora)
+                        VALUES (:l, :s, :p, :m, :c, :t, :e, :sem,
+                                81, 96, NULL, 'OK', 'OK', NULL,
+                                CAST(:instante AS timestamptz))
+                        """
+                    ),
+                    {
+                        "l": siguiente,
+                        "s": datos["id_sesion"],
+                        "p": caso["id_paciente"],
+                        "m": referencia["id_medico"],
+                        "c": referencia["id_clinica"],
+                        "t": referencia["id_tiempo_gestacional"],
+                        "e": id_embarazo,
+                        "sem": referencia["id_semaforo"],
+                        "instante": datos["instante"],
+                    },
+                )
+                creadas.append(siguiente)
+
+    yield {
+        "seudonimo": caso["autorizado"],
+        "id_sesion_a": sesiones["A"]["id_sesion"],
+        "id_sesion_b": sesiones["B"]["id_sesion"],
+        "lecturas": creadas,
+    }
+
+    with observador.connect() as conexion:
+        conexion.execute(
+            text("DELETE FROM analitico.fact_lectura_biometrica WHERE id_lectura = ANY(:l)"),
+            {"l": creadas},
+        )
+
+
+def secuencias_publicadas(powerbi, seudonimo: str):
+    """``(fecha_captura, secuencia_sesion)`` de las lecturas del escenario."""
+    return [
+        (str(fila["fecha_captura"]), fila["secuencia_sesion"])
+        for fila in consultar(
+            powerbi,
+            "SELECT fecha_captura, secuencia_sesion FROM publicacion.v_lectura "
+            "WHERE seudonimo_embarazo = CAST(:s AS uuid) "
+            "AND hr_valor = 81 AND spo2_valor = 96 "
+            "ORDER BY secuencia_sesion, fecha_captura",
+            s=seudonimo,
+        )
+    ]
+
+
+def test_la_sesion_mas_antigua_recibe_la_secuencia_menor(
+    powerbi, secuencia_invertida
+):
+    """Aunque su ``id_sesion`` sea el mayor de los dos.
+
+    B ocurrio el 10 de junio y tiene el id mayor; A ocurrio el 20 y tiene el
+    menor. La serie publicada tiene que empezar por B.
+    """
+    caso = secuencia_invertida
+    assert caso["id_sesion_a"] < caso["id_sesion_b"]
+
+    filas = secuencias_publicadas(powerbi, caso["seudonimo"])
+    por_fecha = {fecha: secuencia for fecha, secuencia in filas}
+
+    assert por_fecha["2024-06-10"] < por_fecha["2024-06-20"], filas
+
+
+def test_todas_las_lecturas_de_una_sesion_comparten_secuencia(
+    powerbi, secuencia_invertida
+):
+    """Una sesion, una secuencia: la de tres lecturas no se parte en tres."""
+    filas = secuencias_publicadas(powerbi, secuencia_invertida["seudonimo"])
+
+    del_10 = {secuencia for fecha, secuencia in filas if fecha == "2024-06-10"}
+    del_20 = {secuencia for fecha, secuencia in filas if fecha == "2024-06-20"}
+
+    assert len(del_10) == 1 and len(del_20) == 1, filas
+    assert len([f for f in filas if f[0] == "2024-06-10"]) == 3
+
+
+def test_el_numero_de_secuencias_concilia_con_el_de_sesiones(
+    powerbi, observador, secuencia_invertida
+):
+    """Tantas secuencias distintas como sesiones tiene el episodio."""
+    seudonimo = secuencia_invertida["seudonimo"]
+
+    secuencias = escalar(
+        powerbi,
+        "SELECT count(DISTINCT secuencia_sesion) FROM publicacion.v_lectura "
+        "WHERE seudonimo_embarazo = CAST(:s AS uuid)",
+        s=seudonimo,
+    )
+    sesiones = escalar(
+        observador,
+        """
+        SELECT count(DISTINCT f.id_sesion)
+        FROM analitico.fact_lectura_biometrica f
+        JOIN privado.seudonimo_embarazo se ON se.id_embarazo = f.id_embarazo
+        WHERE se.seudonimo::text = :s
+        """,
+        s=seudonimo,
+    )
+
+    assert secuencias == sesiones > 0
+
+
+def test_la_secuencia_es_densa_y_empieza_en_uno(powerbi, secuencia_invertida):
+    """``row_number`` por episodio: 1, 2, 3… sin huecos."""
+    seudonimo = secuencia_invertida["seudonimo"]
+
+    secuencias = sorted(
+        {
+            fila["secuencia_sesion"]
+            for fila in consultar(
+                powerbi,
+                "SELECT DISTINCT secuencia_sesion FROM publicacion.v_lectura "
+                "WHERE seudonimo_embarazo = CAST(:s AS uuid)",
+                s=seudonimo,
+            )
+        }
+    )
+
+    assert secuencias == list(range(1, len(secuencias) + 1))
+
+
+def test_dos_sesiones_en_el_mismo_instante_desempatan_de_forma_estable(
+    powerbi, observador, secuencia_invertida
+):
+    """El desempate por ``id_sesion`` hace la consulta reproducible.
+
+    Sin un segundo criterio, dos sesiones con el mismo instante minimo podrian
+    intercambiar su secuencia entre ejecuciones y la serie dejaria de ser
+    comparable consigo misma.
+    """
+    caso = secuencia_invertida
+
+    # Se igualan los instantes de las dos sesiones del escenario.
+    with observador.connect() as conexion:
+        conexion.execute(
+            text(
+                "UPDATE analitico.fact_lectura_biometrica SET fecha_hora = "
+                "CAST(:i AS timestamptz) WHERE id_lectura = ANY(:l)"
+            ),
+            {"i": INSTANTE_TEMPRANO, "l": caso["lecturas"]},
+        )
+
+    def orden() -> list:
+        return [
+            (fila["secuencia_sesion"], fila["hr_valor"])
+            for fila in consultar(
+                powerbi,
+                "SELECT secuencia_sesion, hr_valor FROM publicacion.v_lectura "
+                "WHERE seudonimo_embarazo = CAST(:s AS uuid) AND hr_valor = 81 "
+                "ORDER BY secuencia_sesion",
+                s=caso["seudonimo"],
+            )
+        ]
+
+    assert orden() == orden() == orden()
+
+
+# ---------------------------------------------------------------------------
+# 11. El mes administrativo, observado en una celda que supera el minimo
+# ---------------------------------------------------------------------------
+#
+# La seccion 9 comprueba el mes con una sola lectura de frontera, y eso resulto
+# no bastar: ``v_resumen_administrativo`` tiene
+# ``HAVING count(DISTINCT id_embarazo) >= MINIMO_DE_CELDA``, asi que una lectura
+# suelta queda suprimida y el agregado nunca la ensena -- ni en febrero ni en
+# marzo. Una mutacion que quitara la zona de ``_mes_clinico`` pasaba por delante
+# de esa prueba sin despeinarse.
+#
+# Aqui se fabrica una celda que **si** se publica: cinco embarazos distintos de
+# una misma clinica, todos con una lectura en el instante de frontera. Y se mide
+# por diferencia contra el estado previo, que es lo unico robusto cuando el
+# dataset canonico ya tiene filas propias en esos dos meses.
+
+MES_UTC_DE_LA_FRONTERA = "2025-03-01"
+
+
+@pytest.fixture
+def frontera_administrativa(observador):
+    """Cinco embarazos de una clinica, con una lectura cada uno en la frontera.
+
+    Devuelve la provincia, el codigo de semaforo y el recuento de lecturas que
+    la celda tenia **antes**, para poder medir por diferencia.
+    """
+    with observador.connect() as conexion:
+        elegidos = conexion.execute(
+            text(
+                """
+                SELECT f.id_embarazo, min(f.id_clinica) AS id_clinica,
+                       min(f.id_paciente) AS id_paciente,
+                       min(f.id_medico) AS id_medico,
+                       min(f.id_tiempo_gestacional) AS id_tiempo_gestacional
+                FROM analitico.fact_lectura_biometrica f
+                WHERE f.id_clinica = (
+                    SELECT id_clinica FROM analitico.fact_lectura_biometrica
+                    GROUP BY id_clinica
+                    HAVING count(DISTINCT id_embarazo) >= 5
+                    ORDER BY id_clinica LIMIT 1
+                )
+                GROUP BY f.id_embarazo
+                ORDER BY f.id_embarazo
+                LIMIT 5
+                """
+            )
+        ).mappings().all()
+        assert len(elegidos) == 5, "el dataset no da una clinica con 5 embarazos"
+
+        provincia = conexion.execute(
+            text("SELECT provincia FROM analitico.dim_clinica WHERE id_clinica = :c"),
+            {"c": elegidos[0]["id_clinica"]},
+        ).scalar_one()
+        id_semaforo, codigo = conexion.execute(
+            text(
+                "SELECT id_semaforo, codigo_nivel FROM analitico.dim_semaforo "
+                "ORDER BY id_semaforo LIMIT 1"
+            )
+        ).one()
+
+        def celdas() -> dict:
+            filas = conexion.execute(
+                text(
+                    """
+                    SELECT mes::text AS mes, lecturas
+                    FROM publicacion.v_resumen_administrativo
+                    WHERE provincia = :p AND codigo_semaforo = :c
+                    """
+                ),
+                {"p": provincia, "c": codigo},
+            ).mappings().all()
+            return {fila["mes"]: fila["lecturas"] for fila in filas}
+
+        antes = celdas()
+
+        base_lectura = conexion.execute(
+            text("SELECT max(id_lectura) FROM analitico.fact_lectura_biometrica")
+        ).scalar_one()
+        base_sesion = conexion.execute(
+            text("SELECT max(id_sesion) FROM analitico.fact_lectura_biometrica")
+        ).scalar_one()
+
+        creadas = []
+        for desplazamiento, fila in enumerate(elegidos, start=1):
+            conexion.execute(
+                text(
+                    """
+                    INSERT INTO analitico.fact_lectura_biometrica
+                        (id_lectura, id_sesion, id_paciente, id_medico,
+                         id_clinica, id_tiempo_gestacional, id_embarazo,
+                         id_semaforo, hr_valor, spo2_valor, mov_valor,
+                         estado_hr, estado_spo2, estado_mov, fecha_hora)
+                    VALUES (:l, :s, :p, :m, :c, :t, :e, :sem,
+                            77, 97, NULL, 'OK', 'OK', NULL,
+                            CAST(:instante AS timestamptz))
+                    """
+                ),
+                {
+                    "l": base_lectura + desplazamiento,
+                    "s": base_sesion + desplazamiento,
+                    "p": fila["id_paciente"],
+                    "m": fila["id_medico"],
+                    "c": fila["id_clinica"],
+                    "t": fila["id_tiempo_gestacional"],
+                    "e": fila["id_embarazo"],
+                    "sem": id_semaforo,
+                    "instante": INSTANTE_DE_FRONTERA,
+                },
+            )
+            creadas.append(base_lectura + desplazamiento)
+        conexion.commit()
+
+    yield {"provincia": provincia, "codigo": codigo, "antes": antes, "lecturas": creadas}
+
+    with observador.connect() as conexion:
+        conexion.execute(
+            text(
+                "DELETE FROM analitico.fact_lectura_biometrica "
+                "WHERE id_lectura = ANY(:l)"
+            ),
+            {"l": creadas},
+        )
+        conexion.commit()
+
+
+@pytest.mark.parametrize("zona", TIMEZONES_DE_SESION)
+def test_las_cinco_lecturas_de_frontera_caen_en_el_mes_panameno(
+    powerbi, frontera_administrativa, zona
+):
+    """Las cinco suman en febrero panameno, no en marzo UTC.
+
+    El instante es el 1 de marzo a las 03:30 UTC, que en Panama son las 22:30
+    del 28 de febrero. Si el truncado dependiera del ``TimeZone`` de la sesion,
+    estas cinco lecturas cambiarian de cubo segun quien abriera el informe -- y
+    un indicador mensual que se mueve solo no es un indicador.
+    """
+    caso = frontera_administrativa
+
+    with powerbi.connect() as conexion:
+        conexion.execute(text(f"SET TIME ZONE '{zona}'"))
+        despues = {
+            fila["mes"]: fila["lecturas"]
+            for fila in conexion.execute(
+                text(
+                    """
+                    SELECT mes::text AS mes, lecturas
+                    FROM publicacion.v_resumen_administrativo
+                    WHERE provincia = :p AND codigo_semaforo = :c
+                    """
+                ),
+                {"p": caso["provincia"], "c": caso["codigo"]},
+            ).mappings()
+        }
+        conexion.rollback()
+
+    delta = lambda mes: despues.get(mes, 0) - caso["antes"].get(mes, 0)
+
+    assert delta(MES_CLINICO_ESPERADO) >= 5, (caso["antes"], despues, zona)
+    assert delta(MES_UTC_DE_LA_FRONTERA) == 0, (caso["antes"], despues, zona)
