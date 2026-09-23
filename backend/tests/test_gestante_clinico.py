@@ -24,8 +24,14 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
+from fastapi.testclient import TestClient
 
-from app.gestante.central import EstadoRespuesta, RespuestaClinica
+from app.gestante.central import (
+    EstadoRespuesta,
+    RespuestaClinica,
+    RespuestaIdentidad,
+    RespuestaToken,
+)
 from app.gestante.clinico import (
     SesionConLecturas,
     clasificar_episodios,
@@ -33,6 +39,7 @@ from app.gestante.clinico import (
     sesion_de_la_lectura,
     ultima_lectura,
 )
+from app.models.enums import NombreRol
 from app.schemas.clinico import EmbarazoResumen, LecturaResumen, SesionResumen
 from tests.test_gestante_rutas import (
     ClienteCentralDoble,
@@ -831,3 +838,105 @@ def test_la_lectura_no_expone_claves_de_catalogo(tmp_path):
     assert "id_semaforo" not in texto
     assert "id_tiempo_gest" not in texto
     assert "id_dispositivo" not in texto
+
+
+# -- G. Dos cuentas, dos sesiones locales: sin mezcla ----------------------
+
+
+class ClienteClinicoMultiCuenta(ClienteCentralDoble):
+    """Doble cuyo token y datos dependen del correo, no de un valor fijo.
+
+    ``ClienteClinicoDoble`` responde igual sin importar el token que reciba,
+    lo que basta para el contrato pero no demuestra que el adaptador reenvie
+    el token de **esa** sesion local y no uno cacheado o el de otra cuenta.
+    Este doble si distingue: cada correo tiene su propio token, y cada token
+    su propia respuesta de embarazos, para que una mezcla sea detectable.
+    """
+
+    def __init__(self, *, tokens_por_correo, datos_por_token, ids_por_token):
+        self.tokens_por_correo = tokens_por_correo
+        self.datos_por_token = datos_por_token
+        self.ids_por_token = ids_por_token
+        super().__init__()
+        self.tokens_vistos_en_embarazos: list[str] = []
+
+    def autenticar(self, *, email: str, password: str) -> RespuestaToken:
+        self.llamadas_autenticar += 1
+        self.ultimo_email = email
+        self.ultimo_password = password
+        token = self.tokens_por_correo.get(email)
+        if token is None:
+            return RespuestaToken(EstadoRespuesta.RECHAZADO)
+        return RespuestaToken(EstadoRespuesta.OK, token=token)
+
+    def identidad(self, token: str) -> RespuestaIdentidad:
+        self.llamadas_identidad += 1
+        id_usuario = self.ids_por_token.get(token)
+        if id_usuario is None:
+            return RespuestaIdentidad(EstadoRespuesta.RECHAZADO)
+        return RespuestaIdentidad(
+            EstadoRespuesta.OK, id_usuario=id_usuario, rol=NombreRol.PACIENTE
+        )
+
+    def embarazos(self, token):
+        self.tokens_vistos_en_embarazos.append(token)
+        return self.datos_por_token[token]
+
+
+def test_dos_cuentas_con_sesion_local_propia_nunca_mezclan_token_ni_datos(tmp_path):
+    """Cada sesion local reenvia solo el token de la cuenta que la abrio.
+
+    Simula dos pacientes con su propio navegador (dos ``TestClient``, dos
+    cookies) contra el mismo proceso del adaptador y el mismo doble central.
+    Si el adaptador guardara el token en una variable compartida en lugar de
+    leerlo de la sesion local de cada peticion, esta prueba lo mostraria: la
+    cuenta A recibiria el embarazo de B, o viceversa.
+    """
+    correo_a, correo_b = "paciente-a@example.com", "paciente-b@example.com"
+    token_a, token_b = "token-cuenta-a", "token-cuenta-b"
+    central = ClienteClinicoMultiCuenta(
+        tokens_por_correo={correo_a: token_a, correo_b: token_b},
+        ids_por_token={token_a: 1, token_b: 2},
+        datos_por_token={
+            token_a: RespuestaClinica(EstadoRespuesta.OK, datos=(embarazo(101),)),
+            token_b: RespuestaClinica(EstadoRespuesta.OK, datos=(embarazo(202),)),
+        },
+    )
+    cliente_a, _, _, _ = construir_cliente(tmp_path, central=central)
+    cliente_b = TestClient(cliente_a.app)
+
+    assert iniciar_sesion(cliente_a, email=correo_a, password="da-igual-a").status_code == 200
+    assert iniciar_sesion(cliente_b, email=correo_b, password="da-igual-b").status_code == 200
+
+    respuesta_a = cliente_a.get("/adaptador/embarazos").json()
+    respuesta_b = cliente_b.get("/adaptador/embarazos").json()
+
+    ids_a = [e["id_embarazo"] for e in respuesta_a["datos"]["todos"]]
+    ids_b = [e["id_embarazo"] for e in respuesta_b["datos"]["todos"]]
+    assert ids_a == [101]
+    assert ids_b == [202]
+    assert central.tokens_vistos_en_embarazos == [token_a, token_b]
+
+
+def test_una_cuenta_rechazada_no_ve_ni_toca_los_datos_de_la_otra(tmp_path):
+    """El rechazo de una cuenta no deja ninguna huella en la sesion de la otra."""
+    correo_valido, correo_ajeno = "paciente-valida@example.com", "no-existe@example.com"
+    token_valido = "token-cuenta-valida"
+    central = ClienteClinicoMultiCuenta(
+        tokens_por_correo={correo_valido: token_valido},
+        ids_por_token={token_valido: 7},
+        datos_por_token={
+            token_valido: RespuestaClinica(EstadoRespuesta.OK, datos=(embarazo(303),))
+        },
+    )
+    cliente_valida, _, _, _ = construir_cliente(tmp_path, central=central)
+    cliente_ajeno = TestClient(cliente_valida.app)
+
+    assert iniciar_sesion(cliente_valida, email=correo_valido, password="da-igual").status_code == 200
+    rechazo = iniciar_sesion(cliente_ajeno, email=correo_ajeno, password="lo-que-sea")
+    assert rechazo.status_code == 401
+    assert cliente_ajeno.get("/adaptador/embarazos").status_code == 401
+
+    cuerpo = cliente_valida.get("/adaptador/embarazos").json()
+    assert [e["id_embarazo"] for e in cuerpo["datos"]["todos"]] == [303]
+    assert central.tokens_vistos_en_embarazos == [token_valido]
