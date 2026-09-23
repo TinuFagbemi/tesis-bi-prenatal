@@ -35,30 +35,42 @@ a way into clinical data. The role guard answers it 403 and records
 sentence. The only thing that differs between the two answers is the identifier
 the caller itself supplied.
 
-**A denial is recorded; a successful read is not.** Every 404 these routes
-produce writes one ``ACCESO_CLINICO_DENEGADO`` entry: who asked, from which
-address, for which entity and with which identifier. That is the whole entry --
-no body, no biometric value, no token, no credential, and nothing the database
-answered. It records that an identified account reached for something outside its
-scope, which is what lets somebody notice an account walking the identifier
-space; recording *what was there* would be the leak the 404 exists to prevent.
+**Every access is recorded, granted or refused.** RF-10 asks who reached the
+information and when; RNF-07 asks that accesses to sensitive clinical data be
+recorded. A trail holding only refusals answers neither -- it says who was turned
+away and never who actually read a patient's series -- so these routes write both
+sides.
 
-The entry goes in a **transaction of its own**, on the audit session and not on
-the one the read used, for two reasons: the read never happened, so there is no
-business transaction to join, and the denial has already been decided, so the
-answer must not depend on the trail. If the write fails, the failure is recorded
-through the sanitised channel and the caller still gets its 404 -- degrading a
-denial into a 500 would turn a broken audit table into a way of telling foreign
-resources apart from missing ones.
+*Refused.* Every 404 writes one ``ACCESO_CLINICO_DENEGADO``: who asked, from
+which address, for which entity and with which identifier. Recording *what was
+there* would be the leak the 404 exists to prevent.
 
-A successful read writes nothing. A trail that grew with every legitimate query
-would bury the denials it exists to surface, and the rows a caller is entitled to
-read are not an event.
+*Granted.* Every successful read writes one ``ACCESO_CLINICO_PERMITIDO``, and
+**one is the whole point: one per request, never one per row**. A listing that
+returns four hundred readings is a single act of access; four hundred entries
+would bury the trail in its own volume and say nothing the single entry does not.
+The target is the resource the route names -- the pregnancy or the session whose
+identifier the caller sent. The collection route names none, so it records the
+entity with a null identifier rather than serialising a list of ids into the
+trail.
+
+Neither entry carries a body, a biometric value, a token, an email or anything
+the database answered.
+
+**Both go in a transaction of their own**, on the audit session and not the one
+the read used: a read has no business transaction to join.
+
+**And a granted read fails closed.** If the entry cannot be written, the clinical
+data is *not* delivered: the request fails through the sanitised audit channel.
+Handing over a patient's series while unable to record who took it is precisely
+what RF-10 forbids. A *denial* behaves the opposite way -- if its entry fails the
+404 still goes out, because degrading it into a 500 would turn a broken audit
+table into a way of telling foreign resources apart from missing ones.
 
 Two more entries can appear before a handler runs, and the guard writes them:
 ``ACCESO_DENEGADO_ROL`` when the role is wrong, ``CONTEXTO_CLINICO_AUSENTE`` when
-the account has no resolvable clinical profile. With ``ACCESO_CLINICO_DENEGADO``
-the closed catalogue stands at ten.
+the account has no resolvable clinical profile. With the two clinical-access
+codes the closed catalogue stands at eleven.
 
 **Nothing else is written.** The business session is closed by the dependency and
 its transaction dies with the request, which is also what disposes of the
@@ -165,6 +177,42 @@ def _no_encontrado(
     return HTTPException(status_code=HTTPStatus.NOT_FOUND, detail=str(error))
 
 
+def _registrar_acceso(
+    peticion: Request,
+    sesion_auditoria: Session,
+    contexto: ContextoClinico,
+    entidad: str,
+    id_recurso: int | None,
+) -> None:
+    """Deja constancia de **una** lectura clinica autorizada. Una por peticion.
+
+    Se llama despues de que la consulta haya terminado bien y antes de devolver
+    nada, de modo que no existe un camino en el que los datos salgan sin que el
+    acceso quede registrado.
+
+    ``id_recurso`` es ``None`` en la ruta de coleccion: quien pregunta no nombro
+    ningun episodio, y serializar la lista de los que recibio convertiria la
+    traza en un segundo almacen de datos clinicos.
+
+    **Fail-closed.** ``registrar_con_commit`` levanta ``FalloDeAuditoria`` si no
+    puede escribir, y aqui **no** se captura: propaga, el manejador la traduce a
+    una respuesta saneada y la serie no se entrega. Es lo contrario de lo que
+    hace una denegacion, y la asimetria es deliberada -- alli el acceso ya esta
+    negado y lo unico en juego es el registro; aqui lo que esta en juego es
+    entregar datos clinicos sin poder decir quien se los llevo.
+    """
+    auditoria.registrar_con_commit(
+        sesion_auditoria,
+        AccionAuditada.ACCESO_CLINICO_PERMITIDO,
+        id_usuario=contexto.id_usuario,
+        ip_origen=auditoria.direccion_de_origen(
+            peticion.client.host if peticion.client else None
+        ),
+        nombre_entidad=entidad,
+        id_entidad=None if id_recurso is None else str(id_recurso),
+    )
+
+
 @router.get(
     "/embarazos",
     response_model=list[EmbarazoResumen],
@@ -173,22 +221,33 @@ def _no_encontrado(
     responses=RESPUESTAS_COMUNES,
 )
 def listar_mis_embarazos(
+    peticion: Request,
     contexto: ContextoClinico = Depends(EXIGIR_LECTURA_CLINICA),
     sesion_bd: Session = Depends(get_db),
+    sesion_auditoria: Session = Depends(get_db_auditoria),
 ) -> list[EmbarazoResumen]:
     """Los episodios al alcance de quien pregunta. Nunca los de nadie mas.
 
     Una lista vacia es una respuesta legitima: una gestante sin embarazos
     registrados, o un medico sin asignaciones vigentes hoy. No es un 404, porque
-    la pregunta -- «que puedo leer» -- si tiene respuesta.
+    la pregunta -- «que puedo leer» -- si tiene respuesta, y se audita igual:
+    preguntar tambien es un acceso.
+
+    Una entrada, con la entidad ``embarazo`` y **sin identificador**: la peticion
+    no nombro ninguno.
     """
     try:
-        return [
+        episodios = [
             EmbarazoResumen.model_validate(fila)
             for fila in listar_embarazos(sesion_bd, contexto)
         ]
     except SQLAlchemyError as error:
         raise fallo_de_base(sesion_bd, CONTEXTO_LECTURA_CLINICA, error) from None
+
+    _registrar_acceso(
+        peticion, sesion_auditoria, contexto, auditoria.ENTIDAD_EMBARAZO, None
+    )
+    return episodios
 
 
 @router.get(
@@ -213,9 +272,12 @@ def listar_sesiones_del_embarazo(
 
     Un medico con asignacion vigente recibe todo el historial del episodio, no
     solo el tramo que solapa con su asignacion.
+
+    Una entrada de auditoria por peticion, con el ``id_embarazo`` que se pidio;
+    nunca una por sesion devuelta.
     """
     try:
-        return [
+        sesiones = [
             SesionResumen.model_validate(fila)
             for fila in listar_sesiones(sesion_bd, contexto, id_embarazo)
         ]
@@ -225,6 +287,15 @@ def listar_sesiones_del_embarazo(
         ) from None
     except SQLAlchemyError as error:
         raise fallo_de_base(sesion_bd, CONTEXTO_LECTURA_CLINICA, error) from None
+
+    _registrar_acceso(
+        peticion,
+        sesion_auditoria,
+        contexto,
+        auditoria.ENTIDAD_EMBARAZO,
+        id_embarazo,
+    )
+    return sesiones
 
 
 @router.get(
@@ -241,9 +312,13 @@ def listar_lecturas_de_la_sesion(
     sesion_bd: Session = Depends(get_db),
     sesion_auditoria: Session = Depends(get_db_auditoria),
 ) -> list[LecturaResumen]:
-    """Las lecturas de una sesion, si el episodio del que cuelga es legible."""
+    """Las lecturas de una sesion, si el episodio del que cuelga es legible.
+
+    Una entrada de auditoria por peticion, con el ``id_sesion`` que se pidio.
+    Una serie de cuatrocientas lecturas es **un** acceso, no cuatrocientos.
+    """
     try:
-        return [
+        lecturas = [
             LecturaResumen.model_validate(fila)
             for fila in listar_lecturas(sesion_bd, contexto, id_sesion)
         ]
@@ -253,6 +328,15 @@ def listar_lecturas_de_la_sesion(
         ) from None
     except SQLAlchemyError as error:
         raise fallo_de_base(sesion_bd, CONTEXTO_LECTURA_CLINICA, error) from None
+
+    _registrar_acceso(
+        peticion,
+        sesion_auditoria,
+        contexto,
+        auditoria.ENTIDAD_SESION_MONITOREO,
+        id_sesion,
+    )
+    return lecturas
 
 
 # Nombrado para que una prueba pueda importar exactamente lo que produccion usa.

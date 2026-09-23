@@ -40,7 +40,7 @@ El sistema se organiza en cinco capas:
 2. **Simulación del nodo edge / almacenamiento temporal** — un componente en Python con SQLite que representa el comportamiento de un nodo edge: almacena lecturas localmente y mantiene una cola de registros pendientes de sincronización.
 3. **Backend central** — una API REST desarrollada con **FastAPI**, responsable de autenticación, autorización, validación, y recepción de datos sincronizados de forma asíncrona (no en tiempo real).
 4. **Persistencia** — **PostgreSQL**, con un modelo operacional normalizado y un modelo dimensional (Star Schema) para analítica.
-5. **ETL y analítica** — un proceso ETL *batch* reproducible en **Python/SQLAlchemy** que transforma el esquema `operacional` en el esquema analítico `analitico` de **PostgreSQL**, previsto para una ejecución periódica (nocturna). **Microsoft Power BI** consume después el esquema `analitico`. No se ejecuta necesariamente tras cada sincronización, y no hay *scheduler* ni demonio implementado: el mecanismo de ejecución es el comando `scripts/etl_analitico.py`. La actualización es asíncrona — nunca en tiempo real — y Power BI está destinado exclusivamente a personal médico o autorizado.
+5. **ETL y analítica** — un proceso ETL *batch* reproducible en **Python/SQLAlchemy** que transforma el esquema `operacional` en el esquema analítico `analitico` de **PostgreSQL**, previsto para una ejecución periódica (nocturna). **Microsoft Power BI** no consume `analitico`: desde SCRUM-98 consulta únicamente las cuatro vistas seudonimizadas del esquema `publicacion` —`v_embarazo`, `v_lectura`, `v_entitlement_medico` y `v_resumen_administrativo`— con la credencial técnica de solo lectura `fetalalert_powerbi`, que no recibe `USAGE` sobre `operacional`, `analitico`, `privado` ni `seguridad`. No se ejecuta necesariamente tras cada sincronización, y no hay *scheduler* ni demonio implementado: el mecanismo de ejecución es el comando `scripts/etl_analitico.py`. La actualización es asíncrona — nunca en tiempo real — y Power BI está destinado exclusivamente a personal médico o autorizado.
 
 ## Seguimiento dual: gestante y personal médico
 
@@ -76,7 +76,7 @@ Para representar el comportamiento de zonas rurales con conectividad inestable, 
 - **Autorización:** RBAC (control de acceso basado en roles)
 - **Hash de contraseñas:** Argon2id
 - **Cifrado de datos en tránsito:** HTTPS/TLS
-- **Protección de datos:** anonimización (sobre datos ficticios), auditoría (`AuditoriaLog`) y controles alineados con la Ley 81 de 2019 de Panamá
+- **Protección de datos:** aislamiento por fila (RLS), seudonimización de la capa publicada (sobre datos ficticios), auditoría (`AuditoriaLog`) y controles alineados con la Ley 81 de 2019 de Panamá
 - **ETL:** Python, SQLAlchemy, PostgreSQL
 - **Analítica y dashboards:** Microsoft Power BI Desktop
 - **Pruebas automatizadas:** pytest
@@ -113,15 +113,24 @@ Para representar el comportamiento de zonas rurales con conectividad inestable, 
 - **Desactivación y reactivación** de la misma cuenta, sin borrar perfiles ni historia clínica.
 - **Correo de acceso canónico** (`strip().lower()`) y **coherencia rol ↔ vínculo clínico** garantizadas también por PostgreSQL. Ver [Cuentas: aprovisionamiento y ciclo de vida](#cuentas-aprovisionamiento-y-ciclo-de-vida).
 
+**Ya implementado (SCRUM-98):**
+
+- **Aislamiento por fila (RLS) en PostgreSQL.** Seis tablas clínicas con `ENABLE` **y** `FORCE ROW LEVEL SECURITY` y sus políticas. El contexto del usuario viaja en la variable de transacción `fetalalert.id_usuario`, instalada con `set_config(..., true)` por la dependencia que resuelve la identidad, de modo que muere con la transacción y no puede viajar a otra petición por una conexión reutilizada. Sin contexto, o con uno ausente, vacío, no numérico o manipulado, las políticas no devuelven ninguna fila: el fallo es cerrado y silencioso.
+- **Propiedad paciente→embarazo comprobada en la base, no solo en el código.** La política `pol_ingesta` sobre `sesion_monitoreo` y `lectura_biometrica` es un `WITH CHECK` que exige que el `id_embarazo` recibido pertenezca a la gestante autenticada. Una sesión dirigida al embarazo de otra persona no se inserta aunque el rol sea PACIENTE.
+- **Alcance clínico por asignación, no por clínica.** Una gestante lee sus propios embarazos, finalizados incluidos. Un médico lee un embarazo solo a través de un `SeguimientoClinico` directo, activo y vigente hoy —`PRINCIPAL`, `APOYO` y `REEMPLAZO` conceden lo mismo—; pertenecer a la misma clínica no concede acceso clínico. ADMIN no tiene lectura clínica individual ni *bypass*.
+- **Rutas mínimas de lectura clínica** para PACIENTE y MEDICO, con esquemas de respuesta minimizados. Un recurso ajeno y uno inexistente responden el mismo 404, con la misma frase.
+- **Auditoría de accesos clínicos**, concedidos y denegados: `ACCESO_CLINICO_PERMITIDO` y `ACCESO_CLINICO_DENEGADO`, **una entrada por petición** y nunca una por fila devuelta.
+- **Seudonimización de la capa publicada.** Ver [Protección analítica](docs/proteccion_analitica.md).
+
 **Todavía no implementado:**
 
 - **HTTPS/TLS.** Corresponde a un escenario de despliegue y no a una capacidad de este código. El MVP local habla HTTP contra `http://127.0.0.1:8000`; un token Bearer no debe circular fuera de ese entorno controlado sin HTTPS/TLS, y un JWT firmado **no** es un JWT cifrado.
-- **Cifrado de datos en reposo.** La arquitectura de la tesis lo contempla, pero el código no lo demuestra y no pertenece a SCRUM-70. Ni Argon2id, ni RBAC, ni el JWT son evidencia de ello.
-- **Aislamiento por fila y anonimización** (SCRUM-71).
+- **Cifrado de datos en reposo.** La arquitectura de la tesis lo contempla, pero el código no lo demuestra. Ni Argon2id, ni RBAC, ni el JWT son evidencia de ello.
+- **Configuración de Power BI Service.** El repositorio no contiene ningún artefacto Power BI versionable. La capa publicada y el contrato de *entitlements* existen en PostgreSQL; el origen de datos, el modelo, el rol de RLS del *dataset* y los permisos del workspace están descritos paso a paso y **no** están configurados.
 
-> **RBAC limita operaciones por rol, pero todavía no implementa aislamiento por fila ni anonimización.**
+> **Seudonimización, no anonimización.** La transformación de la capa publicada es **seudonimización**: el seudónimo es estable y existe un mapa privado que devuelve a la persona, así que los datos publicados siguen siendo datos personales. Lo que se protege es *quién puede recorrer el camino de vuelta*, no la imposibilidad de recorrerlo. Llamarlo anonimización afirmaría que el vínculo se destruyó, y no se destruye.
 
-Controles alineados con los requisitos de la Ley 81 de 2019 de Panamá (Protección de Datos Personales). `auditoria_log` es *append-only por diseño de la aplicación* —el código solo inserta, y su clave foránea `ON DELETE RESTRICT` impide borrar una cuenta con historial— y aporta **trazabilidad y atribución técnica**. No constituye inmutabilidad criptográfica ni no repudio: quien tenga privilegios de administración sobre PostgreSQL puede alterar la tabla.
+Controles alineados con los requisitos de la Ley 81 de 2019 de Panamá (Protección de Datos Personales). `auditoria_log` es *append-only por diseño de la aplicación* —el código solo inserta, la credencial de la API tiene `INSERT` y ninguna otra operación sobre esa tabla, y su clave foránea `ON DELETE RESTRICT` impide borrar una cuenta con historial— y aporta **trazabilidad y atribución técnica**. No constituye **inmutabilidad criptográfica ni no repudio fuerte**: quien tenga privilegios de administración sobre PostgreSQL puede alterar la tabla. Cualquier documento que describa esta garantía debe usar esos términos y no los más fuertes.
 
 ## Estructura del repositorio
 
@@ -156,7 +165,7 @@ tesis-bi-prenatal/
 
 ## Estado actual del proyecto
 
-El repositorio se encuentra en una etapa temprana. Lo que ya existe y funciona es el esquema operacional en PostgreSQL con sus migraciones, el generador del dataset simulado, su carga idempotente, el endpoint que recibe una sesión de monitoreo con sus lecturas biométricas —con su contrato de idempotencia—, el nodo edge simulado, que captura paquetes sin conexión y los entrega después sin duplicarlos, con reintentos de espera incremental, agotamiento controlado y trazabilidad de extremo a extremo, y el esquema analítico (Star Schema) con su ETL reproducible, idempotente e incremental. A partir de SCRUM-70 existen además autenticación con JWT, autorización por rol y auditoría de accesos: el endpoint de ingesta ya no es público. SCRUM-97 añade el aprovisionamiento administrativo de cuentas para perfiles clínicos existentes y su desactivación y reactivación. **Aún no existen un servicio permanente o demonio que dispare la sincronización o el ETL por sí solo, la detección automática de conectividad, la seguridad por fila, la anonimización, HTTPS/TLS, el cifrado en reposo ni los dashboards.** El desarrollo activo continúa en el Capítulo IV, centrado en seguridad, interfaces, aislamiento de datos y analítica del MVP, y todo el trabajo se desarrolla y prueba en un entorno controlado/local, no en comunidades rurales reales.
+El repositorio se encuentra en una etapa temprana. Lo que ya existe y funciona es el esquema operacional en PostgreSQL con sus migraciones, el generador del dataset simulado, su carga idempotente, el endpoint que recibe una sesión de monitoreo con sus lecturas biométricas —con su contrato de idempotencia—, el nodo edge simulado, que captura paquetes sin conexión y los entrega después sin duplicarlos, con reintentos de espera incremental, agotamiento controlado y trazabilidad de extremo a extremo, y el esquema analítico (Star Schema) con su ETL reproducible, idempotente e incremental. A partir de SCRUM-70 existen además autenticación con JWT, autorización por rol y auditoría de accesos: el endpoint de ingesta ya no es público. SCRUM-97 añade el aprovisionamiento administrativo de cuentas para perfiles clínicos existentes y su desactivación y reactivación. SCRUM-98 añade el aislamiento por fila (RLS) sobre las tablas clínicas, las rutas mínimas de lectura para gestante y médico, la auditoría de los accesos clínicos concedidos y denegados, y la capa publicada y seudonimizada que Power BI consultará. **Aún no existen un servicio permanente o demonio que dispare la sincronización o el ETL por sí solo, la detección automática de conectividad, HTTPS/TLS, el cifrado en reposo, los dashboards ni la configuración del workspace de Power BI.** El desarrollo activo continúa en el Capítulo IV, centrado en seguridad, interfaces, aislamiento de datos y analítica del MVP, y todo el trabajo se desarrolla y prueba en un entorno controlado/local, no en comunidades rurales reales.
 
 ## Roadmap general
 
@@ -167,8 +176,78 @@ El repositorio se encuentra en una etapa temprana. Lo que ya existe y funciona e
 - Implementación de la sincronización asíncrona, reintentos e idempotencia.
 - Definición e implementación del mecanismo de acceso limitado para la gestante.
 - Desarrollo del proceso ETL y de los dashboards en Power BI.
-- Incorporación de auditoría (`AuditoriaLog`), anonimización y controles de cumplimiento con la Ley 81 de 2019.
+- Incorporación de auditoría (`AuditoriaLog`), aislamiento por fila, seudonimización de la capa publicada y controles de cumplimiento con la Ley 81 de 2019.
 - Pruebas automatizadas y documentación final de la tesis.
+
+## Roles de base de datos y variables de conexión
+
+Desde SCRUM-98 no hay una sola credencial. Cada pieza se conecta con la suya, y
+el reparto es lo que hace que el aislamiento por fila signifique algo: si todo
+corriera con el mismo superusuario, las políticas no filtrarían nada.
+
+### Las tres URL, y por qué son tres
+
+| Variable | Rol que la respalda | Quién la usa |
+| --- | --- | --- |
+| `DATABASE_URL` | `fetalalert_api` | El runtime de la API. Sujeto a RLS; solo ve las filas que el contexto de la petición autoriza. |
+| `ALEMBIC_DATABASE_URL` | el migrador (`fetalalert_ci_migrador` en CI) | `alembic upgrade/downgrade`, `scripts/bootstrap_roles.py` y `scripts/load_mock_data.py`. |
+| `ETL_DATABASE_URL` | `fetalalert_etl` | `scripts/etl_analitico.py`. Lee `operacional` sin filtro por su propia política y escribe `analitico` y el mapa de seudónimos. |
+
+**Ninguna cae de vuelta en otra.** El cargador y el ETL se detienen si su
+variable falta, en lugar de escribir con la credencial equivocada; `DATABASE_URL`
+debe apuntar al rol de runtime restringido y nunca al migrador ni al
+superusuario, y el arranque de la API lo comprueba.
+
+### Roles con LOGIN y roles NOLOGIN
+
+Dos familias, y la diferencia importa:
+
+- **Con LOGIN — `fetalalert_api`, `fetalalert_etl`, `fetalalert_powerbi`.** Son
+  credenciales: alguien se autentica con ellas. Las crea el despliegue (o el CI)
+  a partir de secretos externos, **no** las migraciones: una contraseña no se
+  versiona. La migración exige que existan y falla en el preflight si no están.
+- **NOLOGIN — `fetalalert_rls_owner`, `fetalalert_provision_owner`,
+  `fetalalert_mantenimiento`.** Nadie se conecta como ellos y no tienen
+  contraseña. Son propietarios de funciones `SECURITY DEFINER` y de la capa
+  publicada, o tienen escritura sin filtro sobre lo clínico. Los crea
+  `scripts/bootstrap_roles.py`, que es idempotente, junto con las membresías que
+  el migrador necesita.
+
+Que los privilegiados sean NOLOGIN es deliberado: sus privilegios solo se
+alcanzan a través de una función `SECURITY DEFINER` concreta, nunca abriendo una
+sesión. Y `fetalalert_powerbi` **no es la identidad de ningún médico**: es una
+cuenta técnica de solo lectura sobre `publicacion`; cada médico entra a Power BI
+Service con la suya y el RLS del *dataset* filtra por ella.
+
+### El orden local, de cero a publicación
+
+```powershell
+# 1. PostgreSQL
+docker compose up -d db
+
+# 2. Roles con LOGIN (una vez, desde tus secretos locales; ver .env.example)
+# 3. Roles NOLOGIN y membresías del migrador
+python scripts/bootstrap_roles.py      # usa ALEMBIC_DATABASE_URL
+
+# 4. Esquema
+cd backend; alembic upgrade head; cd ..
+
+# 5. Dataset simulado
+python scripts/generate_mock_data.py
+python scripts/load_mock_data.py       # usa ALEMBIC_DATABASE_URL
+
+# 6. API
+docker compose up -d api               # usa DATABASE_URL
+
+# 7. ETL hacia `analitico` y `publicacion`
+python scripts/etl_analitico.py        # usa ETL_DATABASE_URL
+
+# 8. Power BI se conecta como `fetalalert_powerbi` contra `publicacion`
+```
+
+Los pasos 2 y 3 se hacen una sola vez por base. El 4 debe preceder al 5, el 5 al
+7, y el 7 al 8: la capa publicada son vistas sobre `analitico`, así que sin ETL
+están vacías.
 
 ## Carga del dataset simulado en PostgreSQL
 
@@ -226,10 +305,15 @@ Por omisión procesa `data/generated/dataset_fetalalert.json`. Acepta una ruta
 alternativa como único argumento; nunca recibe la URL de la base ni ninguna
 credencial por línea de comandos.
 
-La conexión sale de `DATABASE_URL`. El archivo que la aplicación lee es tu
-`.env` local, que no se versiona y se crea copiando `.env.example`; **ambos
-traen `db:5432`**, un nombre que solo existe dentro de la red de Docker. Si
-ejecutas el comando directamente desde Windows, define `DATABASE_URL` apuntando
+La conexión sale de **`ALEMBIC_DATABASE_URL`**, no de `DATABASE_URL`: desde
+SCRUM-98 el cargador escribe con la credencial del migrador, porque
+`DATABASE_URL` apunta al rol de runtime `fetalalert_api`, que está sujeto a RLS y
+no puede sembrar el dataset de otras personas. **No hay respaldo**: si la
+variable falta, el cargador se detiene en lugar de escribir con la credencial
+equivocada. El archivo que la aplicación lee es tu `.env` local, que no se
+versiona y se crea copiando `.env.example`; **ambos traen `db:5432`**, un nombre
+que solo existe dentro de la red de Docker. Si
+ejecutas el comando directamente desde Windows, define `ALEMBIC_DATABASE_URL` apuntando
 a `127.0.0.1:<POSTGRES_PORT>` en esa terminal —lo que tiene prioridad sobre el
 `.env`— o ejecuta el comando dentro del contenedor. Conviene la dirección IPv4
 literal y no `localhost`: Docker publica PostgreSQL solo en IPv4, mientras que
@@ -300,10 +384,14 @@ con un contrato tipado. Todos los datos son simulados y ficticios.
 
 > **Este endpoint no es apto para producción.** Exige un token JWT válido y solo
 > el rol PACIENTE puede ejecutar la ingesta: ADMIN y MEDICO reciben `403` (ver
-> [Autenticación, RBAC y auditoría](#autenticación-rbac-y-auditoría)). Todavía
-> **no** valida que la gestante autenticada sea la dueña del `id_embarazo` que
-> envía: ese aislamiento corresponde a SCRUM-71. Se ejecuta únicamente en el
-> entorno controlado de desarrollo y pruebas, nunca expuesto a una red pública.
+> [Autenticación, RBAC y auditoría](#autenticación-rbac-y-auditoría)). Desde
+> SCRUM-98 **sí** comprueba que la gestante autenticada sea la dueña del
+> `id_embarazo` que envía, y la comprobación vive en la base: la política
+> `pol_ingesta` es un `WITH CHECK` sobre `sesion_monitoreo` y
+> `lectura_biometrica`, de modo que una sesión dirigida a un embarazo ajeno no
+> se inserta aunque la petición traiga un token PACIENTE válido. Aun así se
+> ejecuta únicamente en el entorno controlado de desarrollo y pruebas, nunca
+> expuesto a una red pública: falta HTTPS/TLS.
 
 ### 1. Preparar la base y levantar la API
 
@@ -581,10 +669,11 @@ que estar en el `head` de Alembic —el mismo `alembic upgrade head` del §1—.
 de siempre: **solo datos simulados**, y solo en el entorno local o de pruebas.
 El endpoint exige un token JWT válido y solo el rol PACIENTE puede registrar
 sesiones; ADMIN y MEDICO reciben `403` (ver
-[Autenticación, RBAC y auditoría](#autenticación-rbac-y-auditoría)). Aun así no
-es apto para exposición pública ni para producción: el MVP local todavía no
-implementa HTTPS/TLS, la validación completa de propiedad paciente→embarazo ni el
-aislamiento por fila (SCRUM-71), ni otros controles de despliegue.
+[Autenticación, RBAC y auditoría](#autenticación-rbac-y-auditoría)). La propiedad
+paciente→embarazo y el aislamiento por fila los aporta SCRUM-98 y los aplica
+PostgreSQL. Aun así no es apto para exposición pública ni para producción: el MVP
+local todavía no implementa HTTPS/TLS, el cifrado en reposo ni otros controles de
+despliegue.
 
 ## Nodo edge simulado: captura sin conexión
 
@@ -1044,9 +1133,11 @@ El mapeo campo por campo, las reglas y las verificaciones están en
 
 Requisitos: la base en `alembic upgrade head` y el esquema operacional con
 datos —por ejemplo, el dataset simulado cargado como se explica arriba. La
-conexión sale de `DATABASE_URL`, igual que el cargador; si el comando se ejecuta
-desde Windows fuera de Docker, esa variable debe apuntar a `localhost` y al
-puerto publicado por el contenedor.
+conexión sale de **`ETL_DATABASE_URL`**, la credencial del rol técnico
+`fetalalert_etl`: desde SCRUM-98 el ETL no usa `DATABASE_URL` —que es la del
+runtime de la API— ni `ALEMBIC_DATABASE_URL`. **No hay respaldo**; si la variable
+falta, el ETL se detiene. Si el comando se ejecuta desde Windows fuera de Docker,
+esa variable debe apuntar a `127.0.0.1` y al puerto publicado por el contenedor.
 
 ```powershell
 cd backend
@@ -1173,11 +1264,14 @@ explícita y documentada (ver [Estrategia de ramas](#estrategia-de-ramas)).
 Desde SCRUM-70 la API tiene identidad. El endpoint de ingesta ya no es público:
 exige una credencial de sesión válida y el rol PACIENTE.
 
-> **RBAC limita operaciones por rol, pero todavía no implementa aislamiento por
-> fila ni anonimización.** En concreto: SCRUM-70 comprueba que *el rol* PACIENTE
-> puede registrar una sesión de monitoreo, y **no** comprueba todavía que esa
-> usuaria sea la dueña del `id_embarazo` que envía. Esa correlación
-> (`usuario_paciente → paciente → embarazo`) pertenece a SCRUM-71.
+> **RBAC limita operaciones por rol; el aislamiento por fila es otra capa, y ya
+> existe.** SCRUM-70, que es lo que describe esta sección, comprueba que *el rol*
+> PACIENTE puede registrar una sesión de monitoreo, y eso es todo lo que
+> comprueba. La correlación `usuario_paciente → paciente → embarazo` la añade
+> SCRUM-98 y no vive aquí: vive en las políticas de RLS de PostgreSQL, que se
+> aplican incluso si una ruta futura olvidara comprobarla. Las dos capas son
+> acumulativas —el rol decide *qué operación*, la política decide *sobre qué
+> filas*— y ninguna sustituye a la otra.
 
 ### Configurar la firma
 

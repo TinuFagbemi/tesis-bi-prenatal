@@ -88,8 +88,8 @@ def sesion() -> SesionDeAuditoria:
 # ---------------------------------------------------------------------------
 
 
-def test_el_catalogo_tiene_exactamente_diez_acciones():
-    """Cuatro de SCRUM-70, cuatro del ciclo de cuentas de SCRUM-97 y dos de SCRUM-98.
+def test_el_catalogo_tiene_exactamente_once_acciones():
+    """Cuatro de SCRUM-70, cuatro del ciclo de cuentas de SCRUM-97 y tres de SCRUM-98.
 
     El conjunto se escribe entero y no se cuenta: lo que vigila es que nadie
     anada un codigo sin decidir en que transaccion se escribe ni quien puede
@@ -112,6 +112,10 @@ def test_el_catalogo_tiene_exactamente_diez_acciones():
         # clinico que no puede leer. Tambien en transaccion propia, y por la
         # misma razon: la lectura que bloquea no llega a ocurrir.
         "ACCESO_CLINICO_DENEGADO",
+        # SCRUM-98: y la contraparte, una lectura clinica autorizada. RF-10 y
+        # RNF-07 piden trazabilidad de los accesos, no solo de los rechazos.
+        # Una entrada por peticion, nunca una por fila devuelta.
+        "ACCESO_CLINICO_PERMITIDO",
     }
 
 

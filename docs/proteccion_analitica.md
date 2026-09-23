@@ -72,9 +72,18 @@ Un médico ve un embarazo si y solo si existe un `SeguimientoClinico` que cumpla
 
 ```
 activo = true
-fecha_asignacion <= CURRENT_DATE
-fecha_fin IS NULL OR fecha_fin >= CURRENT_DATE
+fecha_asignacion <= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Panama')::date
+fecha_fin IS NULL OR fecha_fin >= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Panama')::date
 ```
+
+«Hoy» es **el día en Panamá**, no el del reloj de la sesión que ejecuta la
+consulta. `CURRENT_DATE` habría servido solo mientras el servidor y todas las
+sesiones estuvieran en la zona correcta: una sesión con `SET TIME ZONE 'UTC'`
+—el valor por omisión de muchos clientes y del contenedor— adelanta el cambio de
+día cinco horas, de modo que entre las 19:00 y la medianoche de Panamá la última
+jornada de una asignación ya habría caducado para la base pero no para la
+paciente. Fijar la zona hace que la decisión de acceso no dependa de cómo se
+conectó quien pregunta.
 
 Consecuencias, todas ellas cubiertas por pruebas:
 
@@ -137,9 +146,10 @@ internas del *star schema* que no hagan falta.
   se usa y le quita valor como dato de enlace.
 
   **Fecha clínica de captura → día, sin hora.** `fecha_captura` se publica como
-  `f.fecha_hora::date`: conserva el **día calendario** y elimina hora, minuto y
-  segundo. **No está generalizada al mes**, y no debe describirse así. El día se
-  conserva porque es funcionalmente necesario para:
+  `(f.fecha_hora AT TIME ZONE 'America/Panama')::date`: conserva el **día
+  calendario panameño** y elimina hora, minuto y segundo. **No está generalizada
+  al mes**, y no debe describirse así. El día se conserva porque es
+  funcionalmente necesario para:
 
   - el seguimiento longitudinal del episodio;
   - el análisis de tendencias entre lecturas;
@@ -151,6 +161,23 @@ internas del *star schema* que no hagan falta.
   de esta capa la necesita, y es la parte que más enlaza una lectura con un
   momento concreto de la vida de alguien.
 
+  **Las tres conversiones nombran la zona.** `fecha_captura`,
+  `v_resumen_administrativo.mes` y los dos meses de `v_embarazo` se calculan con
+  `AT TIME ZONE 'America/Panama'`, nunca con `::date` a secas ni con
+  `CURRENT_DATE`. La columna de origen es `timestamptz`, y un `::date` desnudo la
+  convierte usando el `TimeZone` de la sesión: el mismo instante caería en un día
+  —y en un mes— distinto según quién ejecutara el ETL o abriera Power BI. Una
+  lectura tomada a las 22:30 del 28 de febrero en Panamá aparecería como 1 de
+  marzo para una sesión en UTC, y eso no solo desplaza un punto en una serie:
+  mueve una fila entre dos cubos del agregado administrativo y puede cruzar el
+  mínimo de celda. La zona está fijada en la migración, se comprueba contra
+  `app.etl.reglas.ZONA_HORARIA_CLINICA`, y hay pruebas que ejecutan las vistas
+  bajo cuatro `TimeZone` de sesión distintos —incluido `Pacific/Kiritimati`,
+  a +19 h de Panamá— y exigen el mismo resultado.
+
+  `dim_embarazo.fecha_inicio` y `fecha_probable_parto` no se convierten: son
+  columnas `DATE`, no instantes, y no tienen zona que interpretar.
+
   La semana gestacional se conserva en las dos vistas porque es la variable
   clínica central.
 - **Edad**: en tramos de cinco años, calculada al inicio del embarazo.
@@ -160,9 +187,36 @@ internas del *star schema* que no hagan falta.
 
 Semana gestacional, trimestre, código de semáforo y prioridad, `hr_valor`,
 `spo2_valor`, `mov_valor`, los tres estados derivados, fecha de captura —al
-día, sin hora— y
-`secuencia_sesion` — el número de la sesión dentro del episodio, que permite
-medir adherencia sin publicar una clave de la base.
+día, sin hora— y `secuencia_sesion`.
+
+**`secuencia_sesion` es cronológico, no el `id_sesion` disfrazado.** Se calcula
+con `row_number()` sobre las sesiones del episodio, ordenadas por el **instante
+de su primera lectura** y desempatadas por `id_sesion`:
+
+```sql
+row_number() OVER (PARTITION BY id_embarazo
+                   ORDER BY inicio_sesion, id_sesion)
+```
+
+La distinción no es cosmética. `id_sesion` es una clave *surrogate*: la asigna el
+servidor central cuando **recibe** la sesión, y este sistema es *offline-first* —
+el nodo edge captura sin conexión y entrega cuando puede. Ese identificador es
+por tanto orden de **sincronización**, no de **ocurrencia**: una sesión tomada el
+10 de junio en una comunidad sin cobertura y subida el 25 recibe un id mayor que
+otra tomada el 20 y subida el mismo día. Publicar el surrogate como «número de
+sesión» habría invertido la serie temporal justo en el escenario que esta tesis
+dice modelar, y la medición de adherencia —el motivo por el que la columna
+existe— habría medido la conectividad de la comunidad en lugar del seguimiento
+de la paciente.
+
+El desempate por `id_sesion` está para que la consulta sea reproducible: sin un
+segundo criterio, dos sesiones que empiezan en el mismo instante podrían
+intercambiar su número entre ejecuciones y la serie dejaría de ser comparable
+consigo misma.
+
+La numeración es densa y empieza en 1 para cada episodio, así que sigue sin
+publicar ninguna clave de la base: dice «la tercera sesión de este embarazo», no
+«la sesión 8412 del sistema».
 
 ---
 
