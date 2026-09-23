@@ -5,7 +5,7 @@ esta tesis no construye en hardware: algo que corre **en el dispositivo de la
 paciente**, le sirve la interfaz, la autentica contra el servidor central cuando
 hay conexion, y sigue en pie cuando no la hay.
 
-Siete modulos, cada uno con un trabajo:
+Ocho modulos, cada uno con un trabajo:
 
 :mod:`app.gestante.config`
     Donde esta el archivo, a que API se llama, cuanto dura la sesion local.
@@ -14,11 +14,15 @@ Siete modulos, cada uno con un trabajo:
 :mod:`app.gestante.sesion`
     Abrir, validar, renovar y cerrar una sesion local.
 :mod:`app.gestante.central`
-    Las tres unicas conversaciones con la API central, por HTTP.
+    Las conversaciones con la API central, por HTTP: autenticacion, identidad,
+    salud, y la lectura clinica de SCRUM-98 (embarazos, sesiones, lecturas).
+:mod:`app.gestante.clinico`
+    Reglas de presentacion sobre esa lectura clinica: cual episodio esta en
+    curso y cual es la ultima lectura de una serie de sesiones.
 :mod:`app.gestante.estado_local`
     Ventana de solo lectura sobre la outbox del nodo edge.
 :mod:`app.gestante.rutas`
-    Las ocho rutas que ve el navegador.
+    Las diez rutas que ve el navegador.
 :mod:`app.gestante.aplicacion`
     El ensamblado FastAPI.
 
@@ -30,13 +34,10 @@ en el almacenamiento del nodo edge, no reimplementa la idempotencia ni los
 reintentos, y no guarda credenciales: la contrasena no se persiste en ninguna
 forma, y el token del servidor central vive unicamente en memoria del proceso.
 
-**Lo que todavia no hace, y por que.** No muestra el embarazo, las lecturas, el
-semaforo ni el historial, y el registro de sesiones de movimientos esta
-preparado pero deshabilitado. Todo eso necesita el contexto clinico autorizado
---la correlacion ``usuario -> paciente -> embarazo`` y las referencias que un
-paquete de monitoreo exige-- que corresponde a SCRUM-98/SCRUM-71 y todavia no
-existe en el repositorio. La interfaz muestra «No disponible» en vez de un
-valor inventado.
+**Lo que todavia no hace, y por que.** El registro de sesiones de movimientos
+esta preparado en la interfaz pero deshabilitado: requiere el flujo de captura
+simulada de ``app.edge`` y una decision explicita sobre como representarlo
+desde este portal, que este ticket no da por sentada.
 
 Todos los datos que maneja esta interfaz son ficticios y simulados.
 """
