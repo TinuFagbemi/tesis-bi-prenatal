@@ -32,11 +32,17 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from http import HTTPStatus
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Path, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 
 from app.gestante import almacen, estado_local, sesion as sesion_local
-from app.gestante.central import ClienteCentral, EstadoRespuesta
+from app.gestante.central import ClienteCentral, EstadoRespuesta, RespuestaClinica
+from app.gestante.clinico import (
+    SesionConLecturas,
+    clasificar_episodios,
+    sesion_de_la_lectura,
+    ultima_lectura,
+)
 from app.gestante.config import NOMBRE_DE_COOKIE, GestanteSettings
 from app.models.enums import NombreRol
 from app.schemas.autenticacion import CredencialesEntrada
@@ -65,6 +71,42 @@ MENSAJE_SIN_SESION = "Tu sesión no está activa. Inicia sesión de nuevo."
 
 ESTADO_DISPONIBLE = "disponible"
 ESTADO_NO_DISPONIBLE = "no_disponible"
+
+# ---------------------------------------------------------------------------
+# El contrato de las lecturas clinicas
+# ---------------------------------------------------------------------------
+#
+# Dos situaciones --y solo dos-- se responden 200 con ``disponible: false``,
+# porque en ambas la sesion **local** sigue siendo valida y el portal debe
+# permanecer abierto:
+#
+#   reautenticacion_requerida : no hay token central utilizable. O el proceso se
+#                               reinicio y el token se perdio --porque nunca se
+#                               persiste, que es lo correcto--, o el servidor
+#                               respondio 401.
+#   sin_conexion              : no se pudo preguntar. Estado operativo esperado
+#                               de un diseno pensado para conectividad
+#                               intermitente, no un error.
+#
+# Todo lo demas conserva su codigo HTTP:
+#
+#   401 : **solo** cuando la sesion LOCAL no vale. Es lo unico que devuelve al
+#         login, y por eso ninguna otra situacion puede emitirlo.
+#   403 : el servidor central reconoce la cuenta y su rol no puede leer esto.
+#         No se disfraza de reautenticacion: reintentar credenciales que
+#         funcionan no arreglaria nada.
+#   404 : el episodio no existe o no esta al alcance. SCRUM-98 los hace
+#         indistinguibles a proposito y el adaptador no deshace esa propiedad.
+#   502 : el servidor contesto algo que no cumple el contrato, o fallo. Un
+#         problema del upstream se dice como tal.
+MOTIVO_REAUTENTICACION = "reautenticacion_requerida"
+MOTIVO_SIN_CONEXION = "sin_conexion"
+
+MENSAJE_NO_DISPONIBLE = "Ese episodio no está disponible."
+MENSAJE_ACCESO_DENEGADO = "Tu cuenta no puede consultar esta información."
+MENSAJE_UPSTREAM = (
+    "El servidor no pudo responder correctamente. Inténtalo de nuevo más tarde."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -441,6 +483,218 @@ def crear_router(contexto: ContextoAdaptador) -> APIRouter:
                 "total": estado.total,
                 "ultima_sincronizacion": estado.ultima_sincronizacion,
                 "detalle": estado.detalle,
+            }
+        )
+
+    # -- Lectura clinica (consume SCRUM-98) -------------------------------
+
+    def sesion_vigente(peticion: Request):
+        """La sesion local de esta peticion, o ``None``.
+
+        Valida contra SQLite en cada peticion, como el resto del adaptador. No
+        renueva nada: leer informacion clinica no alarga la ventana local, y un
+        fallo del servidor central tampoco la acorta.
+        """
+        identificador = identificador_de(peticion)
+        ahora = contexto.reloj()
+        with abrir_sesiones() as conexion:
+            almacen.inicializar(conexion)
+            return identificador, sesion_local.validar(
+                conexion, identificador, ahora=ahora
+            )
+
+    def no_disponible(motivo: str) -> JSONResponse:
+        """200 con la razon. Solo para los dos motivos que dejan el portal abierto."""
+        return json({"disponible": False, "motivo": motivo})
+
+    def traducir_fallo(resultado: RespuestaClinica) -> JSONResponse:
+        """Convierte un desenlace que no es ``OK`` en la respuesta acordada.
+
+        Cada rama conserva la semantica del servidor en lugar de aplanarla:
+        solo las dos que dejan la sesion local en pie responden 200.
+        """
+        if resultado.estado is EstadoRespuesta.RECHAZADO:
+            # 401 central. No se puede saber si el token vencio o si la cuenta
+            # fue desactivada --SCRUM-70 los hace indistinguibles--, asi que no
+            # se cierra la sesion local. Esto NO renueva la ventana, NO afirma
+            # que la cuenta siga autorizada y NO da acceso a dato central
+            # alguno: solo evita destruir una sesion offline todavia vigente.
+            # Debe reevaluarse antes de habilitar escritura offline.
+            return no_disponible(MOTIVO_REAUTENTICACION)
+
+        if resultado.estado is EstadoRespuesta.SIN_CONEXION:
+            return no_disponible(MOTIVO_SIN_CONEXION)
+
+        if resultado.estado is EstadoRespuesta.PROHIBIDO:
+            return error(MENSAJE_ACCESO_DENEGADO, HTTPStatus.FORBIDDEN)
+
+        if resultado.estado is EstadoRespuesta.NO_ENCONTRADO:
+            return error(MENSAJE_NO_DISPONIBLE, HTTPStatus.NOT_FOUND)
+
+        return error(MENSAJE_UPSTREAM, HTTPStatus.BAD_GATEWAY)
+
+    def _episodio(embarazo) -> dict:
+        """Un episodio tal como lo ve el navegador. Solo campos del contrato."""
+        return {
+            "id_embarazo": embarazo.id_embarazo,
+            "fecha_inicio": embarazo.fecha_inicio.isoformat(),
+            "fecha_probable_parto": (
+                embarazo.fecha_probable_parto.isoformat()
+                if embarazo.fecha_probable_parto is not None
+                else None
+            ),
+            "estado_embarazo": embarazo.estado_embarazo,
+            "fecha_cierre": (
+                embarazo.fecha_cierre.isoformat()
+                if embarazo.fecha_cierre is not None
+                else None
+            ),
+        }
+
+    def _lectura(lectura) -> dict:
+        """Una lectura tal como la ve el navegador.
+
+        Los tres valores biometricos viajan como ``None`` cuando no aplican.
+        Nunca como cero: la interfaz tiene que poder distinguir «no se midio» de
+        «se midio y dio cero», y esa distincion empieza aqui.
+
+        ``codigo_semaforo`` se reenvia sin tocar. El adaptador no clasifica.
+        """
+        return {
+            "id_lectura": lectura.id_lectura,
+            "fecha_hora_captura": lectura.fecha_hora_captura.isoformat(),
+            "codigo_semaforo": lectura.codigo_semaforo,
+            "semana_gestacion": lectura.semana_gestacion,
+            "hr_valor": None if lectura.hr_valor is None else str(lectura.hr_valor),
+            "spo2_valor": None if lectura.spo2_valor is None else str(lectura.spo2_valor),
+            "mov_valor": lectura.mov_valor,
+        }
+
+    def _sesion(sesion) -> dict:
+        return {
+            "id_sesion": sesion.id_sesion,
+            "tipo_sesion": sesion.tipo_sesion,
+            "estado_sesion": sesion.estado_sesion,
+            "fecha_inicio": sesion.fecha_inicio.isoformat(),
+            "fecha_fin": (
+                sesion.fecha_fin.isoformat() if sesion.fecha_fin is not None else None
+            ),
+        }
+
+    @router.get("/adaptador/embarazos")
+    def listar_embarazos(peticion: Request) -> JSONResponse:
+        """Los episodios de la paciente, ya clasificados.
+
+        El servidor central decide **cuales** son --aqui no se envia ningun
+        filtro, porque un filtro del cliente no prueba autorizacion--; este
+        adaptador solo decide cual llamar «actual», con la regla de
+        ``app.gestante.clinico``.
+        """
+        identificador, sesion = sesion_vigente(peticion)
+        if sesion is None:
+            return error(MENSAJE_SIN_SESION, HTTPStatus.UNAUTHORIZED)
+
+        token = contexto.tokens.obtener(identificador)
+        if token is None:
+            # El proceso se reinicio y el token se perdio, que es lo que tiene
+            # que pasar: no se persiste. La sesion local sigue viva.
+            return no_disponible(MOTIVO_REAUTENTICACION)
+
+        resultado = contexto.cliente_central.embarazos(token)
+        if not resultado.disponible:
+            if resultado.estado is EstadoRespuesta.RECHAZADO:
+                contexto.tokens.olvidar(identificador)
+            return traducir_fallo(resultado)
+
+        episodios = clasificar_episodios(resultado.datos)
+
+        return json(
+            {
+                "disponible": True,
+                "datos": {
+                    "actual": None if episodios.actual is None else _episodio(episodios.actual),
+                    "anteriores": [_episodio(e) for e in episodios.anteriores],
+                    "todos": [_episodio(e) for e in episodios.todos],
+                    # Cuando es ``True``, la interfaz no debe llamar «actual» a
+                    # ningun episodio, aunque permita consultarlos todos.
+                    "ambiguo": episodios.ambiguo,
+                },
+            }
+        )
+
+    @router.get("/adaptador/embarazos/{id_embarazo}/monitoreo")
+    def monitoreo_del_embarazo(
+        peticion: Request, id_embarazo: int = Path(ge=1)
+    ) -> JSONResponse:
+        """Las sesiones de un episodio, sus lecturas, y cual es la ultima.
+
+        Una sola ruta para el panel y para el historial, y no por comodidad: la
+        ultima lectura se calcula sobre **todas** las lecturas del episodio, asi
+        que hay que recorrerlas de todos modos. Partirlo en dos rutas duplicaria
+        exactamente el mismo trabajo.
+
+        El identificador que llega aqui procede siempre de
+        ``/adaptador/embarazos``. Si aun asi nombrara un episodio ajeno, el
+        servidor central responde 404 por sus politicas y esta ruta lo reenvia
+        como 404: la autoridad sigue siendo el servidor, no esta comprobacion.
+        """
+        identificador, sesion = sesion_vigente(peticion)
+        if sesion is None:
+            return error(MENSAJE_SIN_SESION, HTTPStatus.UNAUTHORIZED)
+
+        token = contexto.tokens.obtener(identificador)
+        if token is None:
+            return no_disponible(MOTIVO_REAUTENTICACION)
+
+        respuesta_sesiones = contexto.cliente_central.sesiones(token, id_embarazo)
+        if not respuesta_sesiones.disponible:
+            if respuesta_sesiones.estado is EstadoRespuesta.RECHAZADO:
+                contexto.tokens.olvidar(identificador)
+            return traducir_fallo(respuesta_sesiones)
+
+        con_lecturas: list[SesionConLecturas] = []
+        for sesion_remota in respuesta_sesiones.datos:
+            respuesta_lecturas = contexto.cliente_central.lecturas(
+                token, sesion_remota.id_sesion
+            )
+            if not respuesta_lecturas.disponible:
+                # Un fallo a mitad no se completa con lo que ya se tenia: un
+                # historial parcial que no se anuncia como parcial es peor que
+                # decir que no se pudo leer.
+                if respuesta_lecturas.estado is EstadoRespuesta.RECHAZADO:
+                    contexto.tokens.olvidar(identificador)
+                return traducir_fallo(respuesta_lecturas)
+            con_lecturas.append(
+                SesionConLecturas(
+                    sesion=sesion_remota, lecturas=respuesta_lecturas.datos
+                )
+            )
+
+        ultima = ultima_lectura(con_lecturas)
+        sesion_de_la_ultima = (
+            None if ultima is None else sesion_de_la_lectura(con_lecturas, ultima)
+        )
+
+        return json(
+            {
+                "disponible": True,
+                "datos": {
+                    "id_embarazo": id_embarazo,
+                    "sesiones": [
+                        {
+                            **_sesion(entrada.sesion),
+                            "lecturas": [_lectura(l) for l in entrada.lecturas],
+                        }
+                        for entrada in con_lecturas
+                    ],
+                    # Una sola lectura coherente: sus metricas, su instante y su
+                    # semaforo son los de la misma captura. Nunca se compone a
+                    # partir de lecturas distintas.
+                    "ultima_lectura": None if ultima is None else _lectura(ultima),
+                    "id_sesion_de_la_ultima": (
+                        None if sesion_de_la_ultima is None else sesion_de_la_ultima.id_sesion
+                    ),
+                },
             }
         )
 

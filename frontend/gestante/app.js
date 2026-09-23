@@ -48,7 +48,33 @@
     iniciarSesion: '/adaptador/iniciar-sesion',
     cerrarSesion: '/adaptador/cerrar-sesion',
     conectividad: '/adaptador/conectividad',
-    estadoLocal: '/adaptador/estado-local'
+    estadoLocal: '/adaptador/estado-local',
+    embarazos: '/adaptador/embarazos',
+    monitoreo: function (idEmbarazo) {
+      // El identificador procede siempre de la lista de episodios que devolvio
+      // el adaptador. Esta funcion no lo fabrica ni lo adivina.
+      return '/adaptador/embarazos/' + encodeURIComponent(idEmbarazo) + '/monitoreo';
+    }
+  };
+
+  // Como se interpreta una respuesta del adaptador. La clasificacion vive en un
+  // solo sitio --`clasificar()`-- y las vistas leen el resultado; repetir
+  // comprobaciones de codigos por cada pantalla es como se acaba teniendo cinco
+  // criterios distintos para el mismo 404.
+  const CLASE = {
+    DATOS: 'datos',                    // 200 con disponible: true
+    NO_DISPONIBLE: 'no_disponible',    // 200 con disponible: false + motivo
+    SESION_LOCAL_INVALIDA: 'sesion_local_invalida', // 401 del adaptador
+    ACCESO_DENEGADO: 'acceso_denegado',            // 403
+    RECURSO_NO_DISPONIBLE: 'recurso_no_disponible',// 404
+    ERROR_UPSTREAM: 'error_upstream',              // 502 y demas
+    ADAPTADOR_CAIDO: 'adaptador_caido'             // ni siquiera respondio
+  };
+
+  // Los dos motivos que el adaptador envia con 200 y disponible: false.
+  const MOTIVO = {
+    REAUTENTICACION: 'reautenticacion_requerida',
+    SIN_CONEXION: 'sin_conexion'
   };
 
   // Cada cuanto se refrescan conectividad y estado local, en milisegundos.
@@ -63,6 +89,24 @@
     'No se pudo iniciar sesión. Revisa el correo y la contraseña.';
   const MENSAJE_SIN_CONEXION =
     'No hay conexión con el servidor. Inténtalo de nuevo cuando vuelva.';
+
+  // Textos de los estados en que la sesion local sigue viva y no hay datos
+  // centrales. Ninguno provoca cierre de sesion.
+  const AVISOS = {};
+  AVISOS[MOTIVO.REAUTENTICACION] =
+    'Tu sesión en este dispositivo sigue activa, pero para ver tu información ' +
+    'clínica hace falta iniciar sesión de nuevo cuando haya conexión.';
+  AVISOS[MOTIVO.SIN_CONEXION] =
+    'Sin conexión con el servidor. Tu información clínica se mostrará cuando ' +
+    'vuelva la conexión.';
+  AVISOS[CLASE.ACCESO_DENEGADO] =
+    'Tu cuenta no puede consultar esta información.';
+  AVISOS[CLASE.RECURSO_NO_DISPONIBLE] =
+    'Ese episodio no está disponible.';
+  AVISOS[CLASE.ERROR_UPSTREAM] =
+    'El servidor no pudo responder. Inténtalo de nuevo más tarde.';
+  AVISOS[CLASE.ADAPTADOR_CAIDO] =
+    'No se pudo contactar con la aplicación de este dispositivo.';
 
   // Niveles que el semaforo sabe pintar. La clave es el codigo que entrega
   // la fuente autorizada; el valor, la clase CSS. Un nivel desconocido no se
@@ -111,12 +155,23 @@
     notaEstadoLocal: document.getElementById('nota-estado-local'),
 
     ultimaLectura: document.getElementById('last-update'),
-    ultimaSincronizacion: document.getElementById('last-sync')
+    ultimaSincronizacion: document.getElementById('last-sync'),
+
+    notaEmbarazo: document.getElementById('nota-embarazo'),
+    selectorEmbarazo: document.getElementById('selector-embarazo'),
+    historialLista: document.getElementById('historial-lista'),
+    historialVacio: document.getElementById('historial-vacio')
   };
 
   const VISTAS = ['login', 'inicio', 'historial', 'manual', 'acerca'];
 
   let temporizadorRefresco = null;
+
+  // Episodios que el adaptador entrego en la ultima consulta, y cual se esta
+  // mirando. `seleccionado` siempre es un id que vino de `/adaptador/embarazos`:
+  // no se construye a partir de nada escrito en la pagina.
+  let episodios = null;
+  let seleccionado = null;
 
   // =======================================================================
   // Utilidades de presentacion
@@ -147,6 +202,18 @@
       return SIN_DATO;
     }
     return momento.toLocaleString();
+  }
+
+  /** Solo la fecha, para etiquetas donde la hora no aporta. */
+  function fechaCortaLegible(valorIso) {
+    if (valorIso === null || valorIso === undefined || valorIso === '') {
+      return SIN_DATO;
+    }
+    const momento = new Date(valorIso);
+    if (Number.isNaN(momento.getTime())) {
+      return SIN_DATO;
+    }
+    return momento.toLocaleDateString();
   }
 
   /**
@@ -261,6 +328,24 @@
 
     ui.ultimaLectura.textContent = SIN_DATO;
     ui.ultimaSincronizacion.textContent = SIN_DATO;
+
+    // Nada de un episodio puede sobrevivir a un cierre de sesión.
+    episodios = null;
+    seleccionado = null;
+    if (ui.selectorEmbarazo) {
+      ui.selectorEmbarazo.innerHTML = '';
+      const vacio = document.createElement('option');
+      vacio.value = '';
+      vacio.textContent = NO_DISPONIBLE;
+      ui.selectorEmbarazo.appendChild(vacio);
+      ui.selectorEmbarazo.disabled = true;
+    }
+    if (ui.historialLista) {
+      ui.historialLista.innerHTML = '';
+    }
+    if (ui.notaEmbarazo) {
+      ui.notaEmbarazo.hidden = true;
+    }
   }
 
   // =======================================================================
@@ -295,6 +380,56 @@
       .catch(function () {
         return { ok: false, estado: 0, cuerpo: null };
       });
+  }
+
+  /**
+   * Traduce una respuesta del adaptador a una de las clases conocidas.
+   *
+   * Es el unico sitio donde se miran codigos HTTP, y eso es deliberado: sin un
+   * punto central, cada vista acabaria decidiendo por su cuenta que hacer ante
+   * un 404 y tarde o temprano alguna cerraria la sesion por un error que no
+   * tiene nada que ver con la sesion.
+   *
+   * **Solo `SESION_LOCAL_INVALIDA` devuelve al login.** El adaptador emite 401
+   * unicamente cuando la sesion local no vale --inexistente, cerrada o
+   * expirada--. Un 403, un 404 o un 502 hablan del servidor central o del
+   * recurso pedido, y ninguno de ellos es motivo para expulsar a una paciente
+   * cuya ventana local sigue vigente.
+   */
+  function clasificar(resultado) {
+    if (resultado.estado === 0) {
+      return { clase: CLASE.ADAPTADOR_CAIDO };
+    }
+    if (resultado.estado === 401) {
+      return { clase: CLASE.SESION_LOCAL_INVALIDA };
+    }
+    if (resultado.estado === 403) {
+      return { clase: CLASE.ACCESO_DENEGADO };
+    }
+    if (resultado.estado === 404) {
+      return { clase: CLASE.RECURSO_NO_DISPONIBLE };
+    }
+    if (resultado.estado >= 500) {
+      return { clase: CLASE.ERROR_UPSTREAM };
+    }
+    if (resultado.ok && resultado.cuerpo) {
+      if (resultado.cuerpo.disponible === true) {
+        return { clase: CLASE.DATOS, datos: resultado.cuerpo.datos };
+      }
+      if (resultado.cuerpo.disponible === false) {
+        return { clase: CLASE.NO_DISPONIBLE, motivo: resultado.cuerpo.motivo };
+      }
+    }
+    // Un 2xx que no cumple el contrato del adaptador. No se adivina.
+    return { clase: CLASE.ERROR_UPSTREAM };
+  }
+
+  /** El texto neutro que corresponde a una clasificación sin datos. */
+  function avisoDe(clasificacion) {
+    if (clasificacion.clase === CLASE.NO_DISPONIBLE) {
+      return AVISOS[clasificacion.motivo] || AVISOS[CLASE.ERROR_UPSTREAM];
+    }
+    return AVISOS[clasificacion.clase] || AVISOS[CLASE.ERROR_UPSTREAM];
   }
 
   function consultarSesion() {
@@ -351,8 +486,307 @@
     });
   }
 
+  // =======================================================================
+  // Lectura clinica
+  // =======================================================================
+
+  /** Descripción legible de un episodio para el selector. */
+  function etiquetaDeEpisodio(episodio) {
+    const desde = fechaCortaLegible(episodio.fecha_inicio);
+    const estado = texto(episodio.estado_embarazo, NO_DISPONIBLE);
+    return 'Embarazo desde ' + desde + ' — ' + estado;
+  }
+
+  /**
+   * Pinta la tarjeta del embarazo y prepara el selector.
+   *
+   * Cuando el adaptador informa ambigüedad **no se llama «actual» a ninguno**.
+   * La paciente puede consultar cualquiera de sus episodios, pero la interfaz
+   * no afirma cuál está en curso, porque el dato no permite decidirlo.
+   */
+  function pintarEpisodios(datos) {
+    episodios = datos;
+
+    const todos = datos.todos || [];
+    const anteriores = datos.anteriores || [];
+
+    if (datos.ambiguo) {
+      ui.embarazoEstado.textContent = 'Sin determinar';
+      ui.embarazoAnteriores.textContent = String(todos.length);
+      ui.notaEmbarazo.textContent =
+        'No se pudo determinar automáticamente cuál es tu embarazo en curso. ' +
+        'Selecciona un episodio en «Mi historial» para consultar su información.';
+      ui.notaEmbarazo.hidden = false;
+    } else if (datos.actual) {
+      ui.embarazoEstado.textContent = texto(datos.actual.estado_embarazo, NO_DISPONIBLE);
+      ui.embarazoAnteriores.textContent = String(anteriores.length);
+      ui.notaEmbarazo.hidden = true;
+    } else if (todos.length) {
+      ui.embarazoEstado.textContent = 'Sin embarazo en curso';
+      ui.embarazoAnteriores.textContent = String(anteriores.length);
+      ui.notaEmbarazo.textContent =
+        'No tienes un embarazo en curso registrado. Puedes consultar tus ' +
+        'episodios anteriores en «Mi historial».';
+      ui.notaEmbarazo.hidden = false;
+    } else {
+      ui.embarazoEstado.textContent = NO_DISPONIBLE;
+      ui.embarazoAnteriores.textContent = '0';
+      ui.notaEmbarazo.textContent = 'Todavía no hay episodios registrados.';
+      ui.notaEmbarazo.hidden = false;
+    }
+
+    llenarSelector(todos, datos.actual);
+  }
+
+  function llenarSelector(todos, actual) {
+    const selector = ui.selectorEmbarazo;
+    selector.innerHTML = '';
+
+    if (!todos.length) {
+      const vacio = document.createElement('option');
+      vacio.value = '';
+      vacio.textContent = NO_DISPONIBLE;
+      selector.appendChild(vacio);
+      selector.disabled = true;
+      seleccionado = null;
+      return;
+    }
+
+    todos.forEach(function (episodio) {
+      const opcion = document.createElement('option');
+      opcion.value = String(episodio.id_embarazo);
+      opcion.textContent = etiquetaDeEpisodio(episodio);
+      selector.appendChild(opcion);
+    });
+    selector.disabled = false;
+
+    // Se preselecciona el actual sólo cuando existe uno sin ambigüedad.
+    const inicial = actual ? actual.id_embarazo : todos[0].id_embarazo;
+    seleccionado = inicial;
+    selector.value = String(inicial);
+  }
+
+  /** Estado neutro de todo lo clínico, con el aviso que corresponda. */
+  function pintarSinDatosClinicos(clasificacion) {
+    const aviso = avisoDe(clasificacion);
+
+    ui.embarazoEstado.textContent = NO_DISPONIBLE;
+    ui.embarazoSemana.textContent = NO_DISPONIBLE;
+    ui.embarazoAnteriores.textContent = NO_DISPONIBLE;
+    ui.notaEmbarazo.textContent = aviso;
+    ui.notaEmbarazo.hidden = false;
+
+    limpiarMetricas();
+    pintarSemaforo(null, null);
+
+    ui.selectorEmbarazo.disabled = true;
+    mostrarHistorialVacio(aviso);
+  }
+
+  function limpiarMetricas() {
+    ui.hrValor.textContent = SIN_DATO;
+    ui.spo2Valor.textContent = SIN_DATO;
+    ui.movValor.textContent = SIN_DATO;
+    ui.hrEstado.textContent = 'Sin lectura';
+    ui.spo2Estado.textContent = 'Sin lectura';
+    ui.movEstado.textContent = 'Sin lectura';
+    ui.ultimaLectura.textContent = SIN_DATO;
+  }
+
+  /**
+   * Pinta **una** lectura, entera y coherente.
+   *
+   * Las tres métricas, el instante y el semáforo salen de la misma captura. No
+   * se compone un panel con la última frecuencia cardíaca de una lectura y el
+   * último movimiento de otra: serían instantes distintos bajo un único
+   * «última lectura», y eso sería engañoso.
+   *
+   * Una métrica que esa lectura no midió se muestra como «—». Nunca como 0.
+   */
+  function pintarUltimaLectura(lectura) {
+    if (!lectura) {
+      limpiarMetricas();
+      pintarSemaforo(null, null);
+      ui.embarazoSemana.textContent = NO_DISPONIBLE;
+      return;
+    }
+
+    ui.hrValor.textContent = texto(lectura.hr_valor);
+    ui.spo2Valor.textContent = texto(lectura.spo2_valor);
+    ui.movValor.textContent = texto(lectura.mov_valor);
+
+    ui.hrEstado.textContent =
+      lectura.hr_valor === null || lectura.hr_valor === undefined
+        ? 'No medido en esta lectura'
+        : 'Última lectura registrada';
+    ui.spo2Estado.textContent =
+      lectura.spo2_valor === null || lectura.spo2_valor === undefined
+        ? 'No medido en esta lectura'
+        : 'Última lectura registrada';
+    ui.movEstado.textContent =
+      lectura.mov_valor === null || lectura.mov_valor === undefined
+        ? 'No medido en esta lectura'
+        : 'Última lectura registrada';
+
+    ui.embarazoSemana.textContent = texto(lectura.semana_gestacion, NO_DISPONIBLE);
+    ui.ultimaLectura.textContent = fechaLegible(lectura.fecha_hora_captura);
+
+    // El nivel llega ya clasificado por la fuente autorizada. Aquí sólo se
+    // traduce a una clase CSS.
+    pintarSemaforo(lectura.codigo_semaforo, mensajeDeSemaforo(lectura.codigo_semaforo));
+  }
+
+  /** Texto acompañante del nivel. No es una interpretación clínica. */
+  function mensajeDeSemaforo(codigo) {
+    if (codigo === 'OK') return 'Dentro de lo esperado para el seguimiento simulado';
+    if (codigo === 'WARNING') return 'Conviene repetir la medición';
+    if (codigo === 'ERROR') return 'Comunícate con tu personal de seguimiento';
+    return null;
+  }
+
+  function mostrarHistorialVacio(mensaje) {
+    ui.historialLista.innerHTML = '';
+    const tarjeta = document.createElement('div');
+    tarjeta.className = 'result-card estado-vacio';
+    const titulo = document.createElement('h3');
+    titulo.className = 'subtitulo';
+    titulo.textContent = 'Sin información que mostrar';
+    const parrafo = document.createElement('p');
+    parrafo.className = 'texto-apoyo';
+    parrafo.textContent = mensaje;
+    tarjeta.appendChild(titulo);
+    tarjeta.appendChild(parrafo);
+    ui.historialLista.appendChild(tarjeta);
+  }
+
+  /** Construye una fila etiqueta/valor reutilizando el estilo existente. */
+  function filaDeDatos(etiqueta, valor) {
+    const fila = document.createElement('div');
+    fila.className = 'data-row';
+    const izquierda = document.createElement('span');
+    izquierda.className = 'label';
+    izquierda.textContent = etiqueta;
+    const derecha = document.createElement('span');
+    derecha.className = 'value';
+    derecha.textContent = valor;
+    fila.appendChild(izquierda);
+    fila.appendChild(derecha);
+    return fila;
+  }
+
+  /**
+   * Pinta las sesiones de **un** episodio.
+   *
+   * Se vacía la lista antes de construirla, de modo que cambiar de episodio no
+   * pueda dejar visible ni una fila del anterior.
+   */
+  function pintarHistorial(datos) {
+    ui.historialLista.innerHTML = '';
+
+    const sesiones = datos.sesiones || [];
+    if (!sesiones.length) {
+      mostrarHistorialVacio(
+        'Este episodio todavía no tiene sesiones de monitoreo registradas.'
+      );
+      return;
+    }
+
+    sesiones.forEach(function (sesion) {
+      const tarjeta = document.createElement('div');
+      tarjeta.className = 'result-card';
+
+      const titulo = document.createElement('h3');
+      titulo.className = 'subtitulo';
+      titulo.textContent = texto(sesion.tipo_sesion, NO_DISPONIBLE);
+      tarjeta.appendChild(titulo);
+
+      tarjeta.appendChild(filaDeDatos('Estado:', texto(sesion.estado_sesion, NO_DISPONIBLE)));
+      tarjeta.appendChild(filaDeDatos('Inicio:', fechaLegible(sesion.fecha_inicio)));
+      tarjeta.appendChild(filaDeDatos('Fin:', fechaLegible(sesion.fecha_fin)));
+
+      const lecturas = sesion.lecturas || [];
+      if (!lecturas.length) {
+        tarjeta.appendChild(filaDeDatos('Lecturas:', 'Sin lecturas registradas'));
+      } else {
+        lecturas.forEach(function (lectura) {
+          const bloque = document.createElement('div');
+          bloque.className = 'semaforo-item ' +
+            (CLASES_DE_SEMAFORO[lectura.codigo_semaforo] || '');
+          const luz = document.createElement('span');
+          luz.className = 'alert-light';
+          const detalle = document.createElement('span');
+          detalle.textContent =
+            fechaLegible(lectura.fecha_hora_captura) +
+            ' · semana ' + texto(lectura.semana_gestacion) +
+            ' · FC ' + texto(lectura.hr_valor) +
+            ' · SpO₂ ' + texto(lectura.spo2_valor) +
+            ' · mov. ' + texto(lectura.mov_valor);
+          bloque.appendChild(luz);
+          bloque.appendChild(detalle);
+          tarjeta.appendChild(bloque);
+        });
+      }
+
+      ui.historialLista.appendChild(tarjeta);
+    });
+  }
+
+  /** Pide los episodios y, si hay uno seleccionable, su monitoreo. */
+  function cargarClinico() {
+    return pedir(API.embarazos).then(function (resultado) {
+      const clasificacion = clasificar(resultado);
+
+      if (clasificacion.clase === CLASE.SESION_LOCAL_INVALIDA) {
+        mostrarLogin();
+        return;
+      }
+
+      if (clasificacion.clase !== CLASE.DATOS) {
+        pintarSinDatosClinicos(clasificacion);
+        return;
+      }
+
+      pintarEpisodios(clasificacion.datos);
+
+      if (seleccionado === null) {
+        pintarUltimaLectura(null);
+        mostrarHistorialVacio('Todavía no hay episodios registrados.');
+        return;
+      }
+      return cargarMonitoreo(seleccionado);
+    });
+  }
+
+  /** Pide sesiones y lecturas de un episodio concreto. */
+  function cargarMonitoreo(idEmbarazo) {
+    return pedir(API.monitoreo(idEmbarazo)).then(function (resultado) {
+      const clasificacion = clasificar(resultado);
+
+      if (clasificacion.clase === CLASE.SESION_LOCAL_INVALIDA) {
+        mostrarLogin();
+        return;
+      }
+
+      if (clasificacion.clase !== CLASE.DATOS) {
+        // Un 403, un 404 o un fallo del servidor dejan el portal abierto: sólo
+        // se vacía lo clínico y se explica por qué.
+        limpiarMetricas();
+        pintarSemaforo(null, null);
+        mostrarHistorialVacio(avisoDe(clasificacion));
+        return;
+      }
+
+      pintarUltimaLectura(clasificacion.datos.ultima_lectura);
+      pintarHistorial(clasificacion.datos);
+    });
+  }
+
   function refrescar() {
-    return Promise.all([refrescarConectividad(), refrescarEstadoLocal()]);
+    return Promise.all([
+      refrescarConectividad(),
+      refrescarEstadoLocal(),
+      cargarClinico()
+    ]);
   }
 
   function iniciarRefrescoPeriodico() {
@@ -455,6 +889,31 @@
         mostrarVista(enlace.dataset.vista);
       });
     });
+
+    if (ui.selectorEmbarazo) {
+      ui.selectorEmbarazo.addEventListener('change', function () {
+        const elegido = Number(ui.selectorEmbarazo.value);
+
+        // Sólo se acepta un identificador que vino de `/adaptador/embarazos`.
+        // Un valor manipulado en la página no llega a convertirse en petición.
+        const conocido =
+          episodios &&
+          (episodios.todos || []).some(function (e) {
+            return e.id_embarazo === elegido;
+          });
+        if (!conocido) {
+          return;
+        }
+
+        seleccionado = elegido;
+        // Se vacía antes de pedir, para que no quede a la vista ni una fila del
+        // episodio anterior mientras llega la respuesta.
+        ui.historialLista.innerHTML = '';
+        limpiarMetricas();
+        pintarSemaforo(null, null);
+        cargarMonitoreo(elegido);
+      });
+    }
   }
 
   function arrancar() {
