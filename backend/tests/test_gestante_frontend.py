@@ -151,14 +151,37 @@ def test_la_funcion_que_sustituye_ausencias_no_trata_el_cero_como_ausente():
     La guarda de ``texto()`` enumera exactamente los tres casos de ausencia, y
     el cero no es uno de ellos.
     """
+    import re
+
     contenido = leer(JS)
 
     assert "valor === null || valor === undefined || valor === ''" in contenido
     # Las formas tipicas de colapsar un nulo en cero no aparecen.
     assert "|| 0" not in contenido
     assert "?? 0" not in contenido
-    assert "Number(" not in contenido
-    assert "parseInt(" not in contenido
+
+    # **Ningun campo clinico pasa por una conversion numerica.** La prohibicion
+    # apunta a los campos, no a la funcion: ``Number()`` sobre el valor de un
+    # ``<select>`` --que es texto de un identificador-- no tiene nada que ver
+    # con convertir una medicion ausente en cero, y prohibirla en bloque
+    # confundia las dos cosas.
+    for campo in ("hr_valor", "spo2_valor", "mov_valor", "semana_gestacion"):
+        assert re.search(rf"Number\(\s*\w*\.?{campo}", contenido) is None, campo
+        assert re.search(rf"parseInt\(\s*\w*\.?{campo}", contenido) is None, campo
+        assert re.search(rf"\+\s*\w+\.{campo}\b", contenido) is None, campo
+
+
+def test_la_unica_conversion_numerica_es_la_del_identificador_del_selector():
+    """Y esta protegida: solo se usa si coincide con un episodio conocido."""
+    import re
+
+    contenido = leer(JS)
+
+    conversiones = re.findall(r"Number\(([^)]*)\)", contenido)
+    assert conversiones == ["ui.selectorEmbarazo.value"]
+    # Y su resultado se comprueba contra la lista del adaptador antes de usarse.
+    assert "conocido" in contenido
+    assert "e.id_embarazo === elegido" in contenido
 
 
 def test_el_marcado_no_inicializa_ninguna_metrica_en_cero():
@@ -345,13 +368,140 @@ def test_el_registro_de_movimientos_esta_preparado_pero_deshabilitado():
     assert "contexto clínico autorizado" in contenido
 
 
-def test_no_se_inventan_identificadores_clinicos():
+def test_no_aparecen_los_identificadores_que_solo_sirven_para_escribir():
+    """Los tres que un paquete de monitoreo exige y nadie publica.
+
+    ``id_embarazo`` **si** aparece, y debe: lo entrega el adaptador en la lista
+    de episodios y es lo que identifica cual se esta consultando. Lo que no
+    puede aparecer son los que harian falta para *escribir* una sesion, porque
+    ninguna fuente autorizada los expone y tenerlos aqui solo podria significar
+    que se inventaron.
+    """
     contenido = todo_el_frontend()
-    for campo in ("id_embarazo", "id_dispositivo", "id_tiempo_gest", "id_semaforo"):
-        assert campo not in contenido
+    for campo in ("id_dispositivo", "id_tiempo_gest", "id_semaforo"):
+        assert campo not in contenido, campo
+
+
+def test_el_identificador_de_episodio_nunca_se_fabrica_en_la_pagina():
+    """Solo se usa el que vino del adaptador."""
+    import re
+
+    contenido = leer(JS)
+
+    # No hay ningún id_embarazo literal escrito en el código.
+    assert re.search(r"id_embarazo\s*[:=]\s*\d+", contenido) is None
+    assert "episodio.id_embarazo" in contenido
 
 
 def test_se_declara_que_los_datos_son_simulados():
     contenido = leer(HTML)
     assert "simulados" in contenido
     assert "académico" in contenido
+
+
+# ---------------------------------------------------------------------------
+# Clasificación centralizada de respuestas (lectura clínica)
+# ---------------------------------------------------------------------------
+
+
+def test_la_clasificacion_de_respuestas_vive_en_un_solo_sitio():
+    """Sin un punto central, cada vista acabaría decidiendo por su cuenta."""
+    contenido = leer(JS)
+
+    assert "function clasificar(resultado)" in contenido
+    for clase in (
+        "SESION_LOCAL_INVALIDA",
+        "ACCESO_DENEGADO",
+        "RECURSO_NO_DISPONIBLE",
+        "ERROR_UPSTREAM",
+        "NO_DISPONIBLE",
+        "DATOS",
+    ):
+        assert clase in contenido, clase
+
+
+def test_solo_el_401_del_adaptador_devuelve_al_login():
+    """Un 403, un 404 o un 502 no pueden expulsar a la paciente."""
+    import re
+
+    contenido = leer(JS)
+
+    lineas = contenido.splitlines()
+    for indice, linea in enumerate(lineas):
+        if "mostrarLogin()" not in linea:
+            continue
+        contexto = "\n".join(lineas[max(0, indice - 3) : indice + 1])
+        if "clasificacion.clase" in contexto:
+            assert "SESION_LOCAL_INVALIDA" in contexto
+
+    assert not re.search(r"estado\s*===\s*403[\s\S]{0,140}mostrarLogin", contenido)
+    assert not re.search(r"estado\s*===\s*404[\s\S]{0,140}mostrarLogin", contenido)
+    assert not re.search(r"estado\s*>=\s*500[\s\S]{0,140}mostrarLogin", contenido)
+
+
+@pytest.mark.parametrize("motivo", ["reautenticacion_requerida", "sin_conexion"])
+def test_los_dos_motivos_que_mantienen_el_portal_abierto_estan_contemplados(motivo):
+    assert motivo in leer(JS)
+
+
+def test_la_interfaz_consume_solo_las_rutas_clinicas_del_adaptador():
+    """El navegador nunca habla con el servidor central."""
+    contenido = leer(JS)
+
+    assert "'/adaptador/embarazos'" in contenido
+    assert "/monitoreo" in contenido
+    assert "/api/v1/clinico" not in contenido
+    assert "/api/v1/autenticacion" not in contenido
+
+
+def test_el_semaforo_solo_se_traduce_a_presentacion():
+    """El código llega clasificado; aquí sólo se mapea a una clase CSS."""
+    contenido = leer(JS)
+
+    assert "pintarSemaforo(lectura.codigo_semaforo" in contenido
+    for comparacion in (
+        "hr_valor >",
+        "hr_valor <",
+        "spo2_valor >",
+        "spo2_valor <",
+        "mov_valor >",
+        "mov_valor <",
+    ):
+        assert comparacion not in contenido, comparacion
+
+
+def test_el_selector_solo_acepta_identificadores_que_vinieron_del_adaptador():
+    contenido = leer(JS)
+
+    assert "episodios.todos" in contenido
+    assert "conocido" in contenido
+
+
+def test_cambiar_de_episodio_vacia_lo_anterior_antes_de_pedir():
+    """Ni una fila del episodio anterior puede quedar a la vista."""
+    contenido = leer(JS)
+
+    assert "ui.historialLista.innerHTML = ''" in contenido
+    assert "limpiarMetricas()" in contenido
+
+
+def test_la_ambiguedad_no_se_presenta_como_embarazo_actual():
+    contenido = leer(JS)
+
+    assert "Sin determinar" in contenido
+    assert "No se pudo determinar automáticamente" in contenido
+
+
+def test_el_panel_pinta_una_sola_lectura_coherente():
+    """Las tres métricas y el instante salen del mismo objeto."""
+    contenido = leer(JS)
+
+    assert "function pintarUltimaLectura(lectura)" in contenido
+    for campo in (
+        "lectura.hr_valor",
+        "lectura.spo2_valor",
+        "lectura.mov_valor",
+        "lectura.fecha_hora_captura",
+        "lectura.semana_gestacion",
+    ):
+        assert campo in contenido, campo
