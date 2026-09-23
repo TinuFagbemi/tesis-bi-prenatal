@@ -5,7 +5,7 @@ Es la unica pieza de esta interfaz que habla con el servidor, y habla con el
 no importa modelos de SQLAlchemy y no consulta tablas: si algo no esta publicado
 como endpoint, para este adaptador no existe.
 
-**Tres operaciones, y ninguna mas.**
+**Seis operaciones, y ninguna mas.**
 
 * :meth:`ClienteCentral.autenticar` cambia unas credenciales por un token, con
   ``POST /api/v1/autenticacion/token``.
@@ -13,11 +13,13 @@ como endpoint, para este adaptador no existe.
   con que rol, con ``GET /api/v1/autenticacion/yo``.
 * :meth:`ClienteCentral.disponible` comprueba si el servidor responde, con
   ``GET /health``.
+* :meth:`ClienteCentral.embarazos`, :meth:`ClienteCentral.sesiones` y
+  :meth:`ClienteCentral.lecturas` leen la lectura clinica minima que SCRUM-98
+  publica en ``/api/v1/clinico/*``, para PACIENTE y MEDICO.
 
-Las tres existen hoy y este ticket no anade ninguna. En particular, aqui no hay
---ni debe haber-- nada que pida un embarazo, una lectura o un historial: esos
-contratos pertenecen a SCRUM-98 y todavia no existen. Inventarlos aqui seria
-escribir contra un servidor imaginario.
+Estas seis existen hoy y este ticket no anade ninguna mas. En particular, no
+hay --ni debe haber-- un metodo generico que reenvie cualquier ruta: la lista
+de lo que el navegador puede pedir esta escrita aqui y en ninguna otra parte.
 
 **Lo que este modulo no hace con lo que recibe.** La contrasena entra como
 argumento, se envia una vez y no se guarda en ningun atributo, ningun registro

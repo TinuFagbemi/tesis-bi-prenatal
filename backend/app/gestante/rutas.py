@@ -1,10 +1,11 @@
 """Las rutas del adaptador local de la interfaz de la gestante (SCRUM-72).
 
-Ocho rutas: tres sirven los archivos de la interfaz y cinco la atienden. No hay
-mas, y lo que **no** hay es tan parte del diseno como lo que hay: ninguna ruta
-devuelve un embarazo, una lectura, un semaforo ni un historial, porque esos
-contratos pertenecen a SCRUM-98 y todavia no existen. Una ruta que los
-imitara hoy seria una fuente de datos inventada.
+Diez rutas: tres sirven los archivos de la interfaz, cinco atienden sesion y
+estado local, y dos exponen la lectura clinica minima de SCRUM-98 --embarazos
+de la cuenta y el monitoreo de un episodio-- traducida desde
+``app.gestante.central`` y ``app.gestante.clinico``. No hay mas: ninguna ruta
+reenvia un cuerpo ni una ruta arbitraria de la API central, y ninguna calcula
+un semaforo o un estado clinico por su cuenta.
 
 **El adaptador no es una segunda capa de negocio.** No valida de nuevo lo que ya
 valida un contrato, no clasifica nada, no reimplementa la idempotencia ni los
