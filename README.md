@@ -145,6 +145,7 @@ tesis-bi-prenatal/
 │   │   ├── db/          # bases declarativas y sesión de SQLAlchemy
 │   │   ├── edge/        # nodo edge simulado: SQLite, outbox, sincronización y traza
 │   │   ├── etl/         # ETL del esquema operacional al analítico
+│   │   ├── gestante/    # adaptador local de la interfaz de la gestante (SCRUM-72)
 │   │   ├── loader/      # carga idempotente del dataset simulado
 │   │   ├── models/      # modelos SQLAlchemy del esquema operacional
 │   │   ├── schemas/     # contratos Pydantic
@@ -157,7 +158,8 @@ tesis-bi-prenatal/
 │   └── requirements.txt
 ├── data/                # datasets y bases locales generados; no se versionan
 ├── docs/                # decision log, Definition of Done y especificaciones
-├── scripts/             # comandos: generador, cargador, ETL y nodo edge
+├── frontend/gestante/   # interfaz que el navegador de la paciente descarga
+├── scripts/             # comandos: generador, cargador, ETL, nodo edge y portal
 ├── docker-compose.yml   # PostgreSQL y API para el entorno local
 ├── .env.example
 └── README.md
@@ -1665,6 +1667,87 @@ No decide **qué datos** puede ver cada cuenta: el aislamiento por paciente,
 médico o clínica, RLS, la seudonimización y la protección analítica pertenecen a
 SCRUM-98. SCRUM-97 deja listos los vínculos de identidad que ese trabajo
 necesitará.
+
+## Interfaz web de la gestante (SCRUM-72)
+
+Un proceso aparte que corre **en el dispositivo de la paciente**: sirve la
+interfaz, la autentica contra la API central y sigue en pie cuando no hay
+conexión. No abre ninguna conexión a PostgreSQL y no escribe filas clínicas:
+todo lo central lo pide por HTTP, y lo local lo delega en `app.edge`.
+
+```powershell
+python scripts/gestante_web.py --comprobar   # revisa configuración y sale
+python scripts/gestante_web.py               # http://127.0.0.1:8100
+```
+
+Su configuración sale de variables `GESTANTE_*` (`GESTANTE_API_BASE_URL`,
+`GESTANTE_PORT`, `GESTANTE_SQLITE_PATH`, `GESTANTE_MOVIMIENTOS_DIR`,
+`GESTANTE_PROVISION_PATH`, `GESTANTE_VENTANA_SESION_HORAS`…), todas con valores
+por omisión utilizables. **No existe ningún campo para una credencial**: la
+paciente escribe la suya en la interfaz, viaja una vez hacia la API central y
+no se guarda. El token que devuelve el servidor vive solo en memoria del
+proceso; lo único que llega al navegador es un identificador opaco de sesión en
+una cookie `HttpOnly`.
+
+### Aprovisionar el dispositivo
+
+Un paquete de monitoreo no lleva valores de negocio: lleva llaves subrogadas
+—`id_dispositivo`, `id_tiempo_gest`, `id_semaforo`— que solo PostgreSQL conoce,
+y que ninguna ruta le publica a una paciente. Como además la captura tiene que
+funcionar **sin red**, esas referencias viajan con el dispositivo, escritas
+cuando se le aprovisiona:
+
+```powershell
+python scripts/provisionar_demo.py provisionar   # prepara y escribe el archivo
+python scripts/provisionar_demo.py verificar     # informa, sin escribir
+```
+
+Es el único componente de SCRUM-72 que habla con PostgreSQL, y usa
+`ALEMBIC_DATABASE_URL` —la credencial de mantenimiento, como el cargador del
+dataset—, nunca la de la API. Escribe `data/gestante/provision.json` con el
+`id_usuario` al que sirve el dispositivo, su embarazo, su `id_dispositivo` y
+los catálogos. **No guarda el correo ni ningún otro dato personal**: el correo
+de la cuenta se imprime en pantalla para quien opera.
+
+El comando existe por una razón concreta: los embarazos `ACTIVO` del dataset
+canónico empezaron en 2025, así que hoy van por la semana 50 o más y el
+contrato de ingesta solo admite 1–42. Ninguna sesión capturada hoy podría
+ingresarse contra ellos. Así que agrega un episodio anclado al reloj real
+—semana 28— para una cuenta PACIENTE sin embarazo en curso, con su dispositivo
+y su seguimiento PRINCIPAL. Es idempotente y **no modifica ni borra una sola
+fila del dataset canónico**; `tests/test_provisionar_demo_postgresql.py` lo
+comprueba fila por fila.
+
+### Registro simulado, operación sin conexión y sincronización
+
+Desde «Inicio», el botón **Registrar sesión de movimiento (simulada)** captura
+un paquete en este dispositivo. Funciona con la API central caída, que es el
+requisito: la autorización de ese paso la da el aprovisionamiento —a qué cuenta
+y a qué embarazo sirve—, que el navegador no puede alterar.
+
+Los valores biométricos son constantes fijas del módulo
+`app.gestante.simulacion`: no los escribe la paciente, no los genera el
+navegador al azar y no son una medición. El semáforo **no se elige**: se deriva
+con `app.etl.reglas.clasificar_lectura`, la misma autoridad SIM-1.0 con la que
+el ETL vuelve a clasificar cada lectura —y que aborta la corrida completa ante
+una discrepancia—. Si la semana queda fuera del catálogo, o se pide movimiento
+fetal antes de la semana 20, el portal se niega con una frase precisa en vez de
+guardar algo que el servidor rechazaría después.
+
+Lo capturado queda `PENDIENTE` en un SQLite **propio de cada cuenta**
+(`data/gestante/movimientos/cuenta-<id_usuario>.sqlite3`), sobrevive a un
+reinicio del portal y no se mezcla con el de otra cuenta. El botón
+**Sincronizar ahora** ejecuta una sola ronda real contra
+`POST /api/v1/sesiones-monitoreo` reutilizando `app.edge.ejecutar_pasada`, con
+el token de la paciente que ya está en memoria —nunca `EDGE_API_TOKEN`, que es
+del nodo edge y este proceso no lee—. El resultado se muestra tal cual: no se
+finge un éxito. Un reenvío posterior no duplica nada: `ENVIADO` es terminal
+para la elegibilidad del nodo, y la clave de idempotencia se conserva.
+
+**El envío confirmado no es la actualización analítica.** Que el servidor
+acepte el paquete lo deja en el esquema operacional; para verlo en el esquema
+analítico y en `publicacion` hay que ejecutar después
+`python scripts/etl_analitico.py ejecutar`.
 
 ## Calidad del proyecto
 
