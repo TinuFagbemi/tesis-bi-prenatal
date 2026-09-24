@@ -122,7 +122,8 @@ jobs:
             --ignore=tests/test_contexto_postgresql.py \
             --ignore=tests/test_rls_postgresql.py \
             --ignore=tests/test_http_como_api_postgresql.py \
-            --ignore=tests/test_publicacion_postgresql.py
+            --ignore=tests/test_publicacion_postgresql.py \
+            --ignore=tests/test_provisionar_demo_postgresql.py
 
       # Contrato del camino .env/shell -> docker-compose.yml -> entorno del
       # contenedor de la API. Las pruebas de Python reciben JWT_SECRET_KEY

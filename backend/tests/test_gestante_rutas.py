@@ -117,6 +117,11 @@ def construir_settings(tmp_path: Path, **ajustes) -> GestanteSettings:
     valores = {
         "sqlite_path": tmp_path / "sesion_local.sqlite3",
         "movimientos_dir": tmp_path / "movimientos",
+        # Dentro de ``tmp_path`` **siempre**, incluso cuando la prueba quiere
+        # que no exista. Si se dejara el valor por omision, una maquina con el
+        # dispositivo aprovisionado de verdad haria pasar --o fallar-- pruebas
+        # segun el estado de ``data/gestante/``, que no es lo que miden.
+        "provision_path": tmp_path / "provision.json",
         "frontend_dir": DIRECTORIO_FRONTEND,
         "api_base_url": "http://127.0.0.1:8000",
         "cookie_secure": False,
