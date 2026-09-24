@@ -4,7 +4,7 @@
    Este archivo se encarga de la interaccion y de pedir datos al adaptador
    local. No decide nada clinico.
 
-   Tres reglas gobiernan todo lo que hay aqui:
+   Cuatro reglas gobiernan todo lo que hay aqui:
 
    1. NO se clasifica. El semaforo se pinta con el nivel que entrega la
       fuente autorizada. No hay umbrales de frecuencia cardiaca, de SpO2 ni
@@ -30,6 +30,13 @@
       de movimientos ausente en 0, y ese es precisamente el error que
       `texto()` existe para no repetir.
 
+   4. Inicio e Historial son dos contextos distintos. Inicio muestra siempre
+      el embarazo en curso; Historial tiene su propia seleccion. Cambiar el
+      embarazo en Historial no repinta Inicio ni cambia el destino del
+      registro de movimientos. Cada contexto lleva su propio turno: una
+      respuesta que llega tarde, de una peticion ya superada, se descarta en
+      lugar de pisar lo que se esta mirando.
+
    Todo lo que se muestra procede de un sistema academico con datos
    simulados.
    ========================================================================= */
@@ -48,7 +55,6 @@
     iniciarSesion: '/adaptador/iniciar-sesion',
     cerrarSesion: '/adaptador/cerrar-sesion',
     conectividad: '/adaptador/conectividad',
-    estadoLocal: '/adaptador/estado-local',
     embarazos: '/adaptador/embarazos',
     monitoreo: function (idEmbarazo) {
       // El identificador procede siempre de la lista de episodios que devolvio
@@ -63,8 +69,8 @@
   };
 
   // El unico tipo de sesion simulada que esta pantalla ofrece. La eleccion es
-  // fija porque el control vive bajo la tarjeta de «Actividad Fetal»: no hay
-  // un selector que la paciente pueda manipular para pedir otra cosa.
+  // fija: no hay un selector que la paciente pueda manipular para pedir otra
+  // cosa.
   const TIPO_SESION_SIMULADA = 'MOVIMIENTOS_FETALES';
 
   // Como se interpreta una respuesta del adaptador. La clasificacion vive en un
@@ -87,8 +93,8 @@
     SIN_CONEXION: 'sin_conexion'
   };
 
-  // Cada cuanto se refrescan conectividad y estado local, en milisegundos.
-  // No es un sondeo de sensores: son dos lecturas baratas del adaptador.
+  // Cada cuanto se refrescan conectividad, envios y lectura, en milisegundos.
+  // No es un sondeo de sensores: son lecturas baratas del adaptador.
   const INTERVALO_REFRESCO_MS = 20000;
 
   const SIN_DATO = '—';
@@ -127,14 +133,38 @@
     ERROR: 'error'
   };
 
+  // Nombre legible del mismo codigo, para la tabla del historial.
+  const ETIQUETAS_DE_SEMAFORO = {
+    OK: 'Verde',
+    WARNING: 'Ámbar',
+    ERROR: 'Rojo'
+  };
+
+  // Nombre legible del estado de un episodio. Un estado desconocido se
+  // muestra tal cual llega.
+  const ESTADOS_DE_EMBARAZO = {
+    ACTIVO: 'En curso',
+    FINALIZADO: 'Finalizado',
+    SUSPENDIDO: 'Suspendido'
+  };
+
+  const TEXTO_SIN_EMBARAZO_EN_CURSO =
+    'Necesitas un embarazo en curso para registrar movimientos.';
+  const TEXTO_LISTO_PARA_REGISTRAR =
+    'Se guardará primero en este dispositivo.';
+
   // =======================================================================
   // Referencias al DOM
   // =======================================================================
 
   const ui = {
     menu: document.getElementById('main-menu'),
+    areaCuenta: document.getElementById('area-cuenta'),
     conexion: document.getElementById('connection-status'),
     botonCerrarSesion: document.getElementById('btn-cerrar-sesion'),
+    dialogoCierre: document.getElementById('dialogo-cerrar-sesion'),
+    botonCancelarCierre: document.getElementById('btn-cancelar-cierre'),
+    botonConfirmarCierre: document.getElementById('btn-confirmar-cierre'),
 
     formLogin: document.getElementById('form-login'),
     email: document.getElementById('login-email'),
@@ -145,8 +175,11 @@
     saludo: document.getElementById('saludo'),
 
     embarazoEstado: document.getElementById('embarazo-estado'),
+    embarazoInicio: document.getElementById('embarazo-inicio'),
     embarazoSemana: document.getElementById('embarazo-semana'),
     embarazoAnteriores: document.getElementById('embarazo-anteriores'),
+    notaEmbarazo: document.getElementById('nota-embarazo'),
+    botonVerAnteriores: document.getElementById('btn-ver-anteriores'),
 
     hrValor: document.getElementById('hr-value'),
     hrEstado: document.getElementById('hr-status'),
@@ -154,43 +187,53 @@
     spo2Estado: document.getElementById('spo2-status'),
     movValor: document.getElementById('movs-value'),
     movEstado: document.getElementById('mov-status'),
+    ultimaLectura: document.getElementById('last-update'),
 
     semaforo: document.getElementById('semaforo'),
     semaforoMensaje: document.getElementById('semaforo-mensaje'),
 
-    outboxPendientes: document.getElementById('outbox-pendientes'),
-    outboxEnviados: document.getElementById('outbox-enviados'),
-    outboxReintentables: document.getElementById('outbox-reintentables'),
-    outboxRevision: document.getElementById('outbox-revision'),
-    notaEstadoLocal: document.getElementById('nota-estado-local'),
-
     botonRegistrarMovimiento: document.getElementById('btn-registrar-movimientos'),
     notaMovimientos: document.getElementById('nota-movimientos'),
-    movPendientes: document.getElementById('movimientos-pendientes'),
-    movEnviados: document.getElementById('movimientos-enviados'),
-    movReintentables: document.getElementById('movimientos-reintentables'),
-    movRevision: document.getElementById('movimientos-revision'),
-    notaMovimientosEstado: document.getElementById('nota-movimientos-estado'),
+    envioEstado: document.getElementById('envio-estado'),
+    envioResultado: document.getElementById('envio-resultado'),
     botonSincronizarMovimientos: document.getElementById('btn-sincronizar-movimientos'),
 
-    ultimaLectura: document.getElementById('last-update'),
-    ultimaSincronizacion: document.getElementById('last-sync'),
-
-    notaEmbarazo: document.getElementById('nota-embarazo'),
     selectorEmbarazo: document.getElementById('selector-embarazo'),
-    historialLista: document.getElementById('historial-lista'),
-    historialVacio: document.getElementById('historial-vacio')
+    historialLista: document.getElementById('historial-lista')
   };
 
   const VISTAS = ['login', 'inicio', 'historial', 'manual', 'acerca'];
 
   let temporizadorRefresco = null;
 
-  // Episodios que el adaptador entrego en la ultima consulta, y cual se esta
-  // mirando. `seleccionado` siempre es un id que vino de `/adaptador/embarazos`:
-  // no se construye a partir de nada escrito en la pagina.
+  // Episodios que el adaptador entrego en la ultima consulta. Todo
+  // identificador que se usa despues sale de aqui: no se construye a partir
+  // de nada escrito en la pagina.
   let episodios = null;
-  let seleccionado = null;
+
+  // Contexto de Inicio: el embarazo en curso, o ninguno si no existe o es
+  // ambiguo. Es tambien el destino del registro de movimientos.
+  let idInicio = null;
+
+  // Contexto de Historial: la seleccion propia de esa vista.
+  let idHistorial = null;
+
+  // Turnos. Cada peticion anota el turno vigente de su contexto y, al volver,
+  // solo se pinta si sigue siendo el vigente. Cerrar sesion avanza todos.
+  const turnos = { clinico: 0, inicio: 0, historial: 0, envios: 0 };
+
+  function avanzarTurno(contexto) {
+    turnos[contexto] += 1;
+    return turnos[contexto];
+  }
+
+  function esVigente(contexto, turno) {
+    return turnos[contexto] === turno;
+  }
+
+  function invalidarTodosLosTurnos() {
+    Object.keys(turnos).forEach(avanzarTurno);
+  }
 
   // =======================================================================
   // Utilidades de presentacion
@@ -211,9 +254,29 @@
     return String(valor);
   }
 
+  function ausente(valor) {
+    return valor === null || valor === undefined || valor === '';
+  }
+
+  /**
+   * Un valor biométrico tal como llega, sin los ceros decimales de relleno.
+   *
+   * La API entrega NUMERIC(5,2) como texto: «86.00». Se recorta como texto
+   * --«86.00» a «86», «97.50» se queda igual-- sin convertirlo en número, así
+   * que una ausencia nunca puede acabar como cero.
+   */
+  function medida(valor) {
+    return ausente(valor) ? SIN_DATO : String(valor).replace(/\.0+$/, '');
+  }
+
+  /** Valor con su unidad, o el marcador de ausencia sin unidad. */
+  function conUnidad(valor, unidad) {
+    return ausente(valor) ? SIN_DATO : medida(valor) + ' ' + unidad;
+  }
+
   /** Fecha y hora legibles, o el marcador de ausencia. */
   function fechaLegible(valorIso) {
-    if (valorIso === null || valorIso === undefined || valorIso === '') {
+    if (ausente(valorIso)) {
       return SIN_DATO;
     }
     const momento = new Date(valorIso);
@@ -225,7 +288,7 @@
 
   /** Solo la fecha, para etiquetas donde la hora no aporta. */
   function fechaCortaLegible(valorIso) {
-    if (valorIso === null || valorIso === undefined || valorIso === '') {
+    if (ausente(valorIso)) {
       return SIN_DATO;
     }
     const momento = new Date(valorIso);
@@ -233,6 +296,20 @@
       return SIN_DATO;
     }
     return momento.toLocaleDateString();
+  }
+
+  function estadoLegible(estado) {
+    return ESTADOS_DE_EMBARAZO[estado] || texto(estado, NO_DISPONIBLE);
+  }
+
+  /** Un conteo del adaptador, o nada si no llego como numero. */
+  function conteo(valor) {
+    return typeof valor === 'number' ? valor : 0;
+  }
+
+  /** La frase en singular o en plural; `{n}` se sustituye por la cantidad. */
+  function segun(cantidad, singular, plural) {
+    return (cantidad === 1 ? singular : plural).replace('{n}', String(cantidad));
   }
 
   /**
@@ -272,6 +349,11 @@
     ui.mensajeLogin.hidden = false;
   }
 
+  function mostrarNota(elemento, mensaje) {
+    elemento.textContent = mensaje || '';
+    elemento.hidden = !mensaje;
+  }
+
   // =======================================================================
   // Navegacion entre vistas
   // =======================================================================
@@ -299,15 +381,19 @@
   /** La aplicacion con sesion iniciada. */
   function mostrarPortal() {
     ui.menu.hidden = false;
+    ui.areaCuenta.hidden = false;
     document.getElementById('vista-login').hidden = true;
     mostrarVista('inicio');
     iniciarRefrescoPeriodico();
   }
 
-  /** La pantalla de inicio de sesion, con todo lo demas oculto. */
+  /** La pantalla de inicio de sesion, con todo lo privado oculto. */
   function mostrarLogin() {
     detenerRefrescoPeriodico();
+    invalidarTodosLosTurnos();
+    cerrarDialogoDeCierre();
     ui.menu.hidden = true;
+    ui.areaCuenta.hidden = true;
     VISTAS.forEach(function (vista) {
       const seccion = document.getElementById('vista-' + vista);
       if (seccion) {
@@ -321,59 +407,39 @@
    * Devuelve el panel a su estado neutro.
    *
    * Se llama al cerrar sesion, para que ningun dato de una sesion quede
-   * visible en la siguiente.
+   * visible en la siguiente. Solo limpia lo que se ve: los registros
+   * guardados en el dispositivo no se tocan.
    */
   function limpiarPanel() {
     ui.saludo.textContent = 'Bienvenida';
 
     ui.embarazoEstado.textContent = NO_DISPONIBLE;
+    ui.embarazoInicio.textContent = NO_DISPONIBLE;
     ui.embarazoSemana.textContent = NO_DISPONIBLE;
     ui.embarazoAnteriores.textContent = NO_DISPONIBLE;
+    mostrarNota(ui.notaEmbarazo, null);
+    ui.botonVerAnteriores.hidden = true;
 
-    ui.hrValor.textContent = SIN_DATO;
-    ui.spo2Valor.textContent = SIN_DATO;
-    ui.movValor.textContent = SIN_DATO;
-    ui.hrEstado.textContent = 'Sin lectura';
-    ui.spo2Estado.textContent = 'Sin lectura';
-    ui.movEstado.textContent = 'Sin lectura';
-
+    limpiarMetricas();
     pintarSemaforo(null, null);
 
-    ui.outboxPendientes.textContent = SIN_DATO;
-    ui.outboxEnviados.textContent = SIN_DATO;
-    ui.outboxReintentables.textContent = SIN_DATO;
-    ui.outboxRevision.textContent = SIN_DATO;
-    ui.notaEstadoLocal.hidden = true;
-
-    ui.movPendientes.textContent = SIN_DATO;
-    ui.movEnviados.textContent = SIN_DATO;
-    ui.movReintentables.textContent = SIN_DATO;
-    ui.movRevision.textContent = SIN_DATO;
-    ui.notaMovimientosEstado.hidden = true;
-    ui.botonRegistrarMovimiento.disabled = true;
-    ui.notaMovimientos.textContent =
-      'Selecciona un embarazo en «Mi historial» para registrar una sesión simulada.';
-
-    ui.ultimaLectura.textContent = SIN_DATO;
-    ui.ultimaSincronizacion.textContent = SIN_DATO;
+    mostrarNota(ui.envioEstado, null);
+    mostrarNota(ui.envioResultado, null);
+    ui.botonSincronizarMovimientos.hidden = true;
 
     // Nada de un episodio puede sobrevivir a un cierre de sesión.
     episodios = null;
-    seleccionado = null;
-    if (ui.selectorEmbarazo) {
-      ui.selectorEmbarazo.innerHTML = '';
-      const vacio = document.createElement('option');
-      vacio.value = '';
-      vacio.textContent = NO_DISPONIBLE;
-      ui.selectorEmbarazo.appendChild(vacio);
-      ui.selectorEmbarazo.disabled = true;
-    }
-    if (ui.historialLista) {
-      ui.historialLista.innerHTML = '';
-    }
-    if (ui.notaEmbarazo) {
-      ui.notaEmbarazo.hidden = true;
-    }
+    idInicio = null;
+    idHistorial = null;
+    actualizarBotonDeRegistro();
+
+    ui.selectorEmbarazo.innerHTML = '';
+    const vacio = document.createElement('option');
+    vacio.value = '';
+    vacio.textContent = NO_DISPONIBLE;
+    ui.selectorEmbarazo.appendChild(vacio);
+    ui.selectorEmbarazo.disabled = true;
+    ui.historialLista.innerHTML = '';
   }
 
   // =======================================================================
@@ -479,82 +545,126 @@
     });
   }
 
-  function refrescarEstadoLocal() {
-    return pedir(API.estadoLocal).then(function (resultado) {
-      if (!resultado.ok || !resultado.cuerpo) {
-        ui.notaEstadoLocal.textContent =
-          'No se pudo leer el estado local de este dispositivo.';
-        ui.notaEstadoLocal.hidden = false;
-        return;
-      }
-
-      const estado = resultado.cuerpo;
-
-      if (!estado.inicializado) {
-        ui.outboxPendientes.textContent = SIN_DATO;
-        ui.outboxEnviados.textContent = SIN_DATO;
-        ui.outboxReintentables.textContent = SIN_DATO;
-        ui.outboxRevision.textContent = SIN_DATO;
-        ui.notaEstadoLocal.textContent = texto(
-          estado.detalle,
-          'Estado local no inicializado en este dispositivo.'
-        );
-        ui.notaEstadoLocal.hidden = false;
-        return;
-      }
-
-      // Los conteos son cero legitimos cuando valen cero: `texto()` solo
-      // sustituye la ausencia, nunca el numero.
-      ui.outboxPendientes.textContent = texto(estado.pendientes);
-      ui.outboxEnviados.textContent = texto(estado.enviados);
-      ui.outboxReintentables.textContent = texto(estado.fallidos_reintentables);
-      ui.outboxRevision.textContent = texto(estado.fallidos_en_revision);
-      ui.ultimaSincronizacion.textContent = fechaLegible(estado.ultima_sincronizacion);
-      ui.notaEstadoLocal.hidden = true;
-    });
-  }
+  // =======================================================================
+  // Envio de los registros de movimiento de esta cuenta
+  // =======================================================================
 
   /**
-   * Conteos de la cola de **esta cuenta**, nunca los del nodo compartido.
+   * Resume el estado real de la cola de **esta cuenta** en una frase.
    *
-   * Mismo contrato que `refrescarEstadoLocal`, sobre una ruta distinta: cada
-   * cuenta tiene su propio archivo del lado del adaptador, así que estos
-   * números nunca incluyen lo que otra cuenta haya registrado.
+   * No hay contadores técnicos a la vista: cada frase sale de los conteos que
+   * entrega el adaptador y dice solo lo que esos conteos confirman. El envío
+   * es manual, así que ninguna frase promete que ocurra solo.
+   *
+   * Devuelve la frase y la acción que corresponde ofrecer, o `null` si no
+   * hay nada que enviar.
    */
-  function refrescarMovimientosEstado() {
+  function describirEnvios(estado) {
+    if (!estado.inicializado) {
+      return { mensaje: 'Todavía no has registrado sesiones de movimientos.', accion: null };
+    }
+
+    const pendientes = conteo(estado.pendientes);
+    const reintentables = conteo(estado.fallidos_reintentables);
+    const enRevision = conteo(estado.fallidos_en_revision);
+    const enviados = conteo(estado.enviados);
+
+    const frases = [];
+    let accion = null;
+
+    if (reintentables !== 0) {
+      frases.push(segun(
+        reintentables,
+        'No se pudo enviar un registro; continúa guardado en este dispositivo.',
+        'No se pudieron enviar {n} registros; continúan guardados en este dispositivo.'
+      ));
+      accion = 'Reintentar';
+    }
+    if (pendientes !== 0) {
+      frases.push(segun(
+        pendientes,
+        'Registro guardado, pendiente de envío.',
+        '{n} registros guardados, pendientes de envío.'
+      ));
+      accion = accion || 'Enviar ahora';
+    }
+    if (enRevision !== 0) {
+      frases.push(segun(
+        enRevision,
+        'Un registro no se pudo enviar y requiere revisión del personal; ' +
+          'sigue guardado en este dispositivo.',
+        '{n} registros no se pudieron enviar y requieren revisión del personal; ' +
+          'siguen guardados en este dispositivo.'
+      ));
+    }
+    if (!frases.length) {
+      frases.push(
+        enviados !== 0
+          ? 'Tus registros fueron enviados.'
+          : 'Todavía no has registrado sesiones de movimientos.'
+      );
+    }
+
+    return { mensaje: frases.join(' '), accion: accion };
+  }
+
+  function refrescarEnvios() {
+    const turno = avanzarTurno('envios');
     return pedir(API.movimientosEstado).then(function (resultado) {
+      if (!esVigente('envios', turno)) {
+        return;
+      }
       if (resultado.estado === 401) {
         mostrarLogin();
         return;
       }
       if (!resultado.ok || !resultado.cuerpo) {
-        ui.notaMovimientosEstado.textContent =
-          'No se pudo leer el estado de tus sesiones simuladas.';
-        ui.notaMovimientosEstado.hidden = false;
+        mostrarNota(ui.envioEstado, 'No se pudo consultar el estado de tus registros.');
+        ui.botonSincronizarMovimientos.hidden = true;
         return;
       }
 
-      const estado = resultado.cuerpo;
-
-      if (!estado.inicializado) {
-        ui.movPendientes.textContent = SIN_DATO;
-        ui.movEnviados.textContent = SIN_DATO;
-        ui.movReintentables.textContent = SIN_DATO;
-        ui.movRevision.textContent = SIN_DATO;
-        ui.notaMovimientosEstado.textContent = texto(
-          estado.detalle,
-          'Todavía no has registrado ninguna sesión simulada.'
-        );
-        ui.notaMovimientosEstado.hidden = false;
-        return;
+      const resumen = describirEnvios(resultado.cuerpo);
+      mostrarNota(ui.envioEstado, resumen.mensaje);
+      ui.botonSincronizarMovimientos.hidden = resumen.accion === null;
+      if (resumen.accion !== null) {
+        ui.botonSincronizarMovimientos.textContent = resumen.accion;
       }
-
-      ui.movPendientes.textContent = texto(estado.pendientes);
-      ui.movEnviados.textContent = texto(estado.enviados);
-      ui.movReintentables.textContent = texto(estado.fallidos_reintentables);
-      ui.movRevision.textContent = texto(estado.fallidos_en_revision);
-      ui.notaMovimientosEstado.hidden = true;
     });
+  }
+
+  /**
+   * Una frase fiel al resultado de una ronda de envío.
+   *
+   * Lo que se dice es exactamente lo que la API contestó en esa ronda: si no
+   * se entregó nada, no se dice que se envió.
+   */
+  function describirRonda(r) {
+    const entregados = conteo(r.entregados);
+    const noEnviables = conteo(r.rechazados) + conteo(r.agotados);
+    const reintentables = conteo(r.reintentables);
+    const frases = [];
+
+    if (conteo(r.seleccionados) === 0) {
+      return 'No había registros pendientes de envío.';
+    }
+    if (entregados !== 0) {
+      frases.push(segun(entregados, 'Registro enviado.', '{n} registros enviados.'));
+    }
+    if (reintentables !== 0 || r.detenida_por_transporte) {
+      frases.push('No se pudo enviar; el registro continúa guardado en este dispositivo.');
+    }
+    if (noEnviables !== 0) {
+      frases.push(segun(
+        noEnviables,
+        'Un registro requiere revisión del personal.',
+        '{n} registros requieren revisión del personal.'
+      ));
+    }
+    if (r.detenida_por_credencial) {
+      frases.push('Para enviar hace falta iniciar sesión de nuevo con conexión.');
+    }
+    return frases.join(' ') || 'No se envió ningún registro.';
   }
 
   // =======================================================================
@@ -564,51 +674,80 @@
   /** Descripción legible de un episodio para el selector. */
   function etiquetaDeEpisodio(episodio) {
     const desde = fechaCortaLegible(episodio.fecha_inicio);
-    const estado = texto(episodio.estado_embarazo, NO_DISPONIBLE);
-    return 'Embarazo desde ' + desde + ' — ' + estado;
+    return 'Embarazo desde ' + desde + ' — ' + estadoLegible(episodio.estado_embarazo);
+  }
+
+  function episodioPorId(id) {
+    const todos = (episodios && episodios.todos) || [];
+    for (let i = 0; i !== todos.length; i += 1) {
+      if (todos[i].id_embarazo === id) {
+        return todos[i];
+      }
+    }
+    return null;
   }
 
   /**
-   * Pinta la tarjeta del embarazo y prepara el selector.
+   * Pinta la tarjeta del embarazo de Inicio y fija su contexto.
    *
-   * Cuando el adaptador informa ambigüedad **no se llama «actual» a ninguno**.
-   * La paciente puede consultar cualquiera de sus episodios, pero la interfaz
-   * no afirma cuál está en curso, porque el dato no permite decidirlo.
+   * Cuando el adaptador informa ambigüedad **no se llama «actual» a ninguno**
+   * y Inicio no muestra lecturas: la paciente puede consultar cualquiera de
+   * sus episodios en «Mi historial», pero la interfaz no afirma cuál está en
+   * curso, porque el dato no permite decidirlo.
    */
   function pintarEpisodios(datos) {
     episodios = datos;
 
     const todos = datos.todos || [];
     const anteriores = datos.anteriores || [];
+    let nota = null;
 
     if (datos.ambiguo) {
+      idInicio = null;
       ui.embarazoEstado.textContent = 'Sin determinar';
-      ui.embarazoAnteriores.textContent = String(todos.length);
-      ui.notaEmbarazo.textContent =
+      ui.embarazoInicio.textContent = NO_DISPONIBLE;
+      ui.embarazoAnteriores.textContent = NO_DISPONIBLE;
+      nota =
         'No se pudo determinar automáticamente cuál es tu embarazo en curso. ' +
-        'Selecciona un episodio en «Mi historial» para consultar su información.';
-      ui.notaEmbarazo.hidden = false;
+        'Puedes consultar cada uno en «Mi historial».';
     } else if (datos.actual) {
-      ui.embarazoEstado.textContent = texto(datos.actual.estado_embarazo, NO_DISPONIBLE);
+      idInicio = datos.actual.id_embarazo;
+      ui.embarazoEstado.textContent = estadoLegible(datos.actual.estado_embarazo);
+      ui.embarazoInicio.textContent = fechaCortaLegible(datos.actual.fecha_inicio);
       ui.embarazoAnteriores.textContent = String(anteriores.length);
-      ui.notaEmbarazo.hidden = true;
     } else if (todos.length) {
+      idInicio = null;
       ui.embarazoEstado.textContent = 'Sin embarazo en curso';
+      ui.embarazoInicio.textContent = NO_DISPONIBLE;
       ui.embarazoAnteriores.textContent = String(anteriores.length);
-      ui.notaEmbarazo.textContent =
-        'No tienes un embarazo en curso registrado. Puedes consultar tus ' +
-        'episodios anteriores en «Mi historial».';
-      ui.notaEmbarazo.hidden = false;
+      nota = 'No tienes un embarazo en curso registrado.';
     } else {
+      idInicio = null;
       ui.embarazoEstado.textContent = NO_DISPONIBLE;
+      ui.embarazoInicio.textContent = NO_DISPONIBLE;
       ui.embarazoAnteriores.textContent = '0';
-      ui.notaEmbarazo.textContent = 'Todavía no hay episodios registrados.';
-      ui.notaEmbarazo.hidden = false;
+      nota = 'Todavía no hay episodios registrados.';
     }
 
+    mostrarNota(ui.notaEmbarazo, nota);
+
+    // El enlace lleva a los episodios que no son el de Inicio.
+    const hayOtros = datos.ambiguo ? todos.length !== 0 : anteriores.length !== 0;
+    ui.botonVerAnteriores.hidden = !hayOtros;
+    ui.botonVerAnteriores.textContent = datos.ambiguo
+      ? 'Ver mis embarazos en «Mi historial»'
+      : 'Ver embarazos anteriores en «Mi historial»';
+
     llenarSelector(todos, datos.actual);
+    actualizarBotonDeRegistro();
   }
 
+  /**
+   * Prepara el selector de Historial sin tocar Inicio.
+   *
+   * Conserva la selección de la paciente mientras ese episodio siga en la
+   * lista; si no, propone el actual o, sin actual, el más reciente.
+   */
   function llenarSelector(todos, actual) {
     const selector = ui.selectorEmbarazo;
     selector.innerHTML = '';
@@ -619,8 +758,7 @@
       vacio.textContent = NO_DISPONIBLE;
       selector.appendChild(vacio);
       selector.disabled = true;
-      seleccionado = null;
-      actualizarBotonDeRegistro();
+      idHistorial = null;
       return;
     }
 
@@ -632,24 +770,21 @@
     });
     selector.disabled = false;
 
-    // Se preselecciona el actual sólo cuando existe uno sin ambigüedad.
-    const inicial = actual ? actual.id_embarazo : todos[0].id_embarazo;
-    seleccionado = inicial;
-    selector.value = String(inicial);
-    actualizarBotonDeRegistro();
+    if (idHistorial === null || episodioPorId(idHistorial) === null) {
+      idHistorial = actual ? actual.id_embarazo : todos[0].id_embarazo;
+    }
+    selector.value = String(idHistorial);
   }
 
   /**
-   * Habilita el registro de una sesión simulada sólo cuando hay un embarazo
-   * elegido. Sin un `seleccionado` que venga de `/adaptador/embarazos`, el
-   * botón no tiene contra qué episodio registrar nada.
+   * El registro va siempre al embarazo de Inicio. Sin un embarazo en curso
+   * que venga de `/adaptador/embarazos`, el botón no tiene contra qué
+   * episodio registrar nada. La selección de Historial no cuenta.
    */
   function actualizarBotonDeRegistro() {
-    ui.botonRegistrarMovimiento.disabled = seleccionado === null;
+    ui.botonRegistrarMovimiento.disabled = idInicio === null;
     ui.notaMovimientos.textContent =
-      seleccionado === null
-        ? 'Selecciona un embarazo en «Mi historial» para registrar una sesión simulada.'
-        : 'Se registrará como una sesión de movimiento simulada, no como un dato real.';
+      idInicio === null ? TEXTO_SIN_EMBARAZO_EN_CURSO : TEXTO_LISTO_PARA_REGISTRAR;
   }
 
   /** Estado neutro de todo lo clínico, con el aviso que corresponda. */
@@ -657,10 +792,11 @@
     const aviso = avisoDe(clasificacion);
 
     ui.embarazoEstado.textContent = NO_DISPONIBLE;
+    ui.embarazoInicio.textContent = NO_DISPONIBLE;
     ui.embarazoSemana.textContent = NO_DISPONIBLE;
     ui.embarazoAnteriores.textContent = NO_DISPONIBLE;
-    ui.notaEmbarazo.textContent = aviso;
-    ui.notaEmbarazo.hidden = false;
+    mostrarNota(ui.notaEmbarazo, aviso);
+    ui.botonVerAnteriores.hidden = true;
 
     limpiarMetricas();
     pintarSemaforo(null, null);
@@ -668,7 +804,7 @@
     ui.selectorEmbarazo.disabled = true;
     // Sin lectura clínica confirmada no hay un embarazo autorizado contra el
     // cual registrar nada.
-    seleccionado = null;
+    idInicio = null;
     actualizarBotonDeRegistro();
     mostrarHistorialVacio(aviso);
   }
@@ -681,6 +817,11 @@
     ui.spo2Estado.textContent = 'Sin lectura';
     ui.movEstado.textContent = 'Sin lectura';
     ui.ultimaLectura.textContent = SIN_DATO;
+    ui.embarazoSemana.textContent = NO_DISPONIBLE;
+  }
+
+  function estadoDeMetrica(valor) {
+    return ausente(valor) ? 'No medido en esta lectura' : 'Medido en esta lectura';
   }
 
   /**
@@ -697,26 +838,16 @@
     if (!lectura) {
       limpiarMetricas();
       pintarSemaforo(null, null);
-      ui.embarazoSemana.textContent = NO_DISPONIBLE;
       return;
     }
 
-    ui.hrValor.textContent = texto(lectura.hr_valor);
-    ui.spo2Valor.textContent = texto(lectura.spo2_valor);
+    ui.hrValor.textContent = medida(lectura.hr_valor);
+    ui.spo2Valor.textContent = medida(lectura.spo2_valor);
     ui.movValor.textContent = texto(lectura.mov_valor);
 
-    ui.hrEstado.textContent =
-      lectura.hr_valor === null || lectura.hr_valor === undefined
-        ? 'No medido en esta lectura'
-        : 'Última lectura registrada';
-    ui.spo2Estado.textContent =
-      lectura.spo2_valor === null || lectura.spo2_valor === undefined
-        ? 'No medido en esta lectura'
-        : 'Última lectura registrada';
-    ui.movEstado.textContent =
-      lectura.mov_valor === null || lectura.mov_valor === undefined
-        ? 'No medido en esta lectura'
-        : 'Última lectura registrada';
+    ui.hrEstado.textContent = estadoDeMetrica(lectura.hr_valor);
+    ui.spo2Estado.textContent = estadoDeMetrica(lectura.spo2_valor);
+    ui.movEstado.textContent = estadoDeMetrica(lectura.mov_valor);
 
     ui.embarazoSemana.textContent = texto(lectura.semana_gestacion, NO_DISPONIBLE);
     ui.ultimaLectura.textContent = fechaLegible(lectura.fecha_hora_captura);
@@ -728,7 +859,7 @@
 
   /** Texto acompañante del nivel. No es una interpretación clínica. */
   function mensajeDeSemaforo(codigo) {
-    if (codigo === 'OK') return 'Dentro de lo esperado para el seguimiento simulado';
+    if (codigo === 'OK') return 'Dentro de lo esperado';
     if (codigo === 'WARNING') return 'Conviene repetir la medición';
     if (codigo === 'ERROR') return 'Comunícate con tu personal de seguimiento';
     return null;
@@ -738,92 +869,207 @@
     ui.historialLista.innerHTML = '';
     const tarjeta = document.createElement('div');
     tarjeta.className = 'result-card estado-vacio';
-    const titulo = document.createElement('h3');
-    titulo.className = 'subtitulo';
-    titulo.textContent = 'Sin información que mostrar';
     const parrafo = document.createElement('p');
     parrafo.className = 'texto-apoyo';
     parrafo.textContent = mensaje;
-    tarjeta.appendChild(titulo);
     tarjeta.appendChild(parrafo);
     ui.historialLista.appendChild(tarjeta);
   }
 
-  /** Construye una fila etiqueta/valor reutilizando el estilo existente. */
-  function filaDeDatos(etiqueta, valor) {
-    const fila = document.createElement('div');
-    fila.className = 'data-row';
-    const izquierda = document.createElement('span');
-    izquierda.className = 'label';
-    izquierda.textContent = etiqueta;
-    const derecha = document.createElement('span');
-    derecha.className = 'value';
-    derecha.textContent = valor;
-    fila.appendChild(izquierda);
-    fila.appendChild(derecha);
-    return fila;
+  function instante(valorIso) {
+    const momento = new Date(valorIso).getTime();
+    return Number.isNaN(momento) ? 0 : momento;
   }
 
   /**
-   * Pinta las sesiones de **un** episodio.
+   * Orden del historial: la más reciente primero, por (fecha_hora_captura,
+   * id_lectura). Es la misma regla con la que el servidor elige la última
+   * lectura, así que la primera fila coincide con la de Inicio.
+   */
+  function masRecientePrimero(a, b) {
+    return (
+      instante(b.fecha_hora_captura) - instante(a.fecha_hora_captura) ||
+      b.id_lectura - a.id_lectura
+    );
+  }
+
+  function celda(fila, etiqueta, contenido) {
+    const td = document.createElement('td');
+    td.setAttribute('data-etiqueta', etiqueta);
+    if (typeof contenido === 'string') {
+      td.textContent = contenido;
+    } else {
+      td.appendChild(contenido);
+    }
+    fila.appendChild(td);
+  }
+
+  function marcaDeSemaforo(codigo) {
+    const marca = document.createElement('span');
+    marca.className = 'semaforo-item ' + (CLASES_DE_SEMAFORO[codigo] || '');
+    const luz = document.createElement('span');
+    luz.className = 'alert-light';
+    const nombre = document.createElement('span');
+    nombre.textContent = ETIQUETAS_DE_SEMAFORO[codigo] || SIN_DATO;
+    marca.appendChild(luz);
+    marca.appendChild(nombre);
+    return marca;
+  }
+
+  /**
+   * Pinta todas las lecturas de **un** episodio en una tabla sencilla.
    *
    * Se vacía la lista antes de construirla, de modo que cambiar de episodio no
-   * pueda dejar visible ni una fila del anterior.
+   * pueda dejar visible ni una fila del anterior. Se listan todas las
+   * lecturas, también cuando la última del episodio solo midió movimientos.
    */
   function pintarHistorial(datos) {
     ui.historialLista.innerHTML = '';
 
     const sesiones = datos.sesiones || [];
-    if (!sesiones.length) {
-      mostrarHistorialVacio(
-        'Este episodio todavía no tiene sesiones de monitoreo registradas.'
-      );
+    const lecturas = [];
+    sesiones.forEach(function (sesion) {
+      (sesion.lecturas || []).forEach(function (lectura) {
+        lecturas.push(lectura);
+      });
+    });
+
+    if (!lecturas.length) {
+      mostrarHistorialVacio('Este embarazo todavía no tiene lecturas registradas.');
       return;
     }
+    lecturas.sort(masRecientePrimero);
 
-    sesiones.forEach(function (sesion) {
-      const tarjeta = document.createElement('div');
-      tarjeta.className = 'result-card';
+    const tarjeta = document.createElement('div');
+    tarjeta.className = 'result-card historial-tarjeta';
 
-      const titulo = document.createElement('h3');
-      titulo.className = 'subtitulo';
-      titulo.textContent = texto(sesion.tipo_sesion, NO_DISPONIBLE);
-      tarjeta.appendChild(titulo);
+    const episodio = episodioPorId(datos.id_embarazo);
+    const titulo = document.createElement('h3');
+    titulo.className = 'subtitulo';
+    titulo.textContent = episodio ? etiquetaDeEpisodio(episodio) : 'Embarazo';
+    tarjeta.appendChild(titulo);
 
-      tarjeta.appendChild(filaDeDatos('Estado:', texto(sesion.estado_sesion, NO_DISPONIBLE)));
-      tarjeta.appendChild(filaDeDatos('Inicio:', fechaLegible(sesion.fecha_inicio)));
-      tarjeta.appendChild(filaDeDatos('Fin:', fechaLegible(sesion.fecha_fin)));
+    const resumen = document.createElement('p');
+    resumen.className = 'texto-apoyo';
+    resumen.textContent =
+      (lecturas.length === 1 ? '1 lectura' : lecturas.length + ' lecturas') +
+      ', de la más reciente a la más antigua. «—» indica un valor no medido.';
+    tarjeta.appendChild(resumen);
 
-      const lecturas = sesion.lecturas || [];
-      if (!lecturas.length) {
-        tarjeta.appendChild(filaDeDatos('Lecturas:', 'Sin lecturas registradas'));
-      } else {
-        lecturas.forEach(function (lectura) {
-          const bloque = document.createElement('div');
-          bloque.className = 'semaforo-item ' +
-            (CLASES_DE_SEMAFORO[lectura.codigo_semaforo] || '');
-          const luz = document.createElement('span');
-          luz.className = 'alert-light';
-          const detalle = document.createElement('span');
-          detalle.textContent =
-            fechaLegible(lectura.fecha_hora_captura) +
-            ' · semana ' + texto(lectura.semana_gestacion) +
-            ' · FC ' + texto(lectura.hr_valor) +
-            ' · SpO₂ ' + texto(lectura.spo2_valor) +
-            ' · mov. ' + texto(lectura.mov_valor);
-          bloque.appendChild(luz);
-          bloque.appendChild(detalle);
-          tarjeta.appendChild(bloque);
-        });
+    const tabla = document.createElement('table');
+    tabla.className = 'tabla-lecturas';
+    const cabecera = document.createElement('thead');
+    const filaCabecera = document.createElement('tr');
+    ['Fecha', 'Frecuencia cardíaca', 'Saturación', 'Movimientos', 'Semana', 'Semáforo']
+      .forEach(function (nombre) {
+        const th = document.createElement('th');
+        th.setAttribute('scope', 'col');
+        th.textContent = nombre;
+        filaCabecera.appendChild(th);
+      });
+    cabecera.appendChild(filaCabecera);
+    tabla.appendChild(cabecera);
+
+    const cuerpo = document.createElement('tbody');
+    lecturas.forEach(function (lectura) {
+      const fila = document.createElement('tr');
+      celda(fila, 'Fecha', fechaLegible(lectura.fecha_hora_captura));
+      celda(fila, 'Frecuencia cardíaca', conUnidad(lectura.hr_valor, 'BPM'));
+      celda(fila, 'Saturación', conUnidad(lectura.spo2_valor, '%'));
+      celda(fila, 'Movimientos', texto(lectura.mov_valor));
+      celda(fila, 'Semana', texto(lectura.semana_gestacion));
+      celda(fila, 'Semáforo', marcaDeSemaforo(lectura.codigo_semaforo));
+      cuerpo.appendChild(fila);
+    });
+    tabla.appendChild(cuerpo);
+
+    const contenedor = document.createElement('div');
+    contenedor.className = 'tabla-contenedor';
+    contenedor.appendChild(tabla);
+    tarjeta.appendChild(contenedor);
+
+    ui.historialLista.appendChild(tarjeta);
+  }
+
+  /**
+   * Pide el monitoreo de un episodio. Dentro de una misma ronda de refresco,
+   * Inicio e Historial comparten la petición si miran el mismo episodio.
+   */
+  function pedirMonitoreo(idEmbarazo, compartidas) {
+    if (compartidas && compartidas[idEmbarazo]) {
+      return compartidas[idEmbarazo];
+    }
+    const promesa = pedir(API.monitoreo(idEmbarazo)).then(clasificar);
+    if (compartidas) {
+      compartidas[idEmbarazo] = promesa;
+    }
+    return promesa;
+  }
+
+  /** Contexto de Inicio: la última lectura del embarazo en curso. */
+  function cargarInicio(compartidas) {
+    const turno = avanzarTurno('inicio');
+    const destino = idInicio;
+
+    if (destino === null) {
+      pintarUltimaLectura(null);
+      return Promise.resolve();
+    }
+
+    return pedirMonitoreo(destino, compartidas).then(function (clasificacion) {
+      if (!esVigente('inicio', turno)) {
+        return;
       }
-
-      ui.historialLista.appendChild(tarjeta);
+      if (clasificacion.clase === CLASE.SESION_LOCAL_INVALIDA) {
+        mostrarLogin();
+        return;
+      }
+      if (clasificacion.clase !== CLASE.DATOS) {
+        // Un 403, un 404 o un fallo del servidor dejan el portal abierto: sólo
+        // se vacía lo clínico y se explica por qué.
+        limpiarMetricas();
+        pintarSemaforo(null, null);
+        mostrarNota(ui.notaEmbarazo, avisoDe(clasificacion));
+        return;
+      }
+      pintarUltimaLectura(clasificacion.datos.ultima_lectura);
     });
   }
 
-  /** Pide los episodios y, si hay uno seleccionable, su monitoreo. */
+  /** Contexto de Historial: todas las lecturas del episodio elegido allí. */
+  function cargarHistorial(compartidas) {
+    const turno = avanzarTurno('historial');
+    const destino = idHistorial;
+
+    if (destino === null) {
+      mostrarHistorialVacio('Todavía no hay episodios registrados.');
+      return Promise.resolve();
+    }
+
+    return pedirMonitoreo(destino, compartidas).then(function (clasificacion) {
+      // Una respuesta de una selección ya superada no pisa la vigente.
+      if (!esVigente('historial', turno) || destino !== idHistorial) {
+        return;
+      }
+      if (clasificacion.clase === CLASE.SESION_LOCAL_INVALIDA) {
+        mostrarLogin();
+        return;
+      }
+      if (clasificacion.clase !== CLASE.DATOS) {
+        mostrarHistorialVacio(avisoDe(clasificacion));
+        return;
+      }
+      pintarHistorial(clasificacion.datos);
+    });
+  }
+
+  /** Pide los episodios y, con ellos, cada contexto por separado. */
   function cargarClinico() {
+    const turno = avanzarTurno('clinico');
     return pedir(API.embarazos).then(function (resultado) {
+      if (!esVigente('clinico', turno)) {
+        return;
+      }
       const clasificacion = clasificar(resultado);
 
       if (clasificacion.clase === CLASE.SESION_LOCAL_INVALIDA) {
@@ -838,51 +1084,21 @@
 
       pintarEpisodios(clasificacion.datos);
 
-      if (seleccionado === null) {
-        pintarUltimaLectura(null);
-        mostrarHistorialVacio('Todavía no hay episodios registrados.');
-        return;
-      }
-      return cargarMonitoreo(seleccionado);
-    });
-  }
-
-  /** Pide sesiones y lecturas de un episodio concreto. */
-  function cargarMonitoreo(idEmbarazo) {
-    return pedir(API.monitoreo(idEmbarazo)).then(function (resultado) {
-      const clasificacion = clasificar(resultado);
-
-      if (clasificacion.clase === CLASE.SESION_LOCAL_INVALIDA) {
-        mostrarLogin();
-        return;
-      }
-
-      if (clasificacion.clase !== CLASE.DATOS) {
-        // Un 403, un 404 o un fallo del servidor dejan el portal abierto: sólo
-        // se vacía lo clínico y se explica por qué.
-        limpiarMetricas();
-        pintarSemaforo(null, null);
-        mostrarHistorialVacio(avisoDe(clasificacion));
-        return;
-      }
-
-      pintarUltimaLectura(clasificacion.datos.ultima_lectura);
-      pintarHistorial(clasificacion.datos);
+      const compartidas = {};
+      return Promise.all([cargarInicio(compartidas), cargarHistorial(compartidas)]);
     });
   }
 
   function refrescar() {
     return Promise.all([
       refrescarConectividad(),
-      refrescarEstadoLocal(),
-      refrescarMovimientosEstado(),
+      refrescarEnvios(),
       cargarClinico()
     ]);
   }
 
   function iniciarRefrescoPeriodico() {
     detenerRefrescoPeriodico();
-    refrescar();
     temporizadorRefresco = window.setInterval(refrescar, INTERVALO_REFRESCO_MS);
   }
 
@@ -950,24 +1166,24 @@
   }
 
   /**
-   * Registra una sesión de movimiento simulada para el embarazo elegido.
+   * Registra una sesión de movimiento simulada para el embarazo de Inicio.
    *
-   * `seleccionado` sólo puede ser un id que ya vino de `/adaptador/embarazos`
-   * -- ver `llenarSelector` --, así que esta función nunca fabrica ni adivina
-   * un identificador. El adaptador vuelve a comprobar del lado del servidor
-   * que ese embarazo es de esta cuenta antes de guardar nada: esta función no
-   * sustituye esa comprobación, sólo evita una petición que ya se sabe sin
-   * sentido cuando no hay ningún embarazo elegido.
+   * `idInicio` sólo puede ser el embarazo en curso que vino de
+   * `/adaptador/embarazos`, así que esta función nunca fabrica ni adivina un
+   * identificador, y la selección de «Mi historial» no la desvía. El
+   * adaptador vuelve a comprobar del lado del servidor que ese embarazo es
+   * de esta cuenta antes de guardar nada.
    */
   function manejarRegistrarMovimiento() {
-    if (seleccionado === null) {
+    if (idInicio === null) {
       return;
     }
+    const destino = idInicio;
 
     ui.botonRegistrarMovimiento.disabled = true;
-    ui.notaMovimientos.textContent = 'Registrando sesión simulada…';
+    ui.notaMovimientos.textContent = 'Guardando…';
 
-    pedir(API.sesionesSimuladas(seleccionado), {
+    pedir(API.sesionesSimuladas(destino), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({ tipo_sesion: TIPO_SESION_SIMULADA })
@@ -977,6 +1193,8 @@
           mostrarLogin();
           return;
         }
+
+        actualizarBotonDeRegistro();
 
         if (resultado.estado === 200 && resultado.cuerpo && resultado.cuerpo.disponible === false) {
           ui.notaMovimientos.textContent = avisoDe({
@@ -988,9 +1206,9 @@
 
         if (resultado.ok && resultado.cuerpo && resultado.cuerpo.registrado) {
           ui.notaMovimientos.textContent =
-            'Sesión simulada registrada en este dispositivo. Queda pendiente ' +
-            'hasta que la sincronices.';
-          refrescarMovimientosEstado();
+            'Registro guardado en este dispositivo, pendiente de envío.';
+          mostrarNota(ui.envioResultado, null);
+          refrescarEnvios();
           return;
         }
 
@@ -999,26 +1217,23 @@
         // fuera del catálogo, un episodio que no es suyo. Mostrarlo es más
         // útil que un texto genérico, y no expone nada: esos mensajes los
         // redacta este proyecto, no el servidor central.
-        const detalle =
+        ui.notaMovimientos.textContent =
           resultado.cuerpo && typeof resultado.cuerpo.detail === 'string'
             ? resultado.cuerpo.detail
-            : 'No se pudo registrar la sesión simulada. Inténtalo de nuevo más tarde.';
-        ui.notaMovimientos.textContent = detalle;
-      })
-      .finally(function () {
-        actualizarBotonDeRegistro();
+            : 'No se pudo guardar el registro. Inténtalo de nuevo más tarde.';
       });
   }
 
   /**
-   * Sincroniza ahora la cola de **esta cuenta**. Una sola ronda real contra
-   * el servidor central: lo que responde este botón es exactamente lo que la
-   * API contestó, nunca un resultado inventado por esta pantalla.
+   * Envía ahora la cola de **esta cuenta**. Una sola ronda real contra el
+   * servidor central: lo que se muestra es exactamente lo que la API
+   * contestó, nunca un resultado inventado por esta pantalla.
    */
   function manejarSincronizarMovimientos() {
+    const etiqueta = ui.botonSincronizarMovimientos.textContent;
     ui.botonSincronizarMovimientos.disabled = true;
-    ui.notaMovimientosEstado.textContent = 'Sincronizando…';
-    ui.notaMovimientosEstado.hidden = false;
+    ui.botonSincronizarMovimientos.textContent = 'Enviando…';
+    mostrarNota(ui.envioResultado, null);
 
     pedir(API.movimientosSincronizar, { method: 'POST' })
       .then(function (resultado) {
@@ -1028,38 +1243,80 @@
         }
 
         if (resultado.estado === 200 && resultado.cuerpo && resultado.cuerpo.disponible === false) {
-          ui.notaMovimientosEstado.textContent = avisoDe({
-            clase: CLASE.NO_DISPONIBLE,
-            motivo: resultado.cuerpo.motivo
-          });
-          ui.notaMovimientosEstado.hidden = false;
-          return refrescarMovimientosEstado();
+          mostrarNota(
+            ui.envioResultado,
+            'No se pudo enviar; tus registros continúan guardados en este dispositivo. ' +
+              avisoDe({ clase: CLASE.NO_DISPONIBLE, motivo: resultado.cuerpo.motivo })
+          );
+          return refrescarEnvios();
         }
 
         if (!resultado.ok || !resultado.cuerpo) {
-          ui.notaMovimientosEstado.textContent =
-            'No se pudo sincronizar. Inténtalo de nuevo más tarde.';
-          ui.notaMovimientosEstado.hidden = false;
-          return refrescarMovimientosEstado();
+          mostrarNota(
+            ui.envioResultado,
+            'No se pudo enviar; tus registros continúan guardados en este dispositivo.'
+          );
+          return refrescarEnvios();
         }
 
-        const r = resultado.cuerpo;
-        ui.notaMovimientosEstado.textContent =
-          'Sincronización: ' + texto(r.entregados, '0') + ' entregada(s), ' +
-          texto(r.rechazados, '0') + ' rechazada(s), ' +
-          texto(r.reintentables, '0') + ' pendiente(s) de reintento.';
-        ui.notaMovimientosEstado.hidden = false;
-        return refrescarMovimientosEstado();
+        mostrarNota(ui.envioResultado, describirRonda(resultado.cuerpo));
+        const recargas = [refrescarEnvios()];
+        if (conteo(resultado.cuerpo.entregados) !== 0) {
+          // Lo entregado ya es parte del embarazo en el servidor central.
+          recargas.push(cargarClinico());
+        }
+        return Promise.all(recargas);
       })
       .finally(function () {
         ui.botonSincronizarMovimientos.disabled = false;
+        if (ui.botonSincronizarMovimientos.textContent === 'Enviando…') {
+          ui.botonSincronizarMovimientos.textContent = etiqueta;
+        }
       });
   }
 
-  function manejarLogout(evento) {
+  // -- Confirmación de cierre ----------------------------------------------
+
+  function abrirDialogoDeCierre(evento) {
     if (evento) {
       evento.preventDefault();
     }
+    ui.botonConfirmarCierre.disabled = false;
+    if (typeof ui.dialogoCierre.showModal === 'function') {
+      ui.dialogoCierre.showModal();
+    } else {
+      ui.dialogoCierre.setAttribute('open', '');
+    }
+    ui.botonCancelarCierre.focus();
+  }
+
+  function cerrarDialogoDeCierre() {
+    if (!ui.dialogoCierre.hasAttribute('open')) {
+      return;
+    }
+    if (typeof ui.dialogoCierre.close === 'function') {
+      ui.dialogoCierre.close();
+    } else {
+      ui.dialogoCierre.removeAttribute('open');
+    }
+  }
+
+  /** Cancelar: la sesión sigue exactamente como estaba. */
+  function cancelarCierre() {
+    cerrarDialogoDeCierre();
+    ui.botonCerrarSesion.focus();
+  }
+
+  /**
+   * Confirmar: se detiene todo lo que pudiera repintar datos, se invalida la
+   * sesión en el adaptador y se vuelve al login con el panel limpio. Los
+   * registros guardados en el dispositivo no se tocan.
+   */
+  function manejarLogout() {
+    ui.botonConfirmarCierre.disabled = true;
+    detenerRefrescoPeriodico();
+    invalidarTodosLosTurnos();
+
     pedir(API.cerrarSesion, { method: 'POST' }).then(function () {
       // Se vuelve al inicio de sesion pase lo que pase: si el adaptador no
       // respondio, mantener el portal abierto seria peor.
@@ -1067,28 +1324,32 @@
     });
   }
 
+  /** Ir a «Mi historial» desde Inicio, mostrando un embarazo que no es el actual. */
+  function verEmbarazosAnteriores() {
+    const anteriores = (episodios && episodios.anteriores) || [];
+    if (anteriores.length && !(episodios && episodios.ambiguo)) {
+      idHistorial = anteriores[0].id_embarazo;
+      ui.selectorEmbarazo.value = String(idHistorial);
+      ui.historialLista.innerHTML = '';
+      cargarHistorial();
+    }
+    mostrarVista('historial');
+  }
+
   // =======================================================================
   // Arranque
   // =======================================================================
 
   function conectarEventos() {
-    if (ui.formLogin) {
-      ui.formLogin.addEventListener('submit', manejarLogin);
-    }
+    ui.formLogin.addEventListener('submit', manejarLogin);
+    ui.botonCerrarSesion.addEventListener('click', abrirDialogoDeCierre);
+    ui.botonCancelarCierre.addEventListener('click', cancelarCierre);
+    ui.botonConfirmarCierre.addEventListener('click', manejarLogout);
+    ui.botonRegistrarMovimiento.addEventListener('click', manejarRegistrarMovimiento);
+    ui.botonSincronizarMovimientos.addEventListener('click', manejarSincronizarMovimientos);
+    ui.botonVerAnteriores.addEventListener('click', verEmbarazosAnteriores);
 
-    if (ui.botonCerrarSesion) {
-      ui.botonCerrarSesion.addEventListener('click', manejarLogout);
-    }
-
-    if (ui.botonRegistrarMovimiento) {
-      ui.botonRegistrarMovimiento.addEventListener('click', manejarRegistrarMovimiento);
-    }
-
-    if (ui.botonSincronizarMovimientos) {
-      ui.botonSincronizarMovimientos.addEventListener('click', manejarSincronizarMovimientos);
-    }
-
-    const enlaces = ui.menu ? ui.menu.querySelectorAll('a[data-vista]') : [];
+    const enlaces = ui.menu.querySelectorAll('a[data-vista]');
     Array.prototype.forEach.call(enlaces, function (enlace) {
       enlace.addEventListener('click', function (evento) {
         evento.preventDefault();
@@ -1096,30 +1357,27 @@
       });
     });
 
-    if (ui.selectorEmbarazo) {
-      ui.selectorEmbarazo.addEventListener('change', function () {
-        const elegido = Number(ui.selectorEmbarazo.value);
+    // Cambiar el embarazo aquí sólo afecta a «Mi historial».
+    ui.selectorEmbarazo.addEventListener('change', function () {
+      const elegido = Number(ui.selectorEmbarazo.value);
 
-        // Sólo se acepta un identificador que vino de `/adaptador/embarazos`.
-        // Un valor manipulado en la página no llega a convertirse en petición.
-        const conocido =
-          episodios &&
-          (episodios.todos || []).some(function (e) {
-            return e.id_embarazo === elegido;
-          });
-        if (!conocido) {
-          return;
-        }
+      // Sólo se acepta un identificador que vino de `/adaptador/embarazos`.
+      // Un valor manipulado en la página no llega a convertirse en petición.
+      const conocido =
+        episodios &&
+        (episodios.todos || []).some(function (e) {
+          return e.id_embarazo === elegido;
+        });
+      if (!conocido) {
+        return;
+      }
 
-        seleccionado = elegido;
-        // Se vacía antes de pedir, para que no quede a la vista ni una fila del
-        // episodio anterior mientras llega la respuesta.
-        ui.historialLista.innerHTML = '';
-        limpiarMetricas();
-        pintarSemaforo(null, null);
-        cargarMonitoreo(elegido);
-      });
-    }
+      idHistorial = elegido;
+      // Se vacía antes de pedir, para que no quede a la vista ni una fila del
+      // episodio anterior mientras llega la respuesta. Inicio no se toca.
+      ui.historialLista.innerHTML = '';
+      cargarHistorial();
+    });
   }
 
   function arrancar() {

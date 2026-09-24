@@ -197,19 +197,30 @@ def test_el_marcado_no_inicializa_ninguna_metrica_en_cero():
         assert coincidencia.group(1).strip() == "—", identificador
 
 
-def test_los_conteos_del_estado_local_empiezan_sin_dato():
-    import re
+def test_no_quedan_paneles_de_contadores_tecnicos():
+    """Los dos paneles de conteos por estado se sustituyeron por una frase.
 
-    contenido = leer(HTML)
-    for identificador in (
+    La persistencia, los reintentos y la trazabilidad siguen en el adaptador y
+    en ``app.edge``; lo que desaparece es mostrar sus nombres internos a la
+    gestante.
+    """
+    html = leer(HTML)
+    for retirado in (
         "outbox-pendientes",
-        "outbox-enviados",
-        "outbox-reintentables",
-        "outbox-revision",
+        "movimientos-pendientes",
+        "estado-conteo",
+        "FALLIDO (reintentable)",
+        "FALLIDO (requiere revisión)",
     ):
-        coincidencia = re.search(rf'id="{identificador}"[^>]*>([^<]*)<', contenido)
-        assert coincidencia is not None, identificador
-        assert coincidencia.group(1).strip() == "—", identificador
+        assert retirado not in html, retirado
+    assert 'id="envio-estado"' in html
+
+
+def test_la_interfaz_no_muestra_comandos_ni_rutas():
+    """Ni comandos, ni rutas, ni explicaciones de implementación a la vista."""
+    html = leer(HTML)
+    for tecnico in ("python ", "scripts/", "/adaptador/", "/api/v1", "SQLite", "outbox"):
+        assert tecnico not in html, tecnico
 
 
 # ---------------------------------------------------------------------------
@@ -362,14 +373,17 @@ def test_el_registro_de_movimientos_simulados_existe_y_arranca_deshabilitado():
     aparte, siempre disponible, porque no depende de tener un embarazo
     elegido.
     """
+    import re
+
     contenido = leer(HTML)
 
-    assert 'id="btn-registrar-movimientos"' in contenido
-    assert "disabled" in contenido
-    assert "simulada" in contenido
+    boton = re.search(r'<button id="btn-registrar-movimientos"[^>]*>', contenido)
+    assert boton is not None
+    assert "disabled" in boton.group(0)
     assert 'id="btn-sincronizar-movimientos"' in contenido
-    assert 'id="movimientos-pendientes"' in contenido
-    assert 'id="movimientos-enviados"' in contenido
+    # Que es simulado se explica una vez, en «Acerca de».
+    acerca = contenido.split('id="vista-acerca"', 1)[1]
+    assert "valores" in acerca and "simulados fijos" in acerca
 
 
 def test_el_registro_de_movimientos_simulados_esta_conectado_en_app_js():
@@ -499,11 +513,55 @@ def test_el_selector_solo_acepta_identificadores_que_vinieron_del_adaptador():
 
 
 def test_cambiar_de_episodio_vacia_lo_anterior_antes_de_pedir():
-    """Ni una fila del episodio anterior puede quedar a la vista."""
+    """Ni una fila del episodio anterior puede quedar a la vista.
+
+    Y solo se vacía Historial: el cambio de episodio no toca las métricas de
+    Inicio. El comportamiento completo, con respuestas tardías incluidas, lo
+    ejecuta ``test_gestante_frontend_comportamiento.py``.
+    """
     contenido = leer(JS)
 
-    assert "ui.historialLista.innerHTML = ''" in contenido
-    assert "limpiarMetricas()" in contenido
+    manejador = contenido.split("ui.selectorEmbarazo.addEventListener('change'", 1)[1]
+    manejador = manejador.split("function arrancar()", 1)[0]
+    assert "ui.historialLista.innerHTML = ''" in manejador
+    assert "cargarHistorial()" in manejador
+    assert "limpiarMetricas" not in manejador
+    assert "idInicio" not in manejador
+
+
+# ---------------------------------------------------------------------------
+# Presentación simplificada y cierre de sesión
+# ---------------------------------------------------------------------------
+
+
+def test_el_atributo_hidden_no_lo_anula_ningun_display():
+    """Sin esta regla, ``.main-menu{display:flex}`` dejaba el menú visible en el login."""
+    assert "[hidden]{display:none !important;}" in leer(CSS)
+
+
+def test_el_aviso_academico_no_se_repite_fuera_de_acerca_de():
+    html = leer(HTML)
+    assert "aviso-simulado" not in html
+    antes_de_acerca = html.split('id="vista-acerca"', 1)[0]
+    assert "Prototipo académico" not in antes_de_acerca
+    pie = html.split('<footer', 1)[1]
+    assert "simulad" not in pie and "académico" not in pie
+
+
+def test_cerrar_sesion_esta_en_el_area_de_cuenta_y_pide_confirmacion():
+    import re
+
+    html = leer(HTML)
+    menu = re.search(r'<nav[^>]*id="main-menu"[^>]*>([\s\S]*?)</nav>', html).group(1)
+    assert "Cerrar sesión" not in menu
+
+    cuenta = re.search(r'<div[^>]*id="area-cuenta"[^>]*>([\s\S]*?)</div>', html)
+    assert cuenta is not None and "hidden" in cuenta.group(0)
+    assert 'id="btn-cerrar-sesion"' in cuenta.group(1)
+
+    assert "¿Deseas cerrar sesión?" in html
+    assert 'id="btn-cancelar-cierre"' in html
+    assert 'id="btn-confirmar-cierre"' in html
 
 
 def test_la_ambiguedad_no_se_presenta_como_embarazo_actual():

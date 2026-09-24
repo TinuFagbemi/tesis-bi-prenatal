@@ -1720,8 +1720,8 @@ comprueba fila por fila.
 
 ### Registro simulado, operación sin conexión y sincronización
 
-Desde «Inicio», el botón **Registrar sesión de movimiento (simulada)** captura
-un paquete en este dispositivo. Funciona con la API central caída, que es el
+Desde «Inicio», el botón **Registrar sesión de movimientos** captura un
+paquete en este dispositivo, siempre para el embarazo en curso. Funciona con la API central caída, que es el
 requisito: la autorización de ese paso la da el aprovisionamiento —a qué cuenta
 y a qué embarazo sirve—, que el navegador no puede alterar.
 
@@ -1736,8 +1736,12 @@ guardar algo que el servidor rechazaría después.
 
 Lo capturado queda `PENDIENTE` en un SQLite **propio de cada cuenta**
 (`data/gestante/movimientos/cuenta-<id_usuario>.sqlite3`), sobrevive a un
-reinicio del portal y no se mezcla con el de otra cuenta. El botón
-**Sincronizar ahora** ejecuta una sola ronda real contra
+reinicio del portal y no se mezcla con el de otra cuenta. La interfaz no
+muestra contadores por estado: resume la cola de la cuenta en una frase
+(«Registro guardado, pendiente de envío», «Registro enviado», «No se pudo
+enviar; el registro continúa guardado…») derivada de los conteos reales. El
+envío **no es automático**: el botón **Enviar ahora** —**Reintentar** si un
+intento falló— ejecuta una sola ronda real contra
 `POST /api/v1/sesiones-monitoreo` reutilizando `app.edge.ejecutar_pasada`, con
 el token de la paciente que ya está en memoria —nunca `EDGE_API_TOKEN`, que es
 del nodo edge y este proceso no lee—. El resultado se muestra tal cual: no se
@@ -1748,6 +1752,56 @@ para la elegibilidad del nodo, y la clave de idempotencia se conserva.
 acepte el paquete lo deja en el esquema operacional; para verlo en el esquema
 analítico y en `publicacion` hay que ejecutar después
 `python scripts/etl_analitico.py ejecutar`.
+
+### Inicio e Historial: dos contextos
+
+- **Inicio** muestra solo el embarazo en curso (`actual` sin ambigüedad) y su
+  **última lectura**: el máximo de `(fecha_hora_captura, id_lectura)` dentro de
+  ese embarazo. Las tres tarjetas y el semáforo son esa misma lectura, con su
+  fecha; lo que esa lectura no midió aparece como «—». No se completa con
+  valores de otra lectura ni de otro embarazo. Con ambigüedad o sin embarazo en
+  curso, Inicio no muestra lecturas y el registro queda deshabilitado.
+- **Mi historial** tiene su propia selección de embarazo y lista **todas** sus
+  lecturas en una tabla (fecha, FC, SpO₂, movimientos, semana y semáforo),
+  también cuando la última solo midió movimientos. Cambiar esa selección no
+  repinta Inicio ni cambia el destino del registro, y una respuesta que llega
+  tarde de una selección anterior se descarta.
+
+Ninguna vista crea filas: abrir, navegar, refrescar o iniciar sesión solo
+consulta. Las únicas filas nuevas son las que la paciente registra
+explícitamente con el botón de movimientos.
+
+### Procedencia de los datos de la cuenta de demostración
+
+La cuenta que aprovisiona `provisionar_demo.py` en el entorno local es la de
+`id_usuario` 107 (paciente 100). Tiene dos episodios de origen distinto:
+
+| Embarazo | Origen | Estado | Qué contiene |
+|---|---|---|---|
+| 130 | Agregado por `provisionar_demo.py` (inicio 2026-03-19) | `ACTIVO` | Solo las sesiones registradas desde el portal. El valor fijo `MOV_SIMULADO = 12` de `app.gestante.simulacion` procede de ellas; FC y SpO₂ son nulos porque una sesión de movimientos no los mide. |
+| 100 | Dataset canónico (`data/generated`) | `FINALIZADO` | 41 lecturas en 25 sesiones. La última (id 679, 2025-10-01) solo midió movimientos; 20 lecturas de signos maternos tienen FC y SpO₂, por ejemplo la 110: 2025-09-08 17:13 UTC, FC 86, SpO₂ 97, semana 36, verde. |
+
+Los datos no se trasladan de un embarazo a otro. `tests/test_gestante_dataset.py`
+regenera el dataset con su semilla y comprueba que la ruta de monitoreo
+entrega esas lecturas con los valores de origen, y
+`frontend/gestante/pruebas/app.comportamiento.test.js` comprueba cómo las
+muestra la interfaz (`node --test`, sin dependencias; lo lanza también
+`tests/test_gestante_frontend_comportamiento.py`).
+
+### Revisar la interfaz
+
+Con PostgreSQL, la API central y el portal en marcha (ver las secciones
+anteriores), iniciar sesión con la cuenta de demostración (su correo lo
+imprime `python scripts/provisionar_demo.py verificar`) y comprobar:
+
+1. **Inicio** muestra el embarazo en curso y la fecha de la última lectura;
+   con una sesión simulada registrada, movimientos 12 y FC/SpO₂ «—».
+2. **Ver embarazos anteriores en «Mi historial»** abre el embarazo 100 con sus
+   lecturas; la fila del 08/09/2025 a las 12:13 (hora de Panamá; 17:13 UTC)
+   muestra 86 BPM y 97 %.
+3. Volver a **Inicio**: sigue mostrando el embarazo en curso.
+4. **Cerrar sesión**, arriba a la derecha, pide confirmación; «Cancelar» no
+   cierra nada.
 
 ## Calidad del proyecto
 
