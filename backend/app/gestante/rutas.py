@@ -1,11 +1,13 @@
 """Las rutas del adaptador local de la interfaz de la gestante (SCRUM-72).
 
-Diez rutas: tres sirven los archivos de la interfaz, cinco atienden sesion y
-estado local, y dos exponen la lectura clinica minima de SCRUM-98 --embarazos
+Trece rutas: tres sirven los archivos de la interfaz, cinco atienden sesion y
+estado local, dos exponen la lectura clinica minima de SCRUM-98 --embarazos
 de la cuenta y el monitoreo de un episodio-- traducida desde
-``app.gestante.central`` y ``app.gestante.clinico``. No hay mas: ninguna ruta
-reenvia un cuerpo ni una ruta arbitraria de la API central, y ninguna calcula
-un semaforo o un estado clinico por su cuenta.
+``app.gestante.central`` y ``app.gestante.clinico``, y tres registran y
+sincronizan sesiones de movimiento simuladas por medio de
+``app.gestante.movimientos``, que a su vez delega en ``app.edge``. No hay mas:
+ninguna ruta reenvia un cuerpo ni una ruta arbitraria de la API central, y
+ninguna calcula un semaforo o un estado clinico por su cuenta.
 
 **El adaptador no es una segunda capa de negocio.** No valida de nuevo lo que ya
 valida un contrato, no clasifica nada, no reimplementa la idempotencia ni los
@@ -28,15 +30,19 @@ Todas las cuentas y los datos son ficticios y simulados.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from http import HTTPStatus
 
+import httpx
 from fastapi import APIRouter, Path, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, ConfigDict
 
-from app.gestante import almacen, estado_local, sesion as sesion_local
+from app.edge.captura import PaqueteInvalido
+from app.gestante import almacen, estado_local, movimientos, sesion as sesion_local
 from app.gestante.central import ClienteCentral, EstadoRespuesta, RespuestaClinica
 from app.gestante.clinico import (
     SesionConLecturas,
@@ -45,8 +51,10 @@ from app.gestante.clinico import (
     ultima_lectura,
 )
 from app.gestante.config import NOMBRE_DE_COOKIE, GestanteSettings
-from app.models.enums import NombreRol
+from app.models.enums import NombreRol, TipoSesion
 from app.schemas.autenticacion import CredencialesEntrada
+
+registrador = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Textos de las respuestas
@@ -109,6 +117,26 @@ MENSAJE_UPSTREAM = (
     "El servidor no pudo responder correctamente. Inténtalo de nuevo más tarde."
 )
 
+# ---------------------------------------------------------------------------
+# Sesiones de movimiento simuladas
+# ---------------------------------------------------------------------------
+
+MENSAJE_ERROR_INTERNO = (
+    "No se pudo registrar la sesión simulada. Inténtalo de nuevo más tarde."
+)
+
+
+class SesionSimuladaEntrada(BaseModel):
+    """Lo único que el navegador elige: qué tipo de sesión simular.
+
+    Ningún valor clínico viaja en este cuerpo. El paquete completo lo arma
+    ``app.gestante.simulacion`` con sus propios valores fijos.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tipo_sesion: TipoSesion
+
 
 # ---------------------------------------------------------------------------
 # Estado en memoria
@@ -151,13 +179,19 @@ class ContextoAdaptador:
     ``reloj`` se inyecta para que una prueba pueda recorrer la ventana de
     sesion sin esperarla, igual que ``app.edge.sincronizacion`` inyecta el suyo.
     ``cliente_central`` se inyecta para que las pruebas no necesiten ni la API
-    ni PostgreSQL.
+    ni PostgreSQL. ``constructor_cliente_edge`` es la misma idea aplicada a la
+    sincronizacion de movimientos: por omision construye un ``httpx.Client``
+    real contra ``settings.api_base_url``, y una prueba puede sustituirlo por
+    uno con ``httpx.MockTransport`` sin tocar la red.
     """
 
     settings: GestanteSettings
     cliente_central: ClienteCentral
     reloj: Callable[[], datetime] = sesion_local.ahora_utc
     tokens: AlmacenDeTokens = field(default_factory=AlmacenDeTokens)
+    constructor_cliente_edge: (
+        Callable[[GestanteSettings, str], httpx.Client] | None
+    ) = None
 
 
 # ---------------------------------------------------------------------------
@@ -696,6 +730,143 @@ def crear_router(contexto: ContextoAdaptador) -> APIRouter:
                         None if sesion_de_la_ultima is None else sesion_de_la_ultima.id_sesion
                     ),
                 },
+            }
+        )
+
+    # -- Sesiones de movimiento simuladas (consume app.edge) --------------
+
+    @router.post("/adaptador/embarazos/{id_embarazo}/sesiones-simuladas")
+    def registrar_sesion_simulada(
+        peticion: Request,
+        cuerpo: SesionSimuladaEntrada,
+        id_embarazo: int = Path(ge=1),
+    ) -> JSONResponse:
+        """Captura localmente una sesión simulada, sin tocar la red.
+
+        El embarazo se autoriza aquí, contra la lista que el servidor central
+        ya entregó para esta cuenta -- nunca confiando en el identificador que
+        manda el navegador por sí solo. Un identificador que no está en esa
+        lista responde 404, el mismo mensaje que usa el resto del adaptador
+        para un episodio ajeno o inexistente.
+
+        Lo que se guarda es un paquete fijo y reproducible, construido por
+        ``app.gestante.simulacion``. Su sincronización real contra la API
+        central depende de datos de esa base -- el dispositivo asignado, la
+        semana gestacional exacta -- que este adaptador no tiene forma de
+        conocer, así que puede fallar más tarde sin que eso sea un error de
+        este paso: aquí solo se afirma que el paquete quedó guardado en este
+        dispositivo.
+        """
+        identificador, sesion = sesion_vigente(peticion)
+        if sesion is None:
+            return error(MENSAJE_SIN_SESION, HTTPStatus.UNAUTHORIZED)
+
+        token = contexto.tokens.obtener(identificador)
+        if token is None:
+            return no_disponible(MOTIVO_REAUTENTICACION)
+
+        resultado = contexto.cliente_central.embarazos(token)
+        if not resultado.disponible:
+            if resultado.estado is EstadoRespuesta.RECHAZADO:
+                contexto.tokens.olvidar(identificador)
+            return traducir_fallo(resultado)
+
+        episodios = clasificar_episodios(resultado.datos)
+        if not episodios.contiene(id_embarazo):
+            return error(MENSAJE_NO_DISPONIBLE, HTTPStatus.NOT_FOUND)
+
+        ahora = contexto.reloj()
+        try:
+            registro = movimientos.registrar_sesion_simulada(
+                settings,
+                id_usuario=sesion.id_usuario,
+                id_embarazo=id_embarazo,
+                tipo_sesion=cuerpo.tipo_sesion,
+                ahora=ahora,
+            )
+        except PaqueteInvalido as fallo:
+            # No deberia pasar: el paquete lo arma este adaptador con valores
+            # fijos. Si ocurre, el contrato cambio y esto es un fallo interno,
+            # no algo que la paciente hizo mal.
+            registrador.error(
+                "Paquete de sesion simulada rechazado por su propio contrato (%s).",
+                fallo.detalle,
+            )
+            return error(MENSAJE_ERROR_INTERNO, HTTPStatus.INTERNAL_SERVER_ERROR)
+
+        return json(
+            {
+                "registrado": True,
+                "estado": "local",
+                "tipo_sesion": cuerpo.tipo_sesion.value,
+                "clave": registro.clave,
+                "capturado_en": ahora.isoformat(),
+            },
+            HTTPStatus.CREATED,
+        )
+
+    @router.post("/adaptador/movimientos/sincronizar")
+    def sincronizar_movimientos(peticion: Request) -> JSONResponse:
+        """Una sola ronda de envío de la cola de esta cuenta, ahora mismo.
+
+        Reutiliza ``app.edge.ejecutar_pasada`` con el token que ya está en
+        memoria de esta sesión. Nunca inventa un resultado: lo que responde es
+        exactamente lo que la API central contestó en esta ronda.
+        """
+        identificador, sesion = sesion_vigente(peticion)
+        if sesion is None:
+            return error(MENSAJE_SIN_SESION, HTTPStatus.UNAUTHORIZED)
+
+        token = contexto.tokens.obtener(identificador)
+        if token is None:
+            return no_disponible(MOTIVO_REAUTENTICACION)
+
+        pasada = movimientos.sincronizar_cuenta(
+            settings,
+            id_usuario=sesion.id_usuario,
+            token=token,
+            constructor_cliente_http=contexto.constructor_cliente_edge,
+        )
+
+        if pasada.detenida_por_credencial:
+            contexto.tokens.olvidar(identificador)
+
+        return json(
+            {
+                "seleccionados": pasada.seleccionados,
+                "entregados": pasada.entregados,
+                "reintentables": pasada.reintentables,
+                "rechazados": pasada.rechazados,
+                "agotados": pasada.agotados,
+                "ya_entregados": pasada.ya_entregados,
+                "detenida_por_transporte": pasada.detenida_por_transporte,
+                "detenida_por_credencial": pasada.detenida_por_credencial,
+            }
+        )
+
+    @router.get("/adaptador/movimientos/estado")
+    def estado_de_movimientos(peticion: Request) -> JSONResponse:
+        """Conteos de la cola de **esta** cuenta. Nunca un paquete ni una clave.
+
+        El mismo contrato que ``/adaptador/estado-local``, pero sobre el
+        archivo propio de la cuenta que hizo la petición en lugar del nodo edge
+        compartido de todo el dispositivo.
+        """
+        identificador, sesion = sesion_vigente(peticion)
+        if sesion is None:
+            return error(MENSAJE_SIN_SESION, HTTPStatus.UNAUTHORIZED)
+
+        estado = movimientos.leer_estado_de_la_cuenta(settings, sesion.id_usuario)
+
+        return json(
+            {
+                "inicializado": estado.inicializado,
+                "pendientes": estado.pendientes,
+                "enviados": estado.enviados,
+                "fallidos_reintentables": estado.fallidos_reintentables,
+                "fallidos_en_revision": estado.fallidos_en_revision,
+                "total": estado.total,
+                "detalle": estado.detalle,
             }
         )
 
