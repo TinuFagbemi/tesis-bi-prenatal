@@ -54,8 +54,18 @@
       // El identificador procede siempre de la lista de episodios que devolvio
       // el adaptador. Esta funcion no lo fabrica ni lo adivina.
       return '/adaptador/embarazos/' + encodeURIComponent(idEmbarazo) + '/monitoreo';
-    }
+    },
+    sesionesSimuladas: function (idEmbarazo) {
+      return '/adaptador/embarazos/' + encodeURIComponent(idEmbarazo) + '/sesiones-simuladas';
+    },
+    movimientosEstado: '/adaptador/movimientos/estado',
+    movimientosSincronizar: '/adaptador/movimientos/sincronizar'
   };
+
+  // El unico tipo de sesion simulada que esta pantalla ofrece. La eleccion es
+  // fija porque el control vive bajo la tarjeta de «Actividad Fetal»: no hay
+  // un selector que la paciente pueda manipular para pedir otra cosa.
+  const TIPO_SESION_SIMULADA = 'MOVIMIENTOS_FETALES';
 
   // Como se interpreta una respuesta del adaptador. La clasificacion vive en un
   // solo sitio --`clasificar()`-- y las vistas leen el resultado; repetir
@@ -153,6 +163,15 @@
     outboxReintentables: document.getElementById('outbox-reintentables'),
     outboxRevision: document.getElementById('outbox-revision'),
     notaEstadoLocal: document.getElementById('nota-estado-local'),
+
+    botonRegistrarMovimiento: document.getElementById('btn-registrar-movimientos'),
+    notaMovimientos: document.getElementById('nota-movimientos'),
+    movPendientes: document.getElementById('movimientos-pendientes'),
+    movEnviados: document.getElementById('movimientos-enviados'),
+    movReintentables: document.getElementById('movimientos-reintentables'),
+    movRevision: document.getElementById('movimientos-revision'),
+    notaMovimientosEstado: document.getElementById('nota-movimientos-estado'),
+    botonSincronizarMovimientos: document.getElementById('btn-sincronizar-movimientos'),
 
     ultimaLectura: document.getElementById('last-update'),
     ultimaSincronizacion: document.getElementById('last-sync'),
@@ -326,6 +345,15 @@
     ui.outboxRevision.textContent = SIN_DATO;
     ui.notaEstadoLocal.hidden = true;
 
+    ui.movPendientes.textContent = SIN_DATO;
+    ui.movEnviados.textContent = SIN_DATO;
+    ui.movReintentables.textContent = SIN_DATO;
+    ui.movRevision.textContent = SIN_DATO;
+    ui.notaMovimientosEstado.hidden = true;
+    ui.botonRegistrarMovimiento.disabled = true;
+    ui.notaMovimientos.textContent =
+      'Selecciona un embarazo en «Mi historial» para registrar una sesión simulada.';
+
     ui.ultimaLectura.textContent = SIN_DATO;
     ui.ultimaSincronizacion.textContent = SIN_DATO;
 
@@ -486,6 +514,49 @@
     });
   }
 
+  /**
+   * Conteos de la cola de **esta cuenta**, nunca los del nodo compartido.
+   *
+   * Mismo contrato que `refrescarEstadoLocal`, sobre una ruta distinta: cada
+   * cuenta tiene su propio archivo del lado del adaptador, así que estos
+   * números nunca incluyen lo que otra cuenta haya registrado.
+   */
+  function refrescarMovimientosEstado() {
+    return pedir(API.movimientosEstado).then(function (resultado) {
+      if (resultado.estado === 401) {
+        mostrarLogin();
+        return;
+      }
+      if (!resultado.ok || !resultado.cuerpo) {
+        ui.notaMovimientosEstado.textContent =
+          'No se pudo leer el estado de tus sesiones simuladas.';
+        ui.notaMovimientosEstado.hidden = false;
+        return;
+      }
+
+      const estado = resultado.cuerpo;
+
+      if (!estado.inicializado) {
+        ui.movPendientes.textContent = SIN_DATO;
+        ui.movEnviados.textContent = SIN_DATO;
+        ui.movReintentables.textContent = SIN_DATO;
+        ui.movRevision.textContent = SIN_DATO;
+        ui.notaMovimientosEstado.textContent = texto(
+          estado.detalle,
+          'Todavía no has registrado ninguna sesión simulada.'
+        );
+        ui.notaMovimientosEstado.hidden = false;
+        return;
+      }
+
+      ui.movPendientes.textContent = texto(estado.pendientes);
+      ui.movEnviados.textContent = texto(estado.enviados);
+      ui.movReintentables.textContent = texto(estado.fallidos_reintentables);
+      ui.movRevision.textContent = texto(estado.fallidos_en_revision);
+      ui.notaMovimientosEstado.hidden = true;
+    });
+  }
+
   // =======================================================================
   // Lectura clinica
   // =======================================================================
@@ -549,6 +620,7 @@
       selector.appendChild(vacio);
       selector.disabled = true;
       seleccionado = null;
+      actualizarBotonDeRegistro();
       return;
     }
 
@@ -564,6 +636,20 @@
     const inicial = actual ? actual.id_embarazo : todos[0].id_embarazo;
     seleccionado = inicial;
     selector.value = String(inicial);
+    actualizarBotonDeRegistro();
+  }
+
+  /**
+   * Habilita el registro de una sesión simulada sólo cuando hay un embarazo
+   * elegido. Sin un `seleccionado` que venga de `/adaptador/embarazos`, el
+   * botón no tiene contra qué episodio registrar nada.
+   */
+  function actualizarBotonDeRegistro() {
+    ui.botonRegistrarMovimiento.disabled = seleccionado === null;
+    ui.notaMovimientos.textContent =
+      seleccionado === null
+        ? 'Selecciona un embarazo en «Mi historial» para registrar una sesión simulada.'
+        : 'Se registrará como una sesión de movimiento simulada, no como un dato real.';
   }
 
   /** Estado neutro de todo lo clínico, con el aviso que corresponda. */
@@ -580,6 +666,10 @@
     pintarSemaforo(null, null);
 
     ui.selectorEmbarazo.disabled = true;
+    // Sin lectura clínica confirmada no hay un embarazo autorizado contra el
+    // cual registrar nada.
+    seleccionado = null;
+    actualizarBotonDeRegistro();
     mostrarHistorialVacio(aviso);
   }
 
@@ -785,6 +875,7 @@
     return Promise.all([
       refrescarConectividad(),
       refrescarEstadoLocal(),
+      refrescarMovimientosEstado(),
       cargarClinico()
     ]);
   }
@@ -858,6 +949,110 @@
       });
   }
 
+  /**
+   * Registra una sesión de movimiento simulada para el embarazo elegido.
+   *
+   * `seleccionado` sólo puede ser un id que ya vino de `/adaptador/embarazos`
+   * -- ver `llenarSelector` --, así que esta función nunca fabrica ni adivina
+   * un identificador. El adaptador vuelve a comprobar del lado del servidor
+   * que ese embarazo es de esta cuenta antes de guardar nada: esta función no
+   * sustituye esa comprobación, sólo evita una petición que ya se sabe sin
+   * sentido cuando no hay ningún embarazo elegido.
+   */
+  function manejarRegistrarMovimiento() {
+    if (seleccionado === null) {
+      return;
+    }
+
+    ui.botonRegistrarMovimiento.disabled = true;
+    ui.notaMovimientos.textContent = 'Registrando sesión simulada…';
+
+    pedir(API.sesionesSimuladas(seleccionado), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ tipo_sesion: TIPO_SESION_SIMULADA })
+    })
+      .then(function (resultado) {
+        if (resultado.estado === 401) {
+          mostrarLogin();
+          return;
+        }
+
+        if (resultado.estado === 200 && resultado.cuerpo && resultado.cuerpo.disponible === false) {
+          ui.notaMovimientos.textContent = avisoDe({
+            clase: CLASE.NO_DISPONIBLE,
+            motivo: resultado.cuerpo.motivo
+          });
+          return;
+        }
+
+        if (resultado.ok && resultado.cuerpo && resultado.cuerpo.registrado) {
+          ui.notaMovimientos.textContent =
+            'Sesión simulada registrada en este dispositivo. Queda pendiente ' +
+            'hasta que la sincronices.';
+          refrescarMovimientosEstado();
+          return;
+        }
+
+        if (resultado.estado === 404) {
+          ui.notaMovimientos.textContent = 'Ese embarazo no está disponible para registrar sesiones.';
+          return;
+        }
+
+        ui.notaMovimientos.textContent =
+          'No se pudo registrar la sesión simulada. Inténtalo de nuevo más tarde.';
+      })
+      .finally(function () {
+        actualizarBotonDeRegistro();
+      });
+  }
+
+  /**
+   * Sincroniza ahora la cola de **esta cuenta**. Una sola ronda real contra
+   * el servidor central: lo que responde este botón es exactamente lo que la
+   * API contestó, nunca un resultado inventado por esta pantalla.
+   */
+  function manejarSincronizarMovimientos() {
+    ui.botonSincronizarMovimientos.disabled = true;
+    ui.notaMovimientosEstado.textContent = 'Sincronizando…';
+    ui.notaMovimientosEstado.hidden = false;
+
+    pedir(API.movimientosSincronizar, { method: 'POST' })
+      .then(function (resultado) {
+        if (resultado.estado === 401) {
+          mostrarLogin();
+          return;
+        }
+
+        if (resultado.estado === 200 && resultado.cuerpo && resultado.cuerpo.disponible === false) {
+          ui.notaMovimientosEstado.textContent = avisoDe({
+            clase: CLASE.NO_DISPONIBLE,
+            motivo: resultado.cuerpo.motivo
+          });
+          ui.notaMovimientosEstado.hidden = false;
+          return refrescarMovimientosEstado();
+        }
+
+        if (!resultado.ok || !resultado.cuerpo) {
+          ui.notaMovimientosEstado.textContent =
+            'No se pudo sincronizar. Inténtalo de nuevo más tarde.';
+          ui.notaMovimientosEstado.hidden = false;
+          return refrescarMovimientosEstado();
+        }
+
+        const r = resultado.cuerpo;
+        ui.notaMovimientosEstado.textContent =
+          'Sincronización: ' + texto(r.entregados, '0') + ' entregada(s), ' +
+          texto(r.rechazados, '0') + ' rechazada(s), ' +
+          texto(r.reintentables, '0') + ' pendiente(s) de reintento.';
+        ui.notaMovimientosEstado.hidden = false;
+        return refrescarMovimientosEstado();
+      })
+      .finally(function () {
+        ui.botonSincronizarMovimientos.disabled = false;
+      });
+  }
+
   function manejarLogout(evento) {
     if (evento) {
       evento.preventDefault();
@@ -880,6 +1075,14 @@
 
     if (ui.botonCerrarSesion) {
       ui.botonCerrarSesion.addEventListener('click', manejarLogout);
+    }
+
+    if (ui.botonRegistrarMovimiento) {
+      ui.botonRegistrarMovimiento.addEventListener('click', manejarRegistrarMovimiento);
+    }
+
+    if (ui.botonSincronizarMovimientos) {
+      ui.botonSincronizarMovimientos.addEventListener('click', manejarSincronizarMovimientos);
     }
 
     const enlaces = ui.menu ? ui.menu.querySelectorAll('a[data-vista]') : [];

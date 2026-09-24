@@ -380,6 +380,61 @@ def test_sincronizar_entrega_correctamente_marca_enviado(tmp_path):
     assert estado["enviados"] == 1
 
 
+def test_recuperar_sincronizacion_no_reenvia_lo_ya_confirmado(tmp_path):
+    """Volver a sincronizar tras un exito no reintenta el mismo evento.
+
+    ``ENVIADO`` es terminal para la eligibilidad de app.edge (ver
+    predicado_elegible), asi que una segunda ronda -- por ejemplo, tras un
+    reinicio del navegador o un doble clic en «Sincronizar ahora» -- no debe
+    ni siquiera tocar la red para el evento que ya se confirmo. Es la garantia
+    de «recuperacion sin duplicados» que este ticket pide, ya provista por el
+    mecanismo que se reutiliza sin cambios.
+    """
+    llamadas_de_red = []
+
+    def manejador(peticion: httpx.Request) -> httpx.Response:
+        llamadas_de_red.append(peticion)
+        return httpx.Response(
+            201,
+            json={"id_sesion": 555, "lecturas_creadas": 1, "ids_lectura": [999]},
+            headers={"Idempotency-Replayed": "false"},
+        )
+
+    def constructor(settings, token):
+        return httpx.Client(
+            base_url=settings.api_base_url,
+            transport=httpx.MockTransport(manejador),
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    central = ClienteClinicoDoble(
+        respuesta_embarazos=RespuestaClinica(EstadoRespuesta.OK, datos=(embarazo(101),))
+    )
+    cliente, _, _, _ = construir_cliente(
+        tmp_path, central=central, constructor_cliente_edge=constructor
+    )
+    iniciar_sesion(cliente)
+    cliente.post(
+        "/adaptador/embarazos/101/sesiones-simuladas",
+        json={"tipo_sesion": "SIGNOS_MATERNOS"},
+    )
+
+    primera = cliente.post("/adaptador/movimientos/sincronizar").json()
+    segunda = cliente.post("/adaptador/movimientos/sincronizar").json()
+
+    assert primera["entregados"] == 1
+    assert len(llamadas_de_red) == 1  # una sola llamada real a la API
+
+    # La segunda ronda no encuentra nada elegible: el evento ya es ENVIADO.
+    assert segunda["seleccionados"] == 0
+    assert segunda["entregados"] == 0
+    assert len(llamadas_de_red) == 1  # sigue en una: no hubo un segundo POST
+
+    estado = cliente.get("/adaptador/movimientos/estado").json()
+    assert estado["enviados"] == 1
+    assert estado["total"] == 1  # nunca dos filas para la misma sesion
+
+
 def test_sincronizar_un_rechazo_real_no_finge_exito(tmp_path):
     """El caso documentado en app.gestante.simulacion: el servidor puede
     rechazar el paquete de verdad -- aqui, un 404 de dispositivo o embarazo
