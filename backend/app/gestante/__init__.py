@@ -5,7 +5,7 @@ esta tesis no construye en hardware: algo que corre **en el dispositivo de la
 paciente**, le sirve la interfaz, la autentica contra el servidor central cuando
 hay conexion, y sigue en pie cuando no la hay.
 
-Ocho modulos, cada uno con un trabajo:
+Diez modulos, cada uno con un trabajo:
 
 :mod:`app.gestante.config`
     Donde esta el archivo, a que API se llama, cuanto dura la sesion local.
@@ -20,24 +20,35 @@ Ocho modulos, cada uno con un trabajo:
     Reglas de presentacion sobre esa lectura clinica: cual episodio esta en
     curso y cual es la ultima lectura de una serie de sesiones.
 :mod:`app.gestante.estado_local`
-    Ventana de solo lectura sobre la outbox del nodo edge.
+    Ventana de solo lectura sobre la outbox del nodo edge compartido.
+:mod:`app.gestante.simulacion`
+    El paquete fijo y reproducible de una sesion de movimiento simulada, sin
+    tocar el dataset canonico.
+:mod:`app.gestante.movimientos`
+    Captura y sincroniza esas sesiones por cuenta, delegando todo en
+    ``app.edge`` -- un archivo SQLite propio por paciente, nunca compartido.
 :mod:`app.gestante.rutas`
-    Las diez rutas que ve el navegador.
+    Las trece rutas que ve el navegador.
 :mod:`app.gestante.aplicacion`
     El ensamblado FastAPI.
 
 El punto de entrada es ``scripts/gestante_web.py``.
 
 **Lo que este paquete no hace, dicho con precision.** No clasifica lecturas --el
-semaforo lo decide la fuente autorizada--, no escribe en PostgreSQL, no escribe
-en el almacenamiento del nodo edge, no reimplementa la idempotencia ni los
-reintentos, y no guarda credenciales: la contrasena no se persiste en ninguna
-forma, y el token del servidor central vive unicamente en memoria del proceso.
+semaforo lo decide la fuente autorizada--, no escribe en PostgreSQL, no
+reimplementa la idempotencia ni los reintentos del nodo edge, y no guarda
+credenciales: la contrasena no se persiste en ninguna forma, y el token del
+servidor central vive unicamente en memoria del proceso.
 
-**Lo que todavia no hace, y por que.** El registro de sesiones de movimientos
-esta preparado en la interfaz pero deshabilitado: requiere el flujo de captura
-simulada de ``app.edge`` y una decision explicita sobre como representarlo
-desde este portal, que este ticket no da por sentada.
+**Lo que el registro de movimientos simulados hace, y lo que no.** Captura un
+paquete fijo localmente -- eso siempre funciona, sin red -- y puede intentar
+sincronizarlo con una sola ronda real contra la API central. Esa sincronizacion
+depende de que el dispositivo y el tiempo gestacional del paquete existan y
+esten asignados en la base de datos que reciba el intento; este portal no tiene
+forma de conocer esos datos de antemano, asi que puede fallar honestamente sin
+que eso sea un defecto del registro local. No es un contador de movimientos que
+la paciente perciba ni introduce, y ningun valor biometrico se genera al azar
+en el navegador.
 
 Todos los datos que maneja esta interfaz son ficticios y simulados.
 """
@@ -81,6 +92,12 @@ from app.gestante.config import (
 )
 from app.gestante.estado_local import EstadoLocal
 from app.gestante.estado_local import leer as leer_estado_local
+from app.gestante.movimientos import (
+    leer_estado_de_la_cuenta,
+    registrar_sesion_simulada,
+    ruta_para_la_cuenta,
+    sincronizar_cuenta,
+)
 from app.gestante.rutas import AlmacenDeTokens, ContextoAdaptador, crear_router
 from app.gestante.sesion import (
     RolNoAutorizado,
@@ -130,11 +147,15 @@ __all__ = [
     "en_curso",
     "generar_identificador",
     "inicializar",
+    "leer_estado_de_la_cuenta",
     "leer_estado_local",
     "leer_version",
     "preparar_directorio",
+    "registrar_sesion_simulada",
     "renovar",
+    "ruta_para_la_cuenta",
     "sesion_de_la_lectura",
+    "sincronizar_cuenta",
     "tablas_presentes",
     "transaccion",
     "ultima_lectura",

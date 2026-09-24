@@ -116,6 +116,7 @@ def construir_settings(tmp_path: Path, **ajustes) -> GestanteSettings:
     """
     valores = {
         "sqlite_path": tmp_path / "sesion_local.sqlite3",
+        "movimientos_dir": tmp_path / "movimientos",
         "frontend_dir": DIRECTORIO_FRONTEND,
         "api_base_url": "http://127.0.0.1:8000",
         "cookie_secure": False,
@@ -129,13 +130,19 @@ def construir_cliente(
     *,
     central: ClienteCentralDoble | None = None,
     reloj: RelojFalso | None = None,
+    constructor_cliente_edge=None,
     **ajustes,
 ) -> tuple[TestClient, ClienteCentralDoble, RelojFalso, GestanteSettings]:
     """Un cliente HTTP contra el adaptador, con sus dobles."""
     central = central or ClienteCentralDoble()
     reloj = reloj or RelojFalso()
     settings = construir_settings(tmp_path, **ajustes)
-    app = crear_aplicacion(settings=settings, cliente_central=central, reloj=reloj)
+    app = crear_aplicacion(
+        settings=settings,
+        cliente_central=central,
+        reloj=reloj,
+        constructor_cliente_edge=constructor_cliente_edge,
+    )
     return TestClient(app), central, reloj, settings
 
 

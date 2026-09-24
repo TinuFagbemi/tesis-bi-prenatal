@@ -104,16 +104,22 @@ def crear_aplicacion(
     settings: GestanteSettings | None = None,
     cliente_central: ClienteCentral | None = None,
     reloj: Callable[[], datetime] | None = None,
+    constructor_cliente_edge: (
+        Callable[[GestanteSettings, str], httpx.Client] | None
+    ) = None,
 ) -> FastAPI:
     """Construye el adaptador.
 
-    Los tres argumentos existen para las pruebas y tienen valores reales por
+    Los cuatro argumentos existen para las pruebas y tienen valores reales por
     omision, de modo que nada en produccion dependa de una costura de prueba:
 
     * ``settings`` se lee del entorno si no se pasa;
     * ``cliente_central`` se construye sobre httpx si no se pasa, y entonces
       esta aplicacion es su duena y lo cierra al apagarse;
-    * ``reloj`` es el reloj real si no se pasa.
+    * ``reloj`` es el reloj real si no se pasa;
+    * ``constructor_cliente_edge`` construye el cliente HTTP real de la
+      sincronizacion de movimientos si no se pasa una prueba con
+      ``httpx.MockTransport``.
     """
     configuracion = settings or cargar_settings_gestante()
     http: httpx.Client | None = None
@@ -126,6 +132,7 @@ def crear_aplicacion(
         settings=configuracion,
         cliente_central=cliente_central,
         reloj=reloj or ahora_utc,
+        constructor_cliente_edge=constructor_cliente_edge,
     )
 
     @asynccontextmanager
