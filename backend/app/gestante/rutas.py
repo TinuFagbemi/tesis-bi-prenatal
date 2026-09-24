@@ -42,7 +42,13 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from app.edge.captura import PaqueteInvalido
-from app.gestante import almacen, estado_local, movimientos, sesion as sesion_local
+from app.gestante import (
+    almacen,
+    estado_local,
+    movimientos,
+    provision,
+    sesion as sesion_local,
+)
 from app.gestante.central import ClienteCentral, EstadoRespuesta, RespuestaClinica
 from app.gestante.clinico import (
     SesionConLecturas,
@@ -51,6 +57,7 @@ from app.gestante.clinico import (
     ultima_lectura,
 )
 from app.gestante.config import NOMBRE_DE_COOKIE, GestanteSettings
+from app.gestante.simulacion import SimulacionNoAplicable
 from app.models.enums import NombreRol, TipoSesion
 from app.schemas.autenticacion import CredencialesEntrada
 
@@ -741,49 +748,71 @@ def crear_router(contexto: ContextoAdaptador) -> APIRouter:
         cuerpo: SesionSimuladaEntrada,
         id_embarazo: int = Path(ge=1),
     ) -> JSONResponse:
-        """Captura localmente una sesión simulada, sin tocar la red.
+        """Captura localmente una sesión simulada. **Funciona sin conexión.**
 
-        El embarazo se autoriza aquí, contra la lista que el servidor central
-        ya entregó para esta cuenta -- nunca confiando en el identificador que
-        manda el navegador por sí solo. Un identificador que no está en esa
-        lista responde 404, el mismo mensaje que usa el resto del adaptador
-        para un episodio ajeno o inexistente.
+        Que funcione sin conexión es el requisito, no una concesión: un
+        dispositivo que necesitara preguntarle algo al servidor para capturar
+        no serviría justo cuando hace falta. Por eso la autorización de este
+        paso se apoya en el aprovisionamiento del dispositivo -- a qué cuenta y
+        a qué embarazo sirve -- que se escribió con la credencial de
+        mantenimiento y que el navegador no puede alterar.
 
-        Lo que se guarda es un paquete fijo y reproducible, construido por
-        ``app.gestante.simulacion``. Su sincronización real contra la API
-        central depende de datos de esa base -- el dispositivo asignado, la
-        semana gestacional exacta -- que este adaptador no tiene forma de
-        conocer, así que puede fallar más tarde sin que eso sea un error de
-        este paso: aquí solo se afirma que el paquete quedó guardado en este
-        dispositivo.
+        Tres comprobaciones, y ninguna la decide el navegador:
+
+        1. la sesión local vale (401 si no);
+        2. este dispositivo está aprovisionado para **esta cuenta y este
+           embarazo** (404 si el identificador de la ruta nombra otro);
+        3. cuando además hay token en memoria, se contrasta con la lista que el
+           servidor central entrega para la cuenta. Si el servidor dice que ese
+           embarazo no es suyo, se rechaza; si no se puede preguntar, se sigue
+           con el aprovisionamiento, que es el caso sin conexión.
+
+        La autoridad final sigue siendo el servidor: ``POST
+        /api/v1/sesiones-monitoreo`` vuelve a comprobar la propiedad del
+        embarazo y la asignación del dispositivo cuando el paquete se
+        sincroniza.
         """
         identificador, sesion = sesion_vigente(peticion)
         if sesion is None:
             return error(MENSAJE_SIN_SESION, HTTPStatus.UNAUTHORIZED)
 
-        token = contexto.tokens.obtener(identificador)
-        if token is None:
-            return no_disponible(MOTIVO_REAUTENTICACION)
+        try:
+            aprovisionamiento = provision.cargar(settings.provision_path)
+        except provision.ProvisionInvalida as fallo:
+            # 503: el dispositivo no está listo todavía. No es culpa de la
+            # cuenta ni de la red, y decirlo con precisión evita que parezca
+            # un fallo del servidor central.
+            return error(fallo.detalle, HTTPStatus.SERVICE_UNAVAILABLE)
 
-        resultado = contexto.cliente_central.embarazos(token)
-        if not resultado.disponible:
-            if resultado.estado is EstadoRespuesta.RECHAZADO:
-                contexto.tokens.olvidar(identificador)
-            return traducir_fallo(resultado)
-
-        episodios = clasificar_episodios(resultado.datos)
-        if not episodios.contiene(id_embarazo):
+        if not aprovisionamiento.sirve_a(sesion.id_usuario, id_embarazo):
             return error(MENSAJE_NO_DISPONIBLE, HTTPStatus.NOT_FOUND)
+
+        token = contexto.tokens.obtener(identificador)
+        if token is not None:
+            # Comprobación adicional cuando sí hay con qué preguntar. No
+            # sustituye a la del aprovisionamiento: la refuerza.
+            resultado = contexto.cliente_central.embarazos(token)
+            if resultado.disponible:
+                if not clasificar_episodios(resultado.datos).contiene(id_embarazo):
+                    return error(MENSAJE_NO_DISPONIBLE, HTTPStatus.NOT_FOUND)
+            elif resultado.estado is EstadoRespuesta.RECHAZADO:
+                contexto.tokens.olvidar(identificador)
 
         ahora = contexto.reloj()
         try:
             registro = movimientos.registrar_sesion_simulada(
                 settings,
                 id_usuario=sesion.id_usuario,
-                id_embarazo=id_embarazo,
+                provision=aprovisionamiento,
                 tipo_sesion=cuerpo.tipo_sesion,
                 ahora=ahora,
             )
+        except SimulacionNoAplicable as fallo:
+            # El dominio dice que esta sesión no existe para este embarazo hoy
+            # --semana fuera del catálogo, movimiento antes de la semana 20--.
+            # 422, y con la frase exacta: no se guarda algo que el servidor
+            # rechazaría después.
+            return error(fallo.detalle, HTTPStatus.UNPROCESSABLE_ENTITY)
         except PaqueteInvalido as fallo:
             # No deberia pasar: el paquete lo arma este adaptador con valores
             # fijos. Si ocurre, el contrato cambio y esto es un fallo interno,

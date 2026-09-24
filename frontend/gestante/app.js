@@ -994,13 +994,16 @@
           return;
         }
 
-        if (resultado.estado === 404) {
-          ui.notaMovimientos.textContent = 'Ese embarazo no está disponible para registrar sesiones.';
-          return;
-        }
-
-        ui.notaMovimientos.textContent =
-          'No se pudo registrar la sesión simulada. Inténtalo de nuevo más tarde.';
+        // El adaptador escribe un `detail` seguro y explicativo para cada
+        // negativa: el dispositivo sin aprovisionar, una semana gestacional
+        // fuera del catálogo, un episodio que no es suyo. Mostrarlo es más
+        // útil que un texto genérico, y no expone nada: esos mensajes los
+        // redacta este proyecto, no el servidor central.
+        const detalle =
+          resultado.cuerpo && typeof resultado.cuerpo.detail === 'string'
+            ? resultado.cuerpo.detail
+            : 'No se pudo registrar la sesión simulada. Inténtalo de nuevo más tarde.';
+        ui.notaMovimientos.textContent = detalle;
       })
       .finally(function () {
         actualizarBotonDeRegistro();
