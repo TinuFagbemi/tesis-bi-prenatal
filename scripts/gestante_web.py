@@ -7,8 +7,11 @@ Uso desde la raiz del repositorio::
     python scripts/gestante_web.py --comprobar      # revisa la configuracion y sale
 
 Este proceso corre **en el dispositivo de la paciente**. Sirve los tres archivos
-de la interfaz y actua de intermediario con dos cosas que ya existen: la API
-central, por HTTP, y el almacenamiento del nodo edge, en solo lectura.
+de la interfaz y actua de intermediario con lo que ya existe: la API central,
+por HTTP; el almacenamiento del nodo edge compartido, en solo lectura; y su
+propio archivo SQLite por cuenta para las sesiones de movimiento simuladas,
+que captura y sincroniza reutilizando las funciones de ``app.edge`` sin
+duplicar ninguna de sus reglas.
 
 **Por que el navegador no llama directamente a la API central.** Porque asi el
 token de la sesion nunca entra en JavaScript --vive en la memoria de este
@@ -17,11 +20,12 @@ central no responde, y porque servir la pagina desde el mismo origen que las
 rutas evita tener que anadir CORS a la aplicacion central, que este ticket no
 toca.
 
-La ruta del SQLite de sesiones, la URL de la API, el puerto, los tiempos de
-espera y la duracion de la ventana de sesion salen de la configuracion del
-entorno (``GESTANTE_SQLITE_PATH``, ``GESTANTE_FRONTEND_DIR``,
-``GESTANTE_API_BASE_URL``, ``GESTANTE_HOST``, ``GESTANTE_PORT``,
-``GESTANTE_HTTP_TIMEOUT``, ``GESTANTE_BUSY_TIMEOUT_MS``,
+La ruta del SQLite de sesiones, la carpeta de las sesiones de movimiento
+simuladas, la URL de la API, el puerto, los tiempos de espera y la duracion de
+la ventana de sesion salen de la configuracion del entorno
+(``GESTANTE_SQLITE_PATH``, ``GESTANTE_MOVIMIENTOS_DIR``,
+``GESTANTE_FRONTEND_DIR``, ``GESTANTE_API_BASE_URL``, ``GESTANTE_HOST``,
+``GESTANTE_PORT``, ``GESTANTE_HTTP_TIMEOUT``, ``GESTANTE_BUSY_TIMEOUT_MS``,
 ``GESTANTE_VENTANA_SESION_HORAS``, ``GESTANTE_COOKIE_SECURE``). ``--puerto`` y
 ``--host`` permiten cambiar el destino de una demostracion sin tocar el entorno.
 
@@ -132,6 +136,7 @@ def comprobar(settings: GestanteSettings) -> int:
     print("Interfaz de la gestante — configuracion efectiva:")
     print(f"  interfaz            : {settings.frontend_dir}")
     print(f"  sesiones (SQLite)   : {settings.sqlite_path}")
+    print(f"  movimientos (SQLite): {settings.movimientos_dir} (un archivo por cuenta)")
     print(f"  API central         : {settings.api_base_url}")
     print(f"  escucha en          : http://{settings.host}:{settings.port}")
     print(f"  ventana de sesion   : {settings.ventana_sesion_horas} h")
