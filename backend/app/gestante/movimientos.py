@@ -33,6 +33,7 @@ Todos los datos son ficticios y simulados.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -51,6 +52,7 @@ from app.edge import (
 from app.edge.captura import CapturaRegistrada
 from app.gestante import estado_local
 from app.gestante.config import GestanteSettings
+from app.gestante.provision import Provision
 from app.gestante.simulacion import construir_paquete_simulado
 from app.models.enums import TipoSesion
 
@@ -71,18 +73,20 @@ def registrar_sesion_simulada(
     settings: GestanteSettings,
     *,
     id_usuario: int,
-    id_embarazo: int,
+    provision: Provision,
     tipo_sesion: TipoSesion,
     ahora: datetime,
 ) -> CapturaRegistrada:
-    """Construye el paquete fijo y lo captura localmente, sin tocar la red.
+    """Construye el paquete con referencias reales y lo captura sin tocar la red.
 
-    ``id_embarazo`` llega ya verificado por quien llama --esta funcion no
-    vuelve a preguntarle al servidor central-- y por eso no recibe un token: no
-    lo necesita para escribir en el disco de este dispositivo.
+    ``provision`` llega ya comprobado por quien llama --que esta cuenta y ese
+    embarazo son a los que este dispositivo sirve-- y por eso esta funcion no
+    recibe un token: no lo necesita para escribir en el disco de este
+    dispositivo, y ese es justamente el punto de que la captura funcione sin
+    conexion.
     """
     paquete = construir_paquete_simulado(
-        id_embarazo=id_embarazo, tipo_sesion=tipo_sesion, ahora=ahora
+        provision=provision, tipo_sesion=tipo_sesion, ahora=ahora
     )
 
     ruta = ruta_para_la_cuenta(settings, id_usuario)
@@ -90,6 +94,9 @@ def registrar_sesion_simulada(
     with conectar(ruta, espera_de_bloqueo_ms=settings.busy_timeout_ms) as conexion:
         inicializar(conexion)
         return capturar(conexion, paquete)
+
+
+MENSAJE_SIN_REGISTROS = "Todavia no has registrado ninguna sesion simulada."
 
 
 def leer_estado_de_la_cuenta(
@@ -102,9 +109,22 @@ def leer_estado_de_la_cuenta(
     ya sabe convertir «el archivo no existe todavia» y «el archivo no se pudo
     leer» en un ``EstadoLocal`` seguro, y una cuenta que nunca registro una
     sesion simulada cae exactamente en el primer caso.
+
+    Lo unico que se sustituye es la frase de ese primer caso. La de
+    ``estado_local`` dice como se crea el almacenamiento del **nodo edge**
+    compartido --``edge_node.py init``--, y aqui eso seria una instruccion
+    equivocada: el archivo de esta cuenta lo crea el propio portal cuando ella
+    registra su primera sesion, sin que nadie ejecute nada.
+
+    La frase del segundo caso --el archivo esta pero no se pudo leer-- se
+    respeta tal cual: describe un problema real, y taparla con «todavia no has
+    registrado nada» convertiria un fallo en un silencio.
     """
     ruta = ruta_para_la_cuenta(settings, id_usuario)
-    return estado_local.leer(ruta, espera_de_bloqueo_ms=settings.busy_timeout_ms)
+    estado = estado_local.leer(ruta, espera_de_bloqueo_ms=settings.busy_timeout_ms)
+    if estado.inicializado or ruta.exists():
+        return estado
+    return replace(estado, detalle=MENSAJE_SIN_REGISTROS)
 
 
 def _construir_cliente_edge_http(

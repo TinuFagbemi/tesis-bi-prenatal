@@ -1,6 +1,6 @@
 """Configuracion del adaptador de la interfaz de la gestante (SCRUM-72).
 
-Nueve ajustes, leidos con el mismo mecanismo que ya usan el backend y el nodo
+Diez ajustes, leidos con el mismo mecanismo que ya usan el backend y el nodo
 edge --``pydantic-settings`` sobre el ``.env`` del repositorio-- pero bajo su
 propio prefijo ``GESTANTE_`` y en una clase propia.
 
@@ -47,6 +47,13 @@ DIRECTORIO_FRONTEND_POR_OMISION = REPOSITORY_ROOT / "frontend" / "gestante"
 # Bajo ``data/``, junto al dataset generado y a la base del nodo edge, y
 # ignorado por Git igual que ellos. Es estado de un dispositivo concreto.
 RUTA_SQLITE_POR_OMISION = REPOSITORY_ROOT / "data" / "gestante" / "sesion_local.sqlite3"
+
+# Referencias con las que este dispositivo forma paquetes validos: a que cuenta
+# y a que embarazo sirve, con que dispositivo, y los catalogos que necesita para
+# capturar sin red. Lo escribe "scripts/provisionar_demo.py provisionar"; este
+# proceso solo lo lee. Vive bajo data/ y esta ignorado por Git, como el resto
+# del estado de un dispositivo concreto.
+RUTA_PROVISION_POR_OMISION = REPOSITORY_ROOT / "data" / "gestante" / "provision.json"
 
 # Carpeta donde vive, **una base SQLite por cuenta**, el registro local de
 # sesiones de movimiento simuladas (SCRUM-72). Nunca un archivo compartido: dos
@@ -125,6 +132,7 @@ class GestanteSettings(BaseSettings):
 
     sqlite_path: Path = RUTA_SQLITE_POR_OMISION
     movimientos_dir: Path = RUTA_MOVIMIENTOS_POR_OMISION
+    provision_path: Path = RUTA_PROVISION_POR_OMISION
     frontend_dir: Path = DIRECTORIO_FRONTEND_POR_OMISION
     api_base_url: str = URL_API_POR_OMISION
     host: str = HOST_POR_OMISION

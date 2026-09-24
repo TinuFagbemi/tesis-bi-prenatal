@@ -5,7 +5,7 @@ esta tesis no construye en hardware: algo que corre **en el dispositivo de la
 paciente**, le sirve la interfaz, la autentica contra el servidor central cuando
 hay conexion, y sigue en pie cuando no la hay.
 
-Diez modulos, cada uno con un trabajo:
+Once modulos, cada uno con un trabajo:
 
 :mod:`app.gestante.config`
     Donde esta el archivo, a que API se llama, cuanto dura la sesion local.
@@ -21,9 +21,12 @@ Diez modulos, cada uno con un trabajo:
     curso y cual es la ultima lectura de una serie de sesiones.
 :mod:`app.gestante.estado_local`
     Ventana de solo lectura sobre la outbox del nodo edge compartido.
+:mod:`app.gestante.provision`
+    A que cuenta y a que embarazo sirve este dispositivo, y con que catalogos
+    puede formar un paquete valido sin preguntarle nada a la red.
 :mod:`app.gestante.simulacion`
-    El paquete fijo y reproducible de una sesion de movimiento simulada, sin
-    tocar el dataset canonico.
+    El paquete de una sesion simulada: referencias resueltas del
+    aprovisionamiento y semaforo derivado con SIM-1.0, nunca escogido.
 :mod:`app.gestante.movimientos`
     Captura y sincroniza esas sesiones por cuenta, delegando todo en
     ``app.edge`` -- un archivo SQLite propio por paciente, nunca compartido.
@@ -41,14 +44,14 @@ credenciales: la contrasena no se persiste en ninguna forma, y el token del
 servidor central vive unicamente en memoria del proceso.
 
 **Lo que el registro de movimientos simulados hace, y lo que no.** Captura un
-paquete fijo localmente -- eso siempre funciona, sin red -- y puede intentar
-sincronizarlo con una sola ronda real contra la API central. Esa sincronizacion
-depende de que el dispositivo y el tiempo gestacional del paquete existan y
-esten asignados en la base de datos que reciba el intento; este portal no tiene
-forma de conocer esos datos de antemano, asi que puede fallar honestamente sin
-que eso sea un defecto del registro local. No es un contador de movimientos que
-la paciente perciba ni introduce, y ningun valor biometrico se genera al azar
-en el navegador.
+paquete localmente --eso funciona sin red, que es el requisito-- y lo entrega
+despues con una sola ronda real contra la API central. Los tres
+identificadores que el paquete necesita no se inventan ni se escriben a mano:
+salen del aprovisionamiento del dispositivo, que los leyo de la base real. El
+semaforo tampoco se escoge: se deriva con SIM-1.0, la misma regla con la que
+el ETL vuelve a comprobarlo. No es un contador de movimientos que la paciente
+perciba ni introduce, y ningun valor biometrico se genera al azar en el
+navegador.
 
 Todos los datos que maneja esta interfaz son ficticios y simulados.
 """
@@ -98,6 +101,7 @@ from app.gestante.movimientos import (
     ruta_para_la_cuenta,
     sincronizar_cuenta,
 )
+from app.gestante.provision import Provision, ProvisionInvalida
 from app.gestante.rutas import AlmacenDeTokens, ContextoAdaptador, crear_router
 from app.gestante.sesion import (
     RolNoAutorizado,
@@ -123,6 +127,8 @@ __all__ = [
     "EstadoRespuesta",
     "GestanteSettings",
     "NOMBRE_DE_COOKIE",
+    "Provision",
+    "ProvisionInvalida",
     "ROL_PERMITIDO",
     "RespuestaClinica",
     "RespuestaIdentidad",
