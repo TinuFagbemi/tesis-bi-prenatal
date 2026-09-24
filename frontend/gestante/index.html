@@ -25,6 +25,13 @@
     <div id="connection-status" class="connection-status status-connecting">
       Comprobando conexión…
     </div>
+
+    <!-- Area de cuenta: fuera del menu de secciones, solo con sesion. -->
+    <div class="area-cuenta" id="area-cuenta" hidden>
+      <button type="button" class="btn-cuenta" id="btn-cerrar-sesion">
+        Cerrar sesión
+      </button>
+    </div>
   </header>
 
   <!-- =====================================================================
@@ -36,16 +43,21 @@
     <a href="#historial" class="qa-btn" data-vista="historial">Mi historial</a>
     <a href="#manual"    class="qa-btn" data-vista="manual">Manual de uso</a>
     <a href="#acerca"    class="qa-btn" data-vista="acerca">Acerca de FetalAlert</a>
-    <a href="#salir"     class="qa-btn" id="btn-cerrar-sesion">Cerrar sesión</a>
   </nav>
 
-  <main>
-
-    <p class="aviso-simulado">
-      Prototipo académico de FetalAlert. Toda la información que se muestra
-      proviene de datos simulados. No es un sistema clínicamente validado y no
-      emite diagnósticos.
+  <!-- Confirmacion de cierre de sesion. Nada se cierra hasta confirmar. -->
+  <dialog id="dialogo-cerrar-sesion" class="dialogo" aria-labelledby="dialogo-titulo">
+    <h2 id="dialogo-titulo" class="dialogo-titulo">¿Deseas cerrar sesión?</h2>
+    <p class="texto-apoyo">
+      Tus registros guardados en este dispositivo se conservan.
     </p>
+    <div class="dialogo-acciones">
+      <button type="button" class="btn-secundario" id="btn-cancelar-cierre">Cancelar</button>
+      <button type="button" class="btn-primario" id="btn-confirmar-cierre">Cerrar sesión</button>
+    </div>
+  </dialog>
+
+  <main>
 
     <!-- =================================================================
          VISTA 1 — INICIO DE SESION
@@ -96,7 +108,9 @@
 
       <h2 class="titulo-vista" id="saludo">Bienvenida</h2>
 
-      <!-- Embarazo actual ------------------------------------------------>
+      <!-- Embarazo actual ------------------------------------------------
+           Inicio muestra siempre el embarazo en curso. La seleccion de
+           «Mi historial» es independiente y no lo cambia. -->
       <div class="result-card bloque-embarazo">
         <h3 class="subtitulo">Embarazo actual</h3>
         <div class="data-row">
@@ -104,150 +118,105 @@
           <span class="value" id="embarazo-estado">No disponible</span>
         </div>
         <div class="data-row">
+          <span class="label">Inicio del embarazo:</span>
+          <span class="value" id="embarazo-inicio">No disponible</span>
+        </div>
+        <div class="data-row">
           <span class="label">Semana gestacional:</span>
           <span class="value" id="embarazo-semana">No disponible</span>
         </div>
         <div class="data-row">
-          <span class="label">Episodios anteriores:</span>
+          <span class="label">Embarazos anteriores:</span>
           <span class="value" id="embarazo-anteriores">No disponible</span>
         </div>
-        <p class="nota-pendiente" id="nota-embarazo">
-          El contexto clínico de tu embarazo todavía no está conectado en esta
-          versión del prototipo.
-        </p>
+        <p class="nota-pendiente" id="nota-embarazo" hidden></p>
+        <button type="button" class="btn-enlace" id="btn-ver-anteriores" hidden>
+          Ver embarazos anteriores en «Mi historial»
+        </button>
       </div>
 
-      <!-- Tarjetas de metricas ------------------------------------------->
-      <section class="cards">
+      <!-- Ultima lectura: las tres tarjetas son UNA misma lectura ---------->
+      <section class="bloque-lectura" aria-labelledby="titulo-ultima-lectura">
+        <h3 class="subtitulo" id="titulo-ultima-lectura">Última lectura</h3>
+        <p class="lectura-origen">
+          Registrada el <span id="last-update">—</span>.
+          Las tres mediciones corresponden a esta misma lectura.
+        </p>
 
-        <div class="card">
-          <h2>Frecuencia Cardíaca</h2>
-          <div class="value">
-            <span id="hr-value">—</span><span class="unit">BPM</span>
+        <div class="cards">
+
+          <div class="card">
+            <h2>Frecuencia Cardíaca</h2>
+            <div class="value">
+              <span id="hr-value">—</span><span class="unit">BPM</span>
+            </div>
+            <p id="hr-status">Sin lectura</p>
           </div>
-          <p id="hr-status">Sin lectura</p>
+
+          <div class="card">
+            <h2>Saturación de Oxígeno</h2>
+            <div class="value">
+              <span id="spo2-value">—</span><span class="unit">%</span>
+            </div>
+            <p id="spo2-status">Sin lectura</p>
+          </div>
+
+          <div class="card">
+            <h2>Actividad Fetal</h2>
+            <div class="value">
+              <span id="movs-value">—</span>
+            </div>
+            <div class="movements-text">Movimientos fetales</div>
+            <p id="mov-status">Sin lectura</p>
+          </div>
+
         </div>
 
-        <div class="card">
-          <h2>Saturación de Oxígeno</h2>
-          <div class="value">
-            <span id="spo2-value">—</span><span class="unit">%</span>
-          </div>
-          <p id="spo2-status">Sin lectura</p>
+        <!-- Semaforo de esa misma lectura -->
+        <div id="semaforo" class="alert waiting">
+          <div id="semaforo-luz" class="alert-light"></div>
+          <span id="semaforo-mensaje">Sin clasificación disponible</span>
         </div>
 
-        <div class="card">
-          <h2>Actividad Fetal</h2>
-          <div class="value">
-            <span id="movs-value">—</span>
+        <div class="semaforo">
+          <div class="semaforo-item ok">
+            <span class="alert-light"></span>
+            <span>Verde: dentro de lo esperado</span>
           </div>
-          <div class="movements-text">Movimientos fetales</div>
-          <p id="mov-status">Sin lectura</p>
-
-          <div class="mov-buttons">
-            <button id="btn-registrar-movimientos"
-                    class="btn-iniciar-conteo" type="button" disabled>
-              Registrar sesión de movimiento (simulada)
-            </button>
+          <div class="semaforo-item warning">
+            <span class="alert-light"></span>
+            <span>Ámbar: conviene repetir la medición</span>
           </div>
-          <p class="texto-ayuda-conteo" id="nota-movimientos">
-            Selecciona un embarazo en «Mi historial» para registrar una sesión
-            simulada.
-          </p>
+          <div class="semaforo-item error">
+            <span class="alert-light"></span>
+            <span>Rojo: comunícate con tu personal de seguimiento</span>
+          </div>
         </div>
-
       </section>
 
-      <!-- Sesiones de movimiento simuladas de esta cuenta ------------------>
-      <div class="result-card bloque-sincronizacion">
-        <h3 class="subtitulo">Mis sesiones de movimiento simuladas</h3>
-        <p class="texto-apoyo">
-          Prototipo académico — datos simulados. Lo que registras aquí se
-          guarda primero en este dispositivo y se envía cuando hay conexión;
-          nunca es un resultado clínico inmediato.
+      <!-- Registro de movimientos y su envio ------------------------------
+           Mensajes breves basados en el estado real de la cola de esta
+           cuenta. El envio es manual: no se promete nada automatico. -->
+      <div class="result-card bloque-registro">
+        <h3 class="subtitulo">Registrar movimientos</h3>
+
+        <div class="mov-buttons">
+          <button id="btn-registrar-movimientos"
+                  class="btn-iniciar-conteo" type="button" disabled>
+            Registrar sesión de movimientos
+          </button>
+        </div>
+        <p class="texto-ayuda-conteo" id="nota-movimientos">
+          Necesitas un embarazo en curso para registrar movimientos.
         </p>
 
-        <div class="estado-local" id="movimientos-estado">
-          <div class="estado-item">
-            <span class="estado-nombre">PENDIENTE</span>
-            <span class="estado-conteo" id="movimientos-pendientes">—</span>
-          </div>
-          <div class="estado-item">
-            <span class="estado-nombre">ENVIADO</span>
-            <span class="estado-conteo" id="movimientos-enviados">—</span>
-          </div>
-          <div class="estado-item">
-            <span class="estado-nombre">FALLIDO (reintentable)</span>
-            <span class="estado-conteo" id="movimientos-reintentables">—</span>
-          </div>
-          <div class="estado-item">
-            <span class="estado-nombre">FALLIDO (requiere revisión)</span>
-            <span class="estado-conteo" id="movimientos-revision">—</span>
-          </div>
+        <div class="envio" id="envio">
+          <p class="envio-estado" id="envio-estado" role="status"></p>
+          <button id="btn-sincronizar-movimientos" class="btn-secundario" type="button" hidden>
+            Enviar ahora
+          </button>
+          <p class="envio-resultado" id="envio-resultado" role="status" hidden></p>
         </div>
-
-        <button id="btn-sincronizar-movimientos" class="btn-iniciar-conteo" type="button">
-          Sincronizar ahora
-        </button>
-
-        <p class="nota-pendiente" id="nota-movimientos-estado" hidden></p>
-      </div>
-
-      <!-- Semaforo -------------------------------------------------------->
-      <div id="semaforo" class="alert waiting">
-        <div id="semaforo-luz" class="alert-light"></div>
-        <span id="semaforo-mensaje">Sin clasificación disponible</span>
-      </div>
-
-      <div class="semaforo">
-        <div class="semaforo-item ok">
-          <span class="alert-light"></span>
-          <span>Verde — dentro de lo esperado para el seguimiento simulado</span>
-        </div>
-        <div class="semaforo-item warning">
-          <span class="alert-light"></span>
-          <span>Ámbar — conviene repetir la medición</span>
-        </div>
-        <div class="semaforo-item error">
-          <span class="alert-light"></span>
-          <span>Rojo — comunícate con tu personal de seguimiento</span>
-        </div>
-      </div>
-
-      <!-- Estado local del nodo ------------------------------------------>
-      <div class="result-card bloque-sincronizacion">
-        <h3 class="subtitulo">Registros de este dispositivo</h3>
-        <p class="texto-apoyo">
-          Lo que se captura en este equipo se guarda aquí primero, y se envía
-          cuando hay conexión.
-        </p>
-
-        <div class="estado-local" id="estado-local">
-          <div class="estado-item">
-            <span class="estado-nombre">PENDIENTE</span>
-            <span class="estado-conteo" id="outbox-pendientes">—</span>
-          </div>
-          <div class="estado-item">
-            <span class="estado-nombre">ENVIADO</span>
-            <span class="estado-conteo" id="outbox-enviados">—</span>
-          </div>
-          <div class="estado-item">
-            <span class="estado-nombre">FALLIDO (reintentable)</span>
-            <span class="estado-conteo" id="outbox-reintentables">—</span>
-          </div>
-          <div class="estado-item">
-            <span class="estado-nombre">FALLIDO (requiere revisión)</span>
-            <span class="estado-conteo" id="outbox-revision">—</span>
-          </div>
-        </div>
-
-        <p class="nota-pendiente" id="nota-estado-local" hidden></p>
-      </div>
-
-      <!-- Ultima actualizacion -------------------------------------------->
-      <div class="last-update">
-        <p>Última lectura: <span id="last-update">—</span></p>
-        <p>Última sincronización: <span id="last-sync">—</span></p>
       </div>
 
     </section>
@@ -258,9 +227,9 @@
     <section id="vista-historial" class="vista" hidden>
       <h2 class="titulo-vista">Mi historial</h2>
 
-      <p class="texto-apoyo">
-        Aquí aparecerán tus episodios de embarazo y las sesiones de monitoreo
-        registradas en cada uno, del más reciente al más antiguo.
+      <p class="texto-apoyo texto-centrado">
+        Elige un embarazo para consultar sus lecturas, de la más reciente a la
+        más antigua. Esta selección no cambia lo que muestra «Inicio».
       </p>
 
       <div class="selector-embarazo">
@@ -272,17 +241,8 @@
         </label>
       </div>
 
-      <div id="historial-lista" class="historial-lista">
-        <!-- Estado vacio. Las filas se construyen en app.js a partir de lo
-             que entregue el adaptador; hoy no entrega historial clinico. -->
-        <div class="result-card estado-vacio" id="historial-vacio">
-          <h3 class="subtitulo">Todavía no hay historial que mostrar</h3>
-          <p class="texto-apoyo">
-            El historial clínico se mostrará cuando el contexto de embarazo
-            esté conectado. Esta versión del prototipo no inventa registros.
-          </p>
-        </div>
-      </div>
+      <!-- Las filas se construyen en app.js con lo que entrega el adaptador. -->
+      <div id="historial-lista" class="historial-lista"></div>
     </section>
 
     <!-- =================================================================
@@ -308,8 +268,10 @@
         <div class="card">
           <h2>2. Inicio</h2>
           <ul>
-            <li>Reúne lo principal: tu embarazo, las últimas mediciones, el
-                semáforo y el estado de los envíos de este dispositivo.</li>
+            <li>Muestra tu embarazo en curso y su última lectura: las tres
+                tarjetas y el semáforo corresponden a esa misma lectura, con
+                su fecha.</li>
+            <li>Si esa lectura no midió algún valor, verás «—».</li>
             <li>Desde aquí se registra una sesión de movimientos fetales.</li>
           </ul>
         </div>
@@ -319,9 +281,11 @@
         <div class="card">
           <h2>3. Mi historial</h2>
           <ul>
-            <li>Reúne tus episodios de embarazo y sus sesiones de monitoreo.</li>
+            <li>Reúne tus embarazos, incluidos los anteriores, con todas sus
+                lecturas.</li>
             <li>Cada embarazo se muestra por separado: la información de uno
                 nunca se mezcla con la de otro.</li>
+            <li>Elegir otro embarazo aquí no cambia lo que muestra «Inicio».</li>
             <li>Solo verás información tuya.</li>
           </ul>
         </div>
@@ -344,15 +308,14 @@
         <div class="card">
           <h2>5. Estado de los envíos</h2>
           <ul>
-            <li><strong>PENDIENTE</strong>: guardado en este equipo, todavía sin
-                enviar. No se pierde al cerrar la aplicación.</li>
-            <li><strong>ENVIADO</strong>: el servidor confirmó que lo recibió.
-                Es un estado definitivo.</li>
-            <li><strong>FALLIDO (reintentable)</strong>: un intento no se pudo
-                confirmar y se volverá a intentar.</li>
-            <li><strong>FALLIDO (requiere revisión)</strong>: se agotaron los
-                intentos o el envío fue rechazado. Necesita que alguien lo
-                revise.</li>
+            <li><strong>Pendiente de envío</strong>: guardado en este equipo,
+                todavía sin enviar. No se pierde al cerrar la aplicación.</li>
+            <li><strong>Enviado</strong>: el servidor confirmó que lo
+                recibió.</li>
+            <li><strong>No se pudo enviar</strong>: el registro sigue guardado
+                en este equipo. Pulsa «Reintentar» cuando haya conexión.</li>
+            <li>El envío no es automático: se hace con el botón «Enviar
+                ahora».</li>
           </ul>
         </div>
       </div>
@@ -389,12 +352,12 @@
         <div class="card">
           <h2>8. Registrar movimientos fetales</h2>
           <ul>
-            <li>La acción está preparada en Inicio.</li>
-            <li>Queda habilitada cuando el contexto clínico autorizado esté
-                integrado, porque una sesión debe quedar asociada al embarazo
-                correcto.</li>
-            <li>En esta versión no hay sensores ni hardware: el prototipo
-                trabaja con datos simulados.</li>
+            <li>El botón está en «Inicio» y registra la sesión en tu embarazo
+                en curso.</li>
+            <li>Primero se guarda en este equipo; después se envía con
+                «Enviar ahora».</li>
+            <li>Si no tienes un embarazo en curso, el botón aparece
+                desactivado.</li>
           </ul>
         </div>
       </div>
@@ -403,20 +366,11 @@
         <div class="card">
           <h2>9. Cerrar sesión</h2>
           <ul>
-            <li>Cierra la sesión de este equipo de inmediato.</li>
+            <li>El botón está arriba, en el área de tu cuenta.</li>
+            <li>Se te pedirá confirmar. «Cancelar» mantiene la sesión
+                abierta.</li>
+            <li>Tus registros pendientes se conservan en este equipo.</li>
             <li>Para volver a entrar hace falta el correo y la contraseña.</li>
-          </ul>
-        </div>
-      </div>
-
-      <div class="manual-step">
-        <div class="card">
-          <h2>10. Datos simulados</h2>
-          <ul>
-            <li>FetalAlert es, en esta etapa, un prototipo académico.</li>
-            <li>Toda la información es simulada y no corresponde a personas
-                reales.</li>
-            <li>No sustituye la consulta con personal de salud.</li>
           </ul>
         </div>
       </div>
@@ -458,7 +412,9 @@
             <h4>Datos simulados</h4>
             <p>
               Toda la información de esta versión es simulada. No corresponde a
-              pacientes reales ni procede de sensores reales.
+              pacientes reales ni procede de sensores reales. Las sesiones de
+              movimientos que se registran desde «Inicio» usan valores
+              simulados fijos: no son una medición.
             </p>
           </div>
 
@@ -466,7 +422,8 @@
             <h4>Alcance de esta versión</h4>
             <p>
               Prototipo académico. No está validado clínicamente, no emite
-              diagnósticos y no incorpora hardware dentro del alcance de esta
+              diagnósticos, no sustituye la consulta con personal de salud y
+              no incorpora hardware dentro del alcance de esta
               implementación.
             </p>
           </div>
@@ -493,7 +450,7 @@
   </main>
 
   <footer class="footer">
-    <p>FetalAlert Panamá &copy; 2026 — Prototipo académico con datos simulados</p>
+    <p>FetalAlert Panamá &copy; 2026</p>
   </footer>
 
   <script src="app.js"></script>
