@@ -353,19 +353,40 @@ def test_ultimo_resultado_ya_no_es_una_pagina():
 # ---------------------------------------------------------------------------
 
 
-def test_el_registro_de_movimientos_esta_preparado_pero_deshabilitado():
-    """La accion existe y se ve, y dice por que todavia no opera.
+def test_el_registro_de_movimientos_simulados_existe_y_arranca_deshabilitado():
+    """El boton existe, se ve como simulado, y arranca deshabilitado en el HTML.
 
-    No se conecta porque un paquete de monitoreo exige referencias clinicas
-    --embarazo, dispositivo, semana gestacional, semaforo-- que hoy no tienen
-    fuente autorizada. Un boton operativo tendria que inventarlas.
+    Arranca deshabilitado porque el marcado estatico no sabe todavia si hay un
+    embarazo elegido -- eso lo decide `app.js` en tiempo de ejecucion, contra
+    la lista que entrega el adaptador. La sincronizacion es una accion
+    aparte, siempre disponible, porque no depende de tener un embarazo
+    elegido.
     """
     contenido = leer(HTML)
 
     assert 'id="btn-registrar-movimientos"' in contenido
     assert "disabled" in contenido
-    assert "Registrar sesión de movimientos" in contenido
-    assert "contexto clínico autorizado" in contenido
+    assert "simulada" in contenido
+    assert 'id="btn-sincronizar-movimientos"' in contenido
+    assert 'id="movimientos-pendientes"' in contenido
+    assert 'id="movimientos-enviados"' in contenido
+
+
+def test_el_registro_de_movimientos_simulados_esta_conectado_en_app_js():
+    """La accion ya llama al adaptador: no es un boton decorativo.
+
+    El paquete concreto -- valores fijos, referencias de catalogo -- lo arma
+    el servidor en ``app.gestante.simulacion``; este archivo solo elige el
+    tipo de sesion y llama a la ruta.
+    """
+    contenido = leer(JS)
+
+    assert "sesionesSimuladas" in contenido
+    assert "movimientosSincronizar" in contenido
+    assert "movimientosEstado" in contenido
+    assert "manejarRegistrarMovimiento" in contenido
+    assert "manejarSincronizarMovimientos" in contenido
+    assert "TIPO_SESION_SIMULADA" in contenido
 
 
 def test_no_aparecen_los_identificadores_que_solo_sirven_para_escribir():

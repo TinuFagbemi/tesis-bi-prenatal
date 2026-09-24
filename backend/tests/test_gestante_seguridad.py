@@ -80,6 +80,25 @@ def test_el_correo_no_queda_en_el_almacen_local(tmp_path):
     assert EMAIL_DE_PRUEBA.encode() not in bytes_del_almacen(settings)
 
 
+def test_cerrar_sesion_retira_el_token_central_de_la_memoria_del_proceso(tmp_path):
+    """El cierre explicito no solo cierra la fila en SQLite: tambien olvida el
+    token en memoria. Son dos guardas distintas y las dos tienen que actuar:
+    la primera impide que la cookie vuelva a servir, y esta impide que el
+    token de esa sesion pudiera seguir usandose si, por un fallo futuro, algo
+    lo buscara sin pasar antes por la validacion de la sesion local.
+    """
+    cliente = construir_cliente(tmp_path)[0]
+    iniciar_sesion(cliente)
+    identificador = cliente.cookies[NOMBRE_DE_COOKIE]
+    tokens = cliente.app.state.contexto.tokens
+
+    assert tokens.obtener(identificador) is not None
+
+    cliente.post("/adaptador/cerrar-sesion")
+
+    assert tokens.obtener(identificador) is None
+
+
 def test_el_almacen_solo_guarda_las_columnas_previstas(tmp_path):
     """Un esquema que no puede crecer sin que esta prueba lo note."""
     from app.gestante import almacen

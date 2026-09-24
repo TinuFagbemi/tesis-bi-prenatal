@@ -147,15 +147,51 @@
           <div class="mov-buttons">
             <button id="btn-registrar-movimientos"
                     class="btn-iniciar-conteo" type="button" disabled>
-              Registrar sesión de movimientos
+              Registrar sesión de movimiento (simulada)
             </button>
           </div>
           <p class="texto-ayuda-conteo" id="nota-movimientos">
-            Disponible al integrar el contexto clínico autorizado.
+            Selecciona un embarazo en «Mi historial» para registrar una sesión
+            simulada.
           </p>
         </div>
 
       </section>
+
+      <!-- Sesiones de movimiento simuladas de esta cuenta ------------------>
+      <div class="result-card bloque-sincronizacion">
+        <h3 class="subtitulo">Mis sesiones de movimiento simuladas</h3>
+        <p class="texto-apoyo">
+          Prototipo académico — datos simulados. Lo que registras aquí se
+          guarda primero en este dispositivo y se envía cuando hay conexión;
+          nunca es un resultado clínico inmediato.
+        </p>
+
+        <div class="estado-local" id="movimientos-estado">
+          <div class="estado-item">
+            <span class="estado-nombre">PENDIENTE</span>
+            <span class="estado-conteo" id="movimientos-pendientes">—</span>
+          </div>
+          <div class="estado-item">
+            <span class="estado-nombre">ENVIADO</span>
+            <span class="estado-conteo" id="movimientos-enviados">—</span>
+          </div>
+          <div class="estado-item">
+            <span class="estado-nombre">FALLIDO (reintentable)</span>
+            <span class="estado-conteo" id="movimientos-reintentables">—</span>
+          </div>
+          <div class="estado-item">
+            <span class="estado-nombre">FALLIDO (requiere revisión)</span>
+            <span class="estado-conteo" id="movimientos-revision">—</span>
+          </div>
+        </div>
+
+        <button id="btn-sincronizar-movimientos" class="btn-iniciar-conteo" type="button">
+          Sincronizar ahora
+        </button>
+
+        <p class="nota-pendiente" id="nota-movimientos-estado" hidden></p>
+      </div>
 
       <!-- Semaforo -------------------------------------------------------->
       <div id="semaforo" class="alert waiting">
