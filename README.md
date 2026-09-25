@@ -1755,12 +1755,31 @@ analítico y en `publicacion` hay que ejecutar después
 
 ### Inicio e Historial: dos contextos
 
-- **Inicio** muestra solo el embarazo en curso (`actual` sin ambigüedad) y su
-  **última lectura**: el máximo de `(fecha_hora_captura, id_lectura)` dentro de
-  ese embarazo. Las tres tarjetas y el semáforo son esa misma lectura, con su
-  fecha; lo que esa lectura no midió aparece como «—». No se completa con
-  valores de otra lectura ni de otro embarazo. Con ambigüedad o sin embarazo en
-  curso, Inicio no muestra lecturas y el registro queda deshabilitado.
+- **Inicio** muestra solo el embarazo en curso (`actual` sin ambigüedad).
+  - **Semana actual**: la de *hoy* en Panamá, calculada por el adaptador con
+    `semana_gestacional` —la aritmética del servidor— y sin topes. No es la
+    semana de ninguna lectura. Si la fecha probable de parto ya pasó y el
+    episodio sigue `ACTIVO`, se dice como hecho.
+  - **Tus últimos registros**: una tarjeta por variable (FC, SpO₂,
+    movimientos) con el **último valor no nulo de esa variable** en ese
+    embarazo, por `(fecha_hora_captura, id_lectura)`. Cada tarjeta lleva su
+    fecha, la semana de *esa* lectura y la clasificación **de esa lectura**
+    (la API solo publica el semáforo global de cada lectura; no hay
+    clasificación por métrica y la interfaz no la inventa). Pueden ser
+    momentos distintos y la pantalla lo dice. El cero es un valor; una
+    variable nunca registrada es «Sin registros»; una que no llegó es «No
+    disponible». `id_lectura`/`id_sesion` viajan como atributos para
+    trazabilidad y pruebas, no se muestran.
+  - **Tu lectura más reciente**: la `ultima_lectura` de siempre —una sola
+    lectura, con su fecha, lo que midió y su semáforo—. No hay semáforo
+    conjunto de las tres tarjetas.
+  - Con ambigüedad o sin embarazo en curso, Inicio no muestra lecturas y el
+    registro queda deshabilitado.
+- **Series**: `/adaptador/embarazos/{id}/monitoreo` entrega además `series`
+  por variable (unidad y puntos en orden cronológico, solo lecturas
+  existentes: sin interpolar, promediar ni agrupar por día). La tarjeta es por
+  construcción el último punto de su serie (`app.gestante.clinico.serie` y
+  `ultimo_registro` comparten la regla). La siguiente etapa las dibujará.
 - **Mi historial** tiene su propia selección de embarazo y lista **todas** sus
   lecturas en una tabla (fecha, FC, SpO₂, movimientos, semana y semáforo),
   también cuando la última solo midió movimientos. Cambiar esa selección no
@@ -1769,7 +1788,42 @@ analítico y en `publicacion` hay que ejecutar después
 
 Ninguna vista crea filas: abrir, navegar, refrescar o iniciar sesión solo
 consulta. Las únicas filas nuevas son las que la paciente registra
-explícitamente con el botón de movimientos.
+explícitamente con el botón de movimientos. Las fechas se muestran en español
+y en hora de Panamá, sea cual sea el navegador; las fechas de calendario
+(`fecha_inicio`) no cambian de día por la zona horaria.
+
+### Estado de conexión y sesión con el servidor
+
+El indicador refleja **dos comprobaciones**, las de
+`GET /adaptador/estado-conexion` (exige sesión local, no renueva nada y usa
+`/yo`, que no escribe auditoría):
+
+| Indicador | Qué se comprobó |
+|---|---|
+| Conectada al servidor | La API respondió y `/yo` aceptó el token. |
+| Servidor disponible · inicia sesión de nuevo | La API respondió 401 (token vencido, inválido o cuenta desactivada, indistinguibles por diseño) o el portal se reinició y no tiene token. Se ofrece **Volver a iniciar sesión**. |
+| Acceso no autorizado | 403: identidad válida sin permiso. No se ofrece reautenticar. |
+| Sin conexión con el servidor | La API no respondió. |
+| El servidor no responde bien | Respuesta fuera de contrato (5xx…). |
+| No se pudo comprobar la conexión | Ni el portal local contestó: típico al suspenderse el equipo. |
+
+`POST /adaptador/reautenticar` vuelve a pedir la contraseña **de la misma
+cuenta** sin cerrar la sesión local (otra cuenta: 403; credenciales que no
+sirven: 400) y conserva los registros guardados. No hay refresh de token:
+el contrato central no lo tiene, y no se guarda ninguna contraseña. El JWT
+(30 min) y la ventana local (72 h) no cambian.
+
+El refresco cada 20 s comprueba solo conexión y cola de envíos. Lo clínico
+—que el servidor audita en cada lectura— se pide al entrar, al volver a
+Inicio, al cambiar de embarazo, con «Actualizar información», al volver a la
+pestaña con datos de más de un minuto (también `online`, `resume` y
+`pageshow`), al recuperar la conexión o la autenticación y tras un envío
+confirmado. Antes se recargaba cada 20 s: ~80 filas de auditoría por minuto
+por pestaña abierta.
+
+«Información consultada al servidor el …» (última actualización de los
+datos) y «Último envío confirmado por el servidor: …» (`enviado_en` de la
+outbox) son cosas distintas; un servidor disponible no mueve la segunda.
 
 ### Procedencia de los datos de la cuenta de demostración
 
@@ -1787,11 +1841,14 @@ que agrega el aprovisionamiento (embarazo 130, su dispositivo y su seguimiento)
 y los **registros locales de movimiento** que la paciente crea desde el portal
 (sesiones del embarazo 130, con la constante `MOV_SIMULADO`).
 
-**Limitación de procedencia abierta.** Un registro local sincronizado se guarda
-con `origen_dato = DISPOSITIVO`, igual que una sesión canónica: en la base no
-se distingue de una lectura del dataset. Resolverlo —y sustituir la constante
-por un valor preestablecido— exige decidir el mecanismo de simulación (ver la
-sección siguiente) y no se hizo en SCRUM-72.
+**Trazabilidad que ya existe.** Un registro local sincronizado se guarda con
+`origen_dato = DISPOSITIVO`, igual que una sesión canónica, pero la base ya lo
+distingue sin migraciones: tiene su fila en `operacional.idempotencia_solicitud`
+(las sesiones del dataset, cargadas por el cargador, no tienen ninguna), una
+entrada `SESION_MONITOREO_REGISTRADA` en `auditoria_log` con la cuenta que lo
+envió, y el dispositivo que creó `provisionar_demo.py`, que no existe en el
+dataset. Sustituir la constante `MOV_SIMULADO` por un valor preestablecido es
+una decisión pendiente: ver `docs/scrum72_etapa1_resumen.md`.
 
 Los datos no se trasladan de un embarazo a otro. `tests/test_gestante_dataset.py`
 regenera el dataset con su semilla y comprueba que la ruta de monitoreo
@@ -1817,12 +1874,20 @@ En Windows, la URL de la base debe usar `127.0.0.1` y no `localhost`: Docker
 publica el puerto solo en IPv4 y el intento previo por `::1` retrasa cada
 conexión unos 8 segundos.
 
-Iniciar sesión con la cuenta de demostración (`paciente01@example.com`; la
-contraseña es la `PASSWORD_SIMULADA` del generador) y comprobar:
+Dos cuentas (la contraseña de ambas es la `PASSWORD_SIMULADA` del generador):
 
-1. **Inicio** muestra el embarazo en curso (inicio 19/03/2026) y la fecha de
-   la última lectura. Si esa lectura es un registro local de movimientos, la
-   tarjeta muestra 12 y FC/SpO₂ «—».
+- `paciente30@example.com` (embarazo canónico 129, `ACTIVO`): consulta y
+  gráficas. Inicio muestra FC 83 y SpO₂ 96 del 29/5/2026 03:27 (lectura 549,
+  Verde) y 7 movimientos del 21/6/2026 09:56 (lectura 1259, Ámbar); semana
+  actual 53 y el aviso de fecha probable de parto superada.
+- `paciente01@example.com`: historial longitudinal y registro de
+  movimientos.
+
+Con `paciente01` comprobar:
+
+1. **Inicio** muestra el embarazo en curso (inicio 19/03/2026, semana actual
+   28). FC/SpO₂ dicen «Sin registros» —ese episodio nunca los midió— y
+   movimientos muestra 12, que es `MOV_SIMULADO`, con su fecha.
 2. **Ver embarazos anteriores en «Mi historial»** abre el embarazo 100 con sus
    41 lecturas; la fila del 08/09/2025 a las 12:13 (hora de Panamá; 17:13 UTC)
    muestra 86 BPM, 97 %, semana 36 y semáforo verde.
