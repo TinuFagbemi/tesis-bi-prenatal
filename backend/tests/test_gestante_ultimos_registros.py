@@ -34,6 +34,7 @@ from app.gestante.clinico import (
     ultimo_registro,
 )
 from app.models.enums import NombreRol
+from app.schemas.clinico import EmbarazoResumen
 from tests.test_gestante_clinico import (
     ClienteClinicoDoble,
     embarazo,
@@ -192,15 +193,21 @@ def test_los_ultimos_registros_viajan_con_su_origen_y_su_unidad(tmp_path):
         "unidad": "BPM",
         "fecha_hora_captura": "2026-06-01T08:27:00+00:00",
         "semana_gestacion_lectura": 36,
-        "codigo_semaforo_lectura": "OK",
         "id_lectura": 549,
         "id_sesion": 1,
     }
     assert ultimos["saturacion_oxigeno"]["valor"] == "96.00"
     assert ultimos["saturacion_oxigeno"]["unidad"] == "%"
     assert ultimos["movimientos_fetales"]["valor"] == 7
-    assert ultimos["movimientos_fetales"]["codigo_semaforo_lectura"] == "WARNING"
     assert ultimos["movimientos_fetales"]["id_lectura"] == 1259
+    # Ninguna clasificación por variable: la API solo clasifica lecturas
+    # completas, y esa clasificación sigue en su sitio.
+    for registro in ultimos.values():
+        assert not any("semaforo" in clave for clave in registro)
+    for serie_ in datos["series"].values():
+        assert all(not any("semaforo" in c for c in p) for p in serie_["puntos"])
+    assert datos["ultima_lectura"]["codigo_semaforo"] == "WARNING"
+    assert datos["sesiones"][0]["lecturas"][0]["codigo_semaforo"] == "OK"
     # El contrato anterior sigue intacto.
     assert datos["ultima_lectura"]["id_lectura"] == 1259
     assert len(datos["sesiones"]) == 2
@@ -333,12 +340,68 @@ def test_la_semana_actual_se_calcula_en_el_dia_de_panama(tmp_path):
     assert datos["semana_actual"] == 1
 
 
-def test_la_semana_actual_no_se_topa_en_42(tmp_path):
+def test_pasada_la_fecha_probable_de_parto_no_se_publica_semana_actual(tmp_path):
+    """El episodio 129 de paciente30: ACTIVO, con su FPP (1/7/2026) ya pasada.
+
+    Un «semana actual: 53» se leería como seguimiento vigente. No se publica, y
+    las fechas y el estado del episodio llegan intactos.
+    """
     reloj = RelojFalso(datetime(2026, 9, 25, 15, 0, tzinfo=UTC))
+    episodio_129 = EmbarazoResumen(
+        id_embarazo=129,
+        fecha_inicio=date(2025, 9, 24),
+        fecha_probable_parto=date(2026, 7, 1),
+        estado_embarazo="ACTIVO",
+        fecha_cierre=None,
+    )
     central = ClienteClinicoDoble(
-        respuesta_embarazos=RespuestaClinica(
-            EstadoRespuesta.OK, datos=(embarazo(129, inicio=date(2025, 9, 24)),)
-        )
+        respuesta_embarazos=RespuestaClinica(EstadoRespuesta.OK, datos=(episodio_129,))
+    )
+    cliente, _, _, _ = construir_cliente(tmp_path, central=central, reloj=reloj)
+    iniciar_sesion(cliente)
+
+    datos = cliente.get("/adaptador/embarazos").json()["datos"]
+
+    assert datos["semana_actual"] is None
+    assert datos["actual"] == {
+        "id_embarazo": 129,
+        "fecha_inicio": "2025-09-24",
+        "fecha_probable_parto": "2026-07-01",
+        "estado_embarazo": "ACTIVO",
+        "fecha_cierre": None,
+    }
+
+
+def test_el_dia_de_la_fecha_probable_de_parto_aun_hay_semana_actual(tmp_path):
+    reloj = RelojFalso(datetime(2026, 7, 1, 20, 0, tzinfo=UTC))  # 1/7 en Panamá
+    episodio = EmbarazoResumen(
+        id_embarazo=129,
+        fecha_inicio=date(2025, 9, 24),
+        fecha_probable_parto=date(2026, 7, 1),
+        estado_embarazo="ACTIVO",
+        fecha_cierre=None,
+    )
+    central = ClienteClinicoDoble(
+        respuesta_embarazos=RespuestaClinica(EstadoRespuesta.OK, datos=(episodio,))
+    )
+    cliente, _, _, _ = construir_cliente(tmp_path, central=central, reloj=reloj)
+    iniciar_sesion(cliente)
+
+    assert cliente.get("/adaptador/embarazos").json()["datos"]["semana_actual"] == 41
+
+
+def test_la_semana_actual_no_lleva_topes_numericos(tmp_path):
+    """Si la FPP registrada está lejos, la semana se dice tal cual, aunque pase de 42."""
+    reloj = RelojFalso(datetime(2026, 9, 25, 15, 0, tzinfo=UTC))
+    episodio = EmbarazoResumen(
+        id_embarazo=129,
+        fecha_inicio=date(2025, 9, 24),
+        fecha_probable_parto=date(2026, 12, 31),
+        estado_embarazo="ACTIVO",
+        fecha_cierre=None,
+    )
+    central = ClienteClinicoDoble(
+        respuesta_embarazos=RespuestaClinica(EstadoRespuesta.OK, datos=(episodio,))
     )
     cliente, _, _, _ = construir_cliente(tmp_path, central=central, reloj=reloj)
     iniciar_sesion(cliente)

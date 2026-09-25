@@ -1,27 +1,44 @@
 # SCRUM-72 — Etapa 1 (datos y comportamiento): resumen para la etapa 2
 
 Estado al 2026-09-25. SCRUM-72 **no está terminado**: falta el rediseño visual
-(etapa 2) y las decisiones pendientes de abajo. Todo se hizo sin tocar
-contratos centrales de SCRUM-98 (JWT/RBAC, RLS, esquemas clínicos, publicación
-analítica): los cambios viven en `backend/app/gestante/`, `frontend/gestante/`,
-sus pruebas y el workflow de CI.
+(etapa 2) y las decisiones pendientes de abajo.
+
+**Alcance respecto de `main` (con SCRUM-98 integrado, `f91991a`).** Código
+nuevo: `backend/app/gestante/`, `frontend/gestante/`,
+`scripts/gestante_web.py`, `scripts/provisionar_demo.py` y sus pruebas
+`backend/tests/test_gestante_*.py` y `test_provisionar_demo_postgresql.py`.
+Archivos existentes que cambian: `.github/workflows/ci.yml` (paso de Node;
+step y entrada del guardián para el aprovisionamiento; su `--ignore` en la
+capa sin base), `.gitignore` (`data/gestante/`), `README.md` y
+`backend/tests/test_cuentas.py` (el guardián pasa de 14 a 15 reportes, número
+exacto, y exige el nuevo). Sin cambios en el código de la API, las
+migraciones, el cargador, el ETL, `bootstrap_roles`, Compose ni dependencias:
+JWT/RBAC, RLS, contratos clínicos y publicación analítica quedan intactos.
 
 ## Qué quedó hecho
 
-- **«Tus últimos registros»** en Inicio: una tarjeta por variable con el
-  último valor no nulo de esa variable en el embarazo en curso, cada una con
-  su fecha, la semana de su lectura y la clasificación de su lectura. Regla
-  única en `app.gestante.clinico` (`serie`, `ultimo_registro`); el adaptador
-  la expone en `datos.ultimos_registros` de
-  `GET /adaptador/embarazos/{id}/monitoreo`. `ultima_lectura` se conserva y
-  alimenta «Tu lectura más reciente» (un solo semáforo, de una sola lectura).
+- **«Tus últimos registros»** en Inicio: una tarjeta **neutral** por
+  variable con el último valor no nulo de esa variable en el embarazo en
+  curso, cada una con su fecha y la semana de su lectura. Sin semáforo: la API
+  solo clasifica lecturas completas. Regla única en `app.gestante.clinico`
+  (`serie`, `ultimo_registro`); el adaptador la expone en
+  `datos.ultimos_registros` de `GET /adaptador/embarazos/{id}/monitoreo`.
+  `ultima_lectura` se conserva y alimenta «Tu lectura más reciente»: un solo
+  semáforo, de una sola lectura, con fecha y alcance escritos.
 - **Series** para gráficas en `datos.series.{frecuencia_cardiaca|saturacion_oxigeno|movimientos_fetales}`:
-  `{unidad, puntos:[{valor, unidad, fecha_hora_captura, semana_gestacion_lectura, codigo_semaforo_lectura, id_lectura, id_sesion}]}`,
+  `{unidad, puntos:[{valor, unidad, fecha_hora_captura, semana_gestacion_lectura, id_lectura, id_sesion}]}`,
   ascendentes, solo lecturas existentes. `valor` llega como texto para
-  NUMERIC (`"83.00"`) y entero para movimientos; `0` es un valor.
+  NUMERIC (`"83.00"`) y entero para movimientos; `0` es un valor. Si una
+  gráfica necesita el semáforo, debe tomarlo de `sesiones[].lecturas[]` y
+  rotularlo como clasificación de la lectura, no de la variable.
 - **Semana actual** (`datos.semana_actual`, `datos.hoy` en
   `/adaptador/embarazos`): día de calendario de Panamá, aritmética
-  `app.services.ingesta.semana_gestacional`, sin topes.
+  `app.services.ingesta.semana_gestacional`, sin topes numéricos y solo si
+  hoy no pasa de la fecha probable de parto del episodio; si no, `null` e
+  Inicio muestra «Semana en el último registro: N (fecha)».
+- **Limitación del escenario**: el dataset simulado tiene episodios `ACTIVO`
+  con fechas ya pasadas (embarazo 129: FPP 1/7/2026). Se documenta, no se
+  avisa a la paciente y no se modifican fechas ni estados.
 - **Fechas**: `Intl` con `es` + `America/Panama`; fechas de calendario
   formateadas como día UTC (no se corren).
 - **Conexión y sesión central**: `GET /adaptador/estado-conexion` y
@@ -55,11 +72,11 @@ cuando ni el portal contestó, comprobación inmediata en `visibilitychange`,
 
 ## Pendientes concretos
 
-1. **Fuente del valor simulado de movimientos (decisión de la usuaria).**
-   Hoy cada registro local lleva `MOV_SIMULADO = 12`, una constante que **no
-   procede del dataset**. No se sustituyó: no se deben copiar lecturas entre
-   embarazos ni reproducir sesiones canónicas como nuevas sin especificación.
-   Propuesta mínima, sin tocar el dataset ni contratos centrales:
+1. **Fuente del valor simulado de movimientos.** Decisión de la usuaria para
+   esta entrega: se **conserva** `MOV_SIMULADO = 12` como escenario técnico
+   documentado —no procede del dataset ni es una medición—, sin otro guion,
+   sin tocar el dataset y sin migraciones. Queda como referencia, para una
+   entrega posterior, la propuesta mínima:
    - *Procedencia*: un guion de simulación versionado y separado del dataset
      (p. ej. `data/simulacion/movimientos_demo.json`, con semilla y versión
      declaradas), documentado como **entrada del sensor simulado**, no como
@@ -74,9 +91,9 @@ cuando ni el portal contestó, comprobación inmediata en `visibilitychange`,
    Si se prefiriera marcar la procedencia en la propia fila (p. ej. un nuevo
    valor de `origen_dato`), eso **sí** cambia un contrato central y un
    `CHECK`: queda como decisión de SCRUM-98, no de esta etapa.
-2. **CI en GitHub Actions**: el step nuevo solo se validó localmente (mismo
-   mecanismo `TEMPLATE`, 13/13, pero con la identidad de administración y no
-   con el migrador no superusuario). Confirmar en la primera ejecución real.
+2. **CI en GitHub Actions**: ver el resultado de la ejecución del checkpoint
+   publicado (step «Pruebas del aprovisionamiento de la demo contra
+   PostgreSQL (SCRUM-72)»).
 3. **Registrar sin API tarda ~2,8 s**: el adaptador contrasta el embarazo con
    el servidor antes de guardar y, en Windows, una conexión rechazada tarda
    en fallar. Funciona; valorar usar el último estado conocido.
@@ -87,7 +104,17 @@ cuando ni el portal contestó, comprobación inmediata en `visibilitychange`,
    generadas por el refresco anterior; no se borraron.
 6. Cola local de la cuenta 107 en revisión: 1 enviado y 2 pendientes (uno de
    ayer y otro creado hoy a las 09:59 hora local, antes de esta sesión). No
-   se enviaron.
+   se enviaron. La revisión visual ya no supone un número: compara la frase
+   mostrada con los conteos reales de `/adaptador/movimientos/estado`.
+
+## Omisiones del gate local
+
+Las 53 pruebas omitidas en la capa sin PostgreSQL son todas de
+`tests/test_config_secretos.py`, y todas por la misma razón: el `.env` local
+define `JWT_SECRET_KEY`, así que no pueden comprobar su ausencia. No son
+omisiones esperadas en CI (allí no hay `.env`). Ejecutadas en un checkout de
+HEAD sin `.env` (`git archive`, sin variables JWT/DB en el entorno):
+53 pasadas, 0 omitidas.
 
 ## Cómo arrancar la revisión (sin secretos)
 

@@ -149,7 +149,7 @@
           <span class="value" id="embarazo-inicio">No disponible</span>
         </div>
         <div class="data-row">
-          <span class="label">Semana actual:</span>
+          <span class="label" id="embarazo-semana-etiqueta">Semana actual:</span>
           <span class="value" id="embarazo-semana">No disponible</span>
         </div>
         <div class="data-row">
@@ -164,7 +164,8 @@
 
       <!-- Tus ultimos registros: el ultimo valor de CADA variable, cada uno
            con su propia fecha y su propia lectura de origen. No son
-           simultaneos y no se combinan en un semaforo comun. -->
+           simultaneos y no se combinan en un semaforo comun. Las tarjetas son
+           neutrales: la API solo clasifica lecturas completas, no metricas. -->
       <section class="bloque-lectura" aria-labelledby="titulo-ultimos-registros">
         <h3 class="subtitulo" id="titulo-ultimos-registros">Tus últimos registros</h3>
         <p class="lectura-origen">
@@ -182,7 +183,6 @@
             <p id="hr-status">No disponible</p>
             <p class="registro-fecha" id="hr-fecha"></p>
             <p class="registro-semana" id="hr-semana"></p>
-            <p class="registro-clasificacion" id="hr-clasificacion" hidden></p>
           </div>
 
           <div class="card" id="tarjeta-spo2">
@@ -193,7 +193,6 @@
             <p id="spo2-status">No disponible</p>
             <p class="registro-fecha" id="spo2-fecha"></p>
             <p class="registro-semana" id="spo2-semana"></p>
-            <p class="registro-clasificacion" id="spo2-clasificacion" hidden></p>
           </div>
 
           <div class="card" id="tarjeta-mov">
@@ -205,7 +204,6 @@
             <p id="mov-status">No disponible</p>
             <p class="registro-fecha" id="mov-fecha"></p>
             <p class="registro-semana" id="mov-semana"></p>
-            <p class="registro-clasificacion" id="mov-clasificacion" hidden></p>
           </div>
 
         </div>
@@ -217,6 +215,8 @@
         <p class="lectura-origen">
           Registrada el <span id="last-update">—</span>.
           <span id="ultima-lectura-mide"></span>
+          La clasificación corresponde a esta lectura completa, no a cada
+          medición por separado.
         </p>
         <div id="semaforo" class="alert waiting">
           <div id="semaforo-luz" class="alert-light"></div>

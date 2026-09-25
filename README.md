@@ -1757,22 +1757,26 @@ analítico y en `publicacion` hay que ejecutar después
 
 - **Inicio** muestra solo el embarazo en curso (`actual` sin ambigüedad).
   - **Semana actual**: la de *hoy* en Panamá, calculada por el adaptador con
-    `semana_gestacional` —la aritmética del servidor— y sin topes. No es la
-    semana de ninguna lectura. Si la fecha probable de parto ya pasó y el
-    episodio sigue `ACTIVO`, se dice como hecho.
+    `semana_gestacional` —la aritmética del servidor—, sin topes numéricos, y
+    **solo mientras hoy no pase de la fecha probable de parto registrada en el
+    episodio**. Pasada esa fecha el adaptador envía `semana_actual: null` y
+    la fila pasa a «**Semana en el último registro:** 39 (21/6/2026)»: la
+    semana de la lectura más reciente, con su fecha. No se muestra ningún
+    aviso a la paciente ni se toca una fecha o un estado del episodio.
   - **Tus últimos registros**: una tarjeta por variable (FC, SpO₂,
     movimientos) con el **último valor no nulo de esa variable** en ese
     embarazo, por `(fecha_hora_captura, id_lectura)`. Cada tarjeta lleva su
-    fecha, la semana de *esa* lectura y la clasificación **de esa lectura**
-    (la API solo publica el semáforo global de cada lectura; no hay
-    clasificación por métrica y la interfaz no la inventa). Pueden ser
-    momentos distintos y la pantalla lo dice. El cero es un valor; una
-    variable nunca registrada es «Sin registros»; una que no llegó es «No
-    disponible». `id_lectura`/`id_sesion` viajan como atributos para
-    trazabilidad y pruebas, no se muestran.
+    fecha y la semana de *esa* lectura. **Las tarjetas son neutrales**: la API
+    solo clasifica cada lectura en su conjunto, así que ni las tarjetas ni
+    `ultimos_registros`/`series` llevan semáforo. Pueden ser momentos
+    distintos y la pantalla lo dice. El cero es un valor; una variable nunca
+    registrada es «Sin registros»; una que no llegó es «No disponible».
+    `id_lectura`/`id_sesion` viajan como atributos para trazabilidad y
+    pruebas, no se muestran.
   - **Tu lectura más reciente**: la `ultima_lectura` de siempre —una sola
-    lectura, con su fecha, lo que midió y su semáforo—. No hay semáforo
-    conjunto de las tres tarjetas.
+    lectura, con su fecha y lo que midió— y **su** semáforo, con el alcance
+    escrito: «La clasificación corresponde a esta lectura completa, no a cada
+    medición por separado». No hay semáforo conjunto de las tres tarjetas.
   - Con ambigüedad o sin embarazo en curso, Inicio no muestra lecturas y el
     registro queda deshabilitado.
 - **Series**: `/adaptador/embarazos/{id}/monitoreo` entrega además `series`
@@ -1877,9 +1881,17 @@ conexión unos 8 segundos.
 Dos cuentas (la contraseña de ambas es la `PASSWORD_SIMULADA` del generador):
 
 - `paciente30@example.com` (embarazo canónico 129, `ACTIVO`): consulta y
-  gráficas. Inicio muestra FC 83 y SpO₂ 96 del 29/5/2026 03:27 (lectura 549,
-  Verde) y 7 movimientos del 21/6/2026 09:56 (lectura 1259, Ámbar); semana
-  actual 53 y el aviso de fecha probable de parto superada.
+  gráficas. Inicio muestra FC 83 y SpO₂ 96 del 29/5/2026 03:27 (lectura 549)
+  y 7 movimientos del 21/6/2026 09:56 (lectura 1259), en tarjetas neutrales;
+  «Semana en el último registro: 39 (21/6/2026)» y el semáforo Ámbar de la
+  lectura 1259 en su propio bloque.
+
+**Limitación del escenario de demostración.** El dataset simulado se generó
+con fechas de 2025-2026 y sus episodios `ACTIVO` quedaron atrás en el
+calendario real: el embarazo 129 tiene fecha probable de parto 1/7/2026 y sus
+últimas lecturas son de junio. Es un desfase del escenario, no un hecho
+clínico: por eso Inicio no presenta una «semana actual» para él ni lo
+convierte en un aviso, y no se modifican fechas ni estados del dataset.
 - `paciente01@example.com`: historial longitudinal y registro de
   movimientos.
 

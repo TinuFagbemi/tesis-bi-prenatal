@@ -246,6 +246,7 @@
     embarazoEstado: document.getElementById('embarazo-estado'),
     embarazoInicio: document.getElementById('embarazo-inicio'),
     embarazoSemana: document.getElementById('embarazo-semana'),
+    embarazoSemanaEtiqueta: document.getElementById('embarazo-semana-etiqueta'),
     embarazoAnteriores: document.getElementById('embarazo-anteriores'),
     notaEmbarazo: document.getElementById('nota-embarazo'),
     botonVerAnteriores: document.getElementById('btn-ver-anteriores'),
@@ -292,8 +293,7 @@
       valor: document.getElementById(prefijo + '-value'),
       estado: document.getElementById(prefijo + '-status'),
       fecha: document.getElementById(prefijo + '-fecha'),
-      semana: document.getElementById(prefijo + '-semana'),
-      clasificacion: document.getElementById(prefijo + '-clasificacion')
+      semana: document.getElementById(prefijo + '-semana')
     };
   }
 
@@ -576,6 +576,7 @@
 
     ui.embarazoEstado.textContent = NO_DISPONIBLE;
     ui.embarazoInicio.textContent = NO_DISPONIBLE;
+    ui.embarazoSemanaEtiqueta.textContent = 'Semana actual:';
     ui.embarazoSemana.textContent = NO_DISPONIBLE;
     ui.embarazoAnteriores.textContent = NO_DISPONIBLE;
     mostrarNota(ui.notaEmbarazo, null);
@@ -1050,9 +1051,15 @@
 
     // La semana de **hoy** del embarazo en curso, calculada por el adaptador
     // con la aritmética del servidor. Nunca la semana de una lectura, que
-    // puede ser de hace meses. Sin topes: si el dato dice 53, se dice 53.
-    ui.embarazoSemana.textContent =
-      datos.actual && !datos.ambiguo ? texto(datos.semana_actual, NO_DISPONIBLE) : NO_DISPONIBLE;
+    // puede ser de hace meses. Si el adaptador no la publica (la fecha
+    // probable de parto registrada ya pasó), la fila pasa a mostrar la semana
+    // del último registro cuando llegue el monitoreo: ver
+    // `pintarSemanaDelUltimoRegistro`.
+    const conSemanaActual = datos.actual && !datos.ambiguo && !ausente(datos.semana_actual);
+    ui.embarazoSemanaEtiqueta.textContent = conSemanaActual
+      ? 'Semana actual:'
+      : 'Semana en el último registro:';
+    ui.embarazoSemana.textContent = conSemanaActual ? String(datos.semana_actual) : NO_DISPONIBLE;
 
     const todos = datos.todos || [];
     const anteriores = datos.anteriores || [];
@@ -1071,7 +1078,6 @@
       ui.embarazoEstado.textContent = estadoLegible(datos.actual.estado_embarazo);
       ui.embarazoInicio.textContent = fechaCortaLegible(datos.actual.fecha_inicio);
       ui.embarazoAnteriores.textContent = String(anteriores.length);
-      nota = notaDeFechaProbable(datos.actual, datos.hoy);
     } else if (todos.length) {
       idInicio = null;
       ui.embarazoEstado.textContent = 'Sin embarazo en curso';
@@ -1097,22 +1103,6 @@
 
     llenarSelector(todos, datos.actual);
     actualizarBotonDeRegistro();
-  }
-
-  /**
-   * Un hecho, sin interpretarlo: el episodio sigue registrado en curso y su
-   * fecha probable de parto ya pasó. Las fechas son días de calendario en
-   * formato ISO, así que se comparan como texto sin conversión horaria.
-   */
-  function notaDeFechaProbable(actual, hoy) {
-    const fpp = actual.fecha_probable_parto;
-    if (ausente(fpp) || ausente(hoy) || fpp >= hoy) {
-      return null;
-    }
-    return (
-      'La fecha probable de parto (' + fechaCortaLegible(fpp) + ') ya pasó y este ' +
-      'embarazo sigue registrado como en curso.'
-    );
   }
 
   /**
@@ -1189,17 +1179,16 @@
    * no se pudo consultar) y `null` cuando el embarazo **nunca** registró esa
    * variable: son dos frases distintas, y ninguna es cero.
    *
-   * La clasificación que acompaña al valor es la de **la lectura de origen**,
-   * tal como la entrega el servidor. La API no clasifica cada métrica por
-   * separado, y el texto lo dice para que nadie la lea como si lo hiciera.
-   * `id_lectura` e `id_sesion` quedan como atributos para trazabilidad y
-   * pruebas; no se muestran.
+   * **Tarjeta neutral.** La API solo clasifica cada lectura en su conjunto, no
+   * cada métrica: poner aquí el semáforo de la lectura de origen lo haría pasar
+   * por una clasificación de esta variable. El semáforo vive en el bloque de
+   * la lectura más reciente, con su fecha y su alcance. `id_lectura` e
+   * `id_sesion` quedan como atributos para trazabilidad y pruebas; no se
+   * muestran.
    */
   function pintarTarjeta(t, registro) {
     t.contenedor.removeAttribute('data-id-lectura');
     t.contenedor.removeAttribute('data-id-sesion');
-    t.clasificacion.textContent = '';
-    t.clasificacion.hidden = true;
 
     if (registro === undefined) {
       t.valor.textContent = SIN_DATO;
@@ -1223,18 +1212,8 @@
       ? ''
       : 'Semana ' + registro.semana_gestacion_lectura + ' en esa lectura';
 
-    t.clasificacion.appendChild(textoPlano('Clasificación de esa lectura: '));
-    t.clasificacion.appendChild(marcaDeSemaforo(registro.codigo_semaforo_lectura));
-    t.clasificacion.hidden = false;
-
     t.contenedor.setAttribute('data-id-lectura', String(registro.id_lectura));
     t.contenedor.setAttribute('data-id-sesion', String(registro.id_sesion));
-  }
-
-  function textoPlano(contenido) {
-    const nodo = document.createElement('span');
-    nodo.textContent = contenido;
-    return nodo;
   }
 
   function limpiarMetricas() {
@@ -1299,6 +1278,24 @@
   function pintarInicio(datos) {
     pintarUltimosRegistros(datos.ultimos_registros);
     pintarUltimaLectura(datos.ultima_lectura);
+    pintarSemanaDelUltimoRegistro(datos.ultima_lectura);
+  }
+
+  /**
+   * Cuando el adaptador no publica una semana actual (la fecha probable de
+   * parto registrada ya pasó), la fila de semana muestra la del **último
+   * registro**, rotulada así y con su fecha. No es una alerta: es lo único
+   * que el dato permite afirmar sin presentar un calendario vencido como
+   * vigente.
+   */
+  function pintarSemanaDelUltimoRegistro(lectura) {
+    if (!episodios || !episodios.actual || episodios.ambiguo || !ausente(episodios.semana_actual)) {
+      return;
+    }
+    ui.embarazoSemanaEtiqueta.textContent = 'Semana en el último registro:';
+    ui.embarazoSemana.textContent = lectura && !ausente(lectura.semana_gestacion)
+      ? lectura.semana_gestacion + ' (' + fechaCortaLegible(lectura.fecha_hora_captura) + ')'
+      : 'Sin registros';
   }
 
   /** Texto acompañante del nivel. No es una interpretación clínica. */
