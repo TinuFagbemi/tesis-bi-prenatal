@@ -593,6 +593,7 @@ summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--clr-purpl
   .main-menu a{padding:.45rem .6rem;font-size:.88rem;text-align:center;}
   .value span:first-child{font-size:2.1rem;}
   .campo-periodo{flex-direction:column;align-items:stretch;}
+  .campo-en-linea.campo-periodo{max-width:420px;}
 }
 
 @media screen and (max-width:360px){

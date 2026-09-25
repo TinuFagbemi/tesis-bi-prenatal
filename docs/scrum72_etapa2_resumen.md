@@ -52,7 +52,9 @@ clínicos.
   1280, 390 y 360 px sin desbordes; gráficas de `paciente30` iguales fila a
   fila a las series autorizadas; `paciente01` con 41 lecturas del embarazo
   100 y la lectura del 8 sept 2025 (86 BPM, 97 %); teclado, toque, período,
-  movimiento reducido y diálogo de cierre.
+  movimiento reducido y diálogo de cierre; cambio de cuenta en la misma
+  pestaña con una respuesta tardía retenida de la cuenta anterior, que no
+  pinta nada; tabla del embarazo 100 desplegada a 360 px sin recortes.
 - Entorno aislado (API 8011 con JWT de 1 minuto, portal 8101, base
   `scrum72_prueba_offline`): vencimiento, reautenticación, caída, «Guardando…»,
   recuperación, envío y corte de red, también a 360 px.
