@@ -459,7 +459,7 @@ test('Inicio: cada tarjeta es su propio último registro; lo nunca registrado di
   assert.equal($('embarazo-anteriores').textContent, '1');
   assert.equal($('mov-value').textContent, '12');
   assert.equal($('mov-status').textContent, 'Último registro');
-  assert.equal($('mov-fecha').textContent, 'Registrado el 24/9/2026, 01:40');
+  assert.equal($('mov-fecha').textContent, 'Registrado el 24 sept 2026, 01:40');
   assert.equal($('mov-semana').textContent, 'Semana 27 en esa lectura');
   assert.equal($('tarjeta-mov').getAttribute('data-id-lectura'), '5001');
   // El 130 nunca registró FC ni SpO2: no se rellena con otra lectura ni embarazo.
@@ -475,7 +475,7 @@ test('Semana actual y semana de la lectura son cosas distintas', async () => {
   const { $ } = await arrancar(rutasBase());
 
   // semana_actual del adaptador (hoy), no la 27 de la lectura del 24/9.
-  assert.equal($('embarazo-semana-etiqueta').textContent, 'Semana actual:');
+  assert.equal($('embarazo-semana-etiqueta').textContent, 'Semana actual');
   assert.equal($('embarazo-semana').textContent, '28');
   assert.equal($('mov-semana').textContent, 'Semana 27 en esa lectura');
 });
@@ -523,9 +523,9 @@ test('paciente30: FC/SpO2 y movimientos de lecturas distintas, cada uno con su f
   assert.equal($('spo2-value').textContent, '96');
   assert.equal($('mov-value').textContent, '7');
   // Fechas en hora de Panamá (UTC−5): 08:27Z → 03:27; 14:56Z → 09:56.
-  assert.equal($('hr-fecha').textContent, 'Registrado el 29/5/2026, 03:27');
-  assert.equal($('spo2-fecha').textContent, 'Registrado el 29/5/2026, 03:27');
-  assert.equal($('mov-fecha').textContent, 'Registrado el 21/6/2026, 09:56');
+  assert.equal($('hr-fecha').textContent, 'Registrado el 29 may 2026, 03:27');
+  assert.equal($('spo2-fecha').textContent, 'Registrado el 29 may 2026, 03:27');
+  assert.equal($('mov-fecha').textContent, 'Registrado el 21 jun 2026, 09:56');
   assert.equal($('tarjeta-hr').getAttribute('data-id-lectura'), '549');
   assert.equal($('tarjeta-mov').getAttribute('data-id-lectura'), '1259');
   // Tarjetas neutrales: la API solo clasifica lecturas completas, así que
@@ -537,11 +537,11 @@ test('paciente30: FC/SpO2 y movimientos de lecturas distintas, cada uno con su f
   });
   // El semáforo grande es el de UNA lectura, la más reciente, y dice qué midió.
   assert.ok($('semaforo').classList.contains('warning'));
-  assert.equal($('last-update').textContent, '21/6/2026, 09:56');
+  assert.equal($('last-update').textContent, '21 jun 2026, 09:56');
   assert.equal($('ultima-lectura-mide').textContent, 'Midió movimientos fetales.');
   // Sin semana actual vigente: la del último registro, rotulada y con fecha.
-  assert.equal($('embarazo-semana-etiqueta').textContent, 'Semana en el último registro:');
-  assert.equal($('embarazo-semana').textContent, '39 (21/6/2026)');
+  assert.equal($('embarazo-semana-etiqueta').textContent, 'Semana en el último registro');
+  assert.equal($('embarazo-semana').textContent, '39 (21 jun 2026)');
   assert.equal($('hr-semana').textContent, 'Semana 36 en esa lectura');
   // El desfase del escenario de demostración no se convierte en un aviso.
   assert.equal($('nota-embarazo').hidden, true);
@@ -592,16 +592,16 @@ test('Una fecha sin hora es un día de calendario: no se corre al día anterior 
   const { $ } = await arrancar(rutasBase());
 
   // fecha_inicio '2026-03-19' leída como medianoche UTC mostraría el 18 en Panamá.
-  assert.equal($('embarazo-inicio').textContent, '19/3/2026');
+  assert.equal($('embarazo-inicio').textContent, '19 mar 2026');
   const opcion = $('selector-embarazo').hijos.find((o) => o.value === '130');
-  assert.equal(opcion.textContent, 'Desde 19/3/2026 — En curso');
+  assert.equal(opcion.textContent, 'Desde 19 mar 2026 — En curso');
 });
 
 test('Las opciones del selector de Historial no repiten «Embarazo»: a 360 px se cortaban', async () => {
   const { $ } = await arrancar(rutasBase());
 
   const opcion = $('selector-embarazo').hijos.find((o) => o.value === '100');
-  assert.equal(opcion.textContent, 'Desde 6/1/2025 — Finalizado');
+  assert.equal(opcion.textContent, 'Desde 6 ene 2025 — Finalizado');
 });
 
 test('FC y SpO2 se muestran tal cual llegan, sin convertirlos en número', async () => {
@@ -896,7 +896,7 @@ test('Con el token vencido el servidor sigue disponible: no se pinta «Sin conex
     'GET /adaptador/estado-conexion': estadoConexion('disponible', 'reautenticacion_requerida')
   }));
 
-  assert.equal($('connection-status').textContent, 'Servidor disponible · inicia sesión de nuevo');
+  assert.equal($('connection-status').textContent, 'Vuelve a iniciar sesión');
   assert.doesNotMatch($('connection-status').textContent, /Sin conexión/);
   assert.equal($('aviso-sesion-central').hidden, false);
   assert.equal($('btn-mostrar-reautenticar').hidden, false);
@@ -1083,7 +1083,7 @@ test('Sin token el envío se detiene, se avisa y el indicador lo refleja; nada s
   await asentar();
   assert.equal($('envio-resultado').textContent,
     'Para enviar hace falta volver a iniciar sesión; tus registros siguen guardados.');
-  assert.equal($('connection-status').textContent, 'Servidor disponible · inicia sesión de nuevo');
+  assert.equal($('connection-status').textContent, 'Vuelve a iniciar sesión');
   assert.equal($('envio-ultimo').hidden, true, 'un servidor disponible no es un envío confirmado');
 });
 
@@ -1095,8 +1095,8 @@ test('El último envío confirmado sale de la cola, no de la conexión', async (
   }));
 
   assert.equal($('envio-ultimo').textContent,
-    'Último envío confirmado por el servidor: 24/9/2026, 02:07.');
-  assert.match($('datos-actualizados').textContent, /^Información consultada al servidor el 25\/9\/2026, 10:00\./);
+    'Último envío confirmado por el servidor: 24 sept 2026, 02:07.');
+  assert.match($('datos-actualizados').textContent, /^Información consultada al servidor el 25 sept 2026, 10:00\./);
 });
 
 test('Si la petición local se corta (equipo suspendido), no se afirma «Sin conexión»; al reanudar se comprueba y recarga una vez', async () => {
@@ -1118,4 +1118,18 @@ test('Si la petición local se corta (equipo suspendido), no se afirma «Sin con
   await asentar();
   assert.equal($('connection-status').textContent, 'Conectada al servidor');
   assert.equal(adaptador.contar('GET', '/adaptador/embarazos'), clinicas + 1);
+});
+
+test('Volver a Inicio no borra la semana del último registro mientras llega el monitoreo', async () => {
+  const { $, adaptador } = await arrancar(rutasPaciente30());
+  assert.equal($('embarazo-semana').textContent, '39 (21 jun 2026)');
+
+  adaptador.diferirSi((clave) => clave.endsWith('/monitoreo'));
+  $('main-menu').querySelectorAll('a[data-vista]')[0].click();
+  await asentar();
+  assert.equal($('embarazo-semana').textContent, '39 (21 jun 2026)', 'sin «No disponible» intermedio');
+
+  adaptador.diferidas.forEach((d) => d.soltar());
+  await asentar();
+  assert.equal($('embarazo-semana').textContent, '39 (21 jun 2026)');
 });

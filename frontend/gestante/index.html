@@ -8,42 +8,61 @@
 </head>
 <body>
 
+  <!-- Iconos de la interfaz. Trazos simples, sin significado clinico. -->
+  <svg class="sprite" aria-hidden="true" focusable="false">
+    <symbol id="i-corazon" viewBox="0 0 24 24"><path d="M12 20.5s-7.5-4.6-9.2-9.6C1.7 7.5 3.9 4.5 7.1 4.5c2 0 3.6 1.1 4.9 2.9 1.3-1.8 2.9-2.9 4.9-2.9 3.2 0 5.4 3 4.3 6.4-1.7 5-9.2 9.6-9.2 9.6z"/></symbol>
+    <symbol id="i-pulmones" viewBox="0 0 24 24"><path d="M12 4v7m0 0c-1.2 1.4-2.4 2-3.6 2M12 11c1.2 1.4 2.4 2 3.6 2M8.4 7.2C6 8.5 3.5 12 3.5 16.5c0 2 1 3 2.5 3 2.4 0 3.6-2 3.6-5V9.6c0-1.5-.5-2.4-1.2-2.4zm7.2 0c2.4 1.3 4.9 4.8 4.9 9.3 0 2-1 3-2.5 3-2.4 0-3.6-2-3.6-5V9.6c0-1.5.5-2.4 1.2-2.4z"/></symbol>
+    <symbol id="i-huellas" viewBox="0 0 24 24"><path d="M7.5 13.5c-1.8 0-3-1.7-3-4.3S5.8 4.5 7.6 4.5s2.9 2 2.9 4.6-1.2 4.4-3 4.4zM6 16.2l3-.4.6 2.3c.3 1.3-.4 2.4-1.6 2.4-1.1 0-1.9-.9-2-2.1zM16.5 11c-1.8 0-3-1.7-3-4.3S14.8 2 16.6 2s2.9 2 2.9 4.6-1.2 4.4-3 4.4zM15 13.7l3-.4.6 2.3c.3 1.3-.4 2.4-1.6 2.4-1.1 0-1.9-.9-2-2.1z"/></symbol>
+    <symbol id="i-gestante" viewBox="0 0 24 24"><circle cx="11" cy="4.5" r="2.2"/><path d="M9.5 21v-4.5M9.5 16.5c-1.5-.3-2.3-1.5-2-3.2l.9-4.3c.3-1.3 1.4-2 2.6-1.8 1.1.2 1.8 1 1.8 2.2v1.2c2.6.3 4.2 2 4.2 4.1 0 2-1.6 3.3-3.7 3.3H12M12 21v-4.5"/></symbol>
+    <symbol id="i-reloj" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+    <symbol id="i-grafica" viewBox="0 0 24 24"><path d="M4 19.5h16M6.5 16V11m5 5V6m5 10v-7"/></symbol>
+    <symbol id="i-calendario" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15" rx="2.5"/><path d="M3.5 9.5h17M8 3v4m8-4v4"/></symbol>
+    <symbol id="i-enviar" viewBox="0 0 24 24"><path d="M20.5 3.5 10 14M20.5 3.5l-6.3 17-3.5-7.1-7.2-3.5z"/></symbol>
+    <symbol id="i-guardar" viewBox="0 0 24 24"><path d="M5 3.5h11l3.5 3.5v13H5z"/><path d="M8 3.5v5h7v-5M8 20.5v-6h8v6"/></symbol>
+    <symbol id="i-usuario" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4.5 20.5c.6-4 3.6-6 7.5-6s6.9 2 7.5 6"/></symbol>
+    <symbol id="i-candado" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/></symbol>
+    <symbol id="i-salir" viewBox="0 0 24 24"><path d="M14.5 4.5h-8v15h8M10.5 12h10m-3.5-3.5L20.5 12 17 15.5"/></symbol>
+    <symbol id="i-sin-red" viewBox="0 0 24 24"><path d="M3 3l18 18M8.6 13a5 5 0 0 1 6.2-.6M5.3 9.8a9.6 9.6 0 0 1 4.4-2.1m4.6 0a9.6 9.6 0 0 1 4.4 2.1M12 17.5h.01"/></symbol>
+    <symbol id="i-documento" viewBox="0 0 24 24"><path d="M6 3.5h8.5l3.5 3.5v13.5H6z"/><path d="M14.5 3.5V7H18M9 12h6m-6 3.5h6"/></symbol>
+    <symbol id="i-pantalla" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="12" rx="2"/><path d="M8.5 20h7M12 16.5V20"/></symbol>
+    <symbol id="i-libro" viewBox="0 0 24 24"><path d="M4 5.5c2.7-1 5.4-1 8 .8 2.6-1.8 5.3-1.8 8-.8v13.5c-2.7-1-5.4-1-8 .8-2.6-1.8-5.3-1.8-8-.8zM12 6.3v13.5"/></symbol>
+    <symbol id="i-lectura" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M8 12.5l2.7 2.7L16 9.5"/></symbol>
+  </svg>
+
   <!-- =====================================================================
        ENCABEZADO
-       Conserva la identidad de la interfaz original: "Bienvenida a",
-       el titulo con degradado y el eslogan. La pildora de estado ya no
-       describe un dispositivo, sino la conectividad con la API central.
+       Marca (logotipo tipografico con degradado y eslogan), secciones y
+       area de cuenta. La pildora de estado habla del servidor de FetalAlert,
+       nunca de un dispositivo.
        ===================================================================== -->
-  <header>
+  <header class="cabecera">
     <div class="logo">
-      <div class="welcome-text">Bienvenida a</div>
       <div class="header-text">
         <h1>FetalAlert</h1>
         <p class="slogan">Tecnología al cuidado de tu embarazo</p>
       </div>
     </div>
-    <div id="connection-status" class="connection-status status-connecting">
-      Comprobando conexión…
-    </div>
 
-    <!-- Area de cuenta: fuera del menu de secciones, solo con sesion. -->
-    <div class="area-cuenta" id="area-cuenta" hidden>
-      <button type="button" class="btn-cuenta" id="btn-cerrar-sesion">
-        Cerrar sesión
-      </button>
+    <!-- Secciones: solo con una sesion iniciada. -->
+    <nav class="main-menu" id="main-menu" aria-label="Secciones" hidden>
+      <a href="#inicio"    class="qa-btn" data-vista="inicio">Inicio</a>
+      <a href="#historial" class="qa-btn" data-vista="historial">Mi historial</a>
+      <a href="#manual"    class="qa-btn" data-vista="manual">Manual de uso</a>
+      <a href="#acerca"    class="qa-btn" data-vista="acerca">Acerca de FetalAlert</a>
+    </nav>
+
+    <div class="cabecera-estado">
+      <div id="connection-status" class="connection-status status-connecting" role="status" aria-live="polite">
+        Comprobando conexión…
+      </div>
+      <!-- Area de cuenta: fuera del menu de secciones, solo con sesion. -->
+      <div class="area-cuenta" id="area-cuenta" hidden>
+        <button type="button" class="btn-cuenta" id="btn-cerrar-sesion">
+          Cerrar sesión
+        </button>
+      </div>
     </div>
   </header>
-
-  <!-- =====================================================================
-       MENU PRINCIPAL
-       Solo visible con una sesion iniciada.
-       ===================================================================== -->
-  <nav class="main-menu" id="main-menu" hidden>
-    <a href="#inicio"    class="qa-btn" data-vista="inicio">Inicio</a>
-    <a href="#historial" class="qa-btn" data-vista="historial">Mi historial</a>
-    <a href="#manual"    class="qa-btn" data-vista="manual">Manual de uso</a>
-    <a href="#acerca"    class="qa-btn" data-vista="acerca">Acerca de FetalAlert</a>
-  </nav>
 
   <!-- Confirmacion de cierre de sesion. Nada se cierra hasta confirmar. -->
   <dialog id="dialogo-cerrar-sesion" class="dialogo" aria-labelledby="dialogo-titulo">
@@ -62,7 +81,7 @@
     <!-- Sesion con el servidor central vencida o rechazada. La sesion de este
          dispositivo sigue abierta y los registros guardados no se tocan: solo
          falta volver a presentar las credenciales de la MISMA cuenta. -->
-    <div class="result-card aviso-sesion-central" id="aviso-sesion-central" role="status" hidden>
+    <div class="aviso-sesion-central" id="aviso-sesion-central" role="status" hidden>
       <p id="aviso-sesion-central-texto"></p>
       <button type="button" class="btn-primario" id="btn-mostrar-reautenticar">
         Volver a iniciar sesión
@@ -90,186 +109,217 @@
          VISTA 1 — INICIO DE SESION
          ================================================================= -->
     <section id="vista-login" class="vista">
-      <div class="panel-login">
-        <div class="result-card">
-          <h2 class="titulo-vista">Iniciar sesión</h2>
-          <p class="texto-apoyo">
-            Accede con el correo y la contraseña de tu cuenta de FetalAlert.
-            Las cuentas las crea el personal administrador del sistema.
-          </p>
+      <div class="panel-login result-card">
+        <p class="welcome-text">Bienvenida a</p>
+        <h2 class="titulo-vista">FetalAlert</h2>
+        <p class="texto-apoyo">
+          Entra con el correo y la contraseña de tu cuenta. Las cuentas las
+          crea el personal que gestiona tu seguimiento.
+        </p>
 
-          <form id="form-login" class="form-login" autocomplete="on" novalidate>
-            <label class="campo">
-              <span class="campo-etiqueta">Correo</span>
-              <input type="email" id="login-email" name="email"
-                     autocomplete="username" required
-                     placeholder="nombre@ejemplo.com">
-            </label>
+        <form id="form-login" class="form-login" autocomplete="on" novalidate>
+          <label class="campo">
+            <span class="campo-etiqueta">Correo</span>
+            <input type="email" id="login-email" name="email"
+                   autocomplete="username" required
+                   placeholder="nombre@ejemplo.com">
+          </label>
 
-            <label class="campo">
-              <span class="campo-etiqueta">Contraseña</span>
-              <input type="password" id="login-password" name="password"
-                     autocomplete="current-password" required>
-            </label>
+          <label class="campo">
+            <span class="campo-etiqueta">Contraseña</span>
+            <input type="password" id="login-password" name="password"
+                   autocomplete="current-password" required>
+          </label>
 
-            <button type="submit" id="btn-login" class="btn-primario">
-              Iniciar sesión
-            </button>
-          </form>
+          <button type="submit" id="btn-login" class="btn-primario">
+            Iniciar sesión
+          </button>
+        </form>
 
-          <p id="login-mensaje" class="mensaje-error" role="alert" hidden></p>
+        <p id="login-mensaje" class="mensaje-error" role="alert" hidden></p>
 
-          <p class="texto-ayuda">
-            ¿No puedes entrar? Comunícate con el personal que gestiona tu
-            seguimiento. Esta versión no ofrece registro ni recuperación de
-            contraseña.
-          </p>
-        </div>
+        <p class="texto-ayuda">
+          ¿No puedes entrar? Comunícate con el personal que gestiona tu
+          seguimiento. Aquí no se crean cuentas ni se recuperan contraseñas.
+        </p>
       </div>
     </section>
 
     <!-- =================================================================
-         VISTA 2 — INICIO / PANEL PRINCIPAL
+         VISTA 2 — INICIO
          ================================================================= -->
     <section id="vista-inicio" class="vista" hidden>
 
-      <h2 class="titulo-vista" id="saludo">Bienvenida</h2>
+      <div class="inicio-cabecera">
+        <div class="saludo">
+          <h2 class="titulo-vista" id="saludo">¡Hola!</h2>
+          <p class="texto-apoyo">Tus registros, claros y a mano.</p>
+        </div>
 
-      <!-- Embarazo actual ------------------------------------------------
-           Inicio muestra siempre el embarazo en curso. La seleccion de
-           «Mi historial» es independiente y no lo cambia. -->
-      <div class="result-card bloque-embarazo">
-        <h3 class="subtitulo">Embarazo actual</h3>
-        <div class="data-row">
-          <span class="label">Estado:</span>
-          <span class="value" id="embarazo-estado">No disponible</span>
+        <!-- Embarazo en curso. «Mi historial» tiene su propia seleccion y no
+             lo cambia. -->
+        <div class="tarjeta embarazo-resumen">
+          <div class="embarazo-titulo">
+            <span class="icono-circulo rosa"><svg class="icono"><use href="#i-gestante"/></svg></span>
+            <h3 class="subtitulo">Embarazo actual</h3>
+          </div>
+          <dl class="embarazo-datos">
+            <div class="data-row">
+              <dt class="label">Estado</dt>
+              <dd class="value" id="embarazo-estado">No disponible</dd>
+            </div>
+            <div class="data-row">
+              <dt class="label">Inicio del embarazo</dt>
+              <dd class="value" id="embarazo-inicio">No disponible</dd>
+            </div>
+            <div class="data-row">
+              <dt class="label" id="embarazo-semana-etiqueta">Semana actual</dt>
+              <dd class="value" id="embarazo-semana">No disponible</dd>
+            </div>
+          </dl>
+          <p class="nota-pendiente" id="nota-embarazo" hidden></p>
+          <div class="embarazo-anteriores">
+            <span>Embarazos anteriores: <strong id="embarazo-anteriores">No disponible</strong></span>
+            <button type="button" class="btn-enlace" id="btn-ver-anteriores" hidden>
+              Ver embarazos anteriores en «Mi historial»
+            </button>
+          </div>
         </div>
-        <div class="data-row">
-          <span class="label">Inicio del embarazo:</span>
-          <span class="value" id="embarazo-inicio">No disponible</span>
-        </div>
-        <div class="data-row">
-          <span class="label" id="embarazo-semana-etiqueta">Semana actual:</span>
-          <span class="value" id="embarazo-semana">No disponible</span>
-        </div>
-        <div class="data-row">
-          <span class="label">Embarazos anteriores:</span>
-          <span class="value" id="embarazo-anteriores">No disponible</span>
-        </div>
-        <p class="nota-pendiente" id="nota-embarazo" hidden></p>
-        <button type="button" class="btn-enlace" id="btn-ver-anteriores" hidden>
-          Ver embarazos anteriores en «Mi historial»
-        </button>
       </div>
 
       <!-- Tus ultimos registros: el ultimo valor de CADA variable, cada uno
            con su propia fecha y su propia lectura de origen. No son
            simultaneos y no se combinan en un semaforo comun. Las tarjetas son
            neutrales: la API solo clasifica lecturas completas, no metricas. -->
-      <section class="bloque-lectura" aria-labelledby="titulo-ultimos-registros">
-        <h3 class="subtitulo" id="titulo-ultimos-registros">Tus últimos registros</h3>
-        <p class="lectura-origen">
-          El último valor registrado de cada medición. Pueden corresponder a
-          momentos distintos. Horas en hora de Panamá.
-        </p>
+      <section class="tarjeta bloque-lectura" aria-labelledby="titulo-ultimos-registros">
+        <div class="bloque-titulo">
+          <span class="icono-circulo morado"><svg class="icono"><use href="#i-reloj"/></svg></span>
+          <div>
+            <h3 class="subtitulo" id="titulo-ultimos-registros">Tus últimos registros</h3>
+            <p class="lectura-origen">
+              El último valor de cada medición. Pueden ser de fechas distintas.
+              Horas de Panamá.
+            </p>
+          </div>
+        </div>
 
         <div class="cards">
-
-          <div class="card" id="tarjeta-hr">
-            <h2>Frecuencia Cardíaca</h2>
-            <div class="value">
-              <span id="hr-value">—</span><span class="unit">BPM</span>
+          <div class="card metrica" id="tarjeta-hr">
+            <span class="icono-circulo rosa"><svg class="icono"><use href="#i-corazon"/></svg></span>
+            <div class="metrica-cuerpo">
+              <h2>Frecuencia cardíaca materna</h2>
+              <div class="value">
+                <span id="hr-value">—</span><span class="unit">BPM</span>
+              </div>
+              <p class="metrica-estado" id="hr-status">No disponible</p>
+              <p class="registro-fecha" id="hr-fecha"></p>
+              <p class="registro-semana" id="hr-semana"></p>
             </div>
-            <p id="hr-status">No disponible</p>
-            <p class="registro-fecha" id="hr-fecha"></p>
-            <p class="registro-semana" id="hr-semana"></p>
           </div>
 
-          <div class="card" id="tarjeta-spo2">
-            <h2>Saturación de Oxígeno</h2>
-            <div class="value">
-              <span id="spo2-value">—</span><span class="unit">%</span>
+          <div class="card metrica" id="tarjeta-spo2">
+            <span class="icono-circulo morado"><svg class="icono"><use href="#i-pulmones"/></svg></span>
+            <div class="metrica-cuerpo">
+              <h2>Saturación de oxígeno</h2>
+              <div class="value">
+                <span id="spo2-value">—</span><span class="unit">%</span>
+              </div>
+              <p class="metrica-estado" id="spo2-status">No disponible</p>
+              <p class="registro-fecha" id="spo2-fecha"></p>
+              <p class="registro-semana" id="spo2-semana"></p>
             </div>
-            <p id="spo2-status">No disponible</p>
-            <p class="registro-fecha" id="spo2-fecha"></p>
-            <p class="registro-semana" id="spo2-semana"></p>
           </div>
 
-          <div class="card" id="tarjeta-mov">
-            <h2>Actividad Fetal</h2>
-            <div class="value">
-              <span id="mov-value">—</span>
+          <div class="card metrica" id="tarjeta-mov">
+            <span class="icono-circulo lila"><svg class="icono"><use href="#i-huellas"/></svg></span>
+            <div class="metrica-cuerpo">
+              <h2>Movimientos fetales</h2>
+              <div class="value">
+                <span id="mov-value">—</span><span class="unit movements-text">movimientos</span>
+              </div>
+              <p class="metrica-estado" id="mov-status">No disponible</p>
+              <p class="registro-fecha" id="mov-fecha"></p>
+              <p class="registro-semana" id="mov-semana"></p>
             </div>
-            <div class="movements-text">Movimientos fetales</div>
-            <p id="mov-status">No disponible</p>
-            <p class="registro-fecha" id="mov-fecha"></p>
-            <p class="registro-semana" id="mov-semana"></p>
           </div>
-
         </div>
 
         <!-- La lectura mas reciente del embarazo y SU clasificacion, tal como
              la decidio el servidor. Es una sola lectura, no un resumen de las
              tarjetas. -->
-        <h3 class="subtitulo" id="titulo-ultima-lectura">Tu lectura más reciente</h3>
-        <p class="lectura-origen">
-          Registrada el <span id="last-update">—</span>.
-          <span id="ultima-lectura-mide"></span>
-          La clasificación corresponde a esta lectura completa, no a cada
-          medición por separado.
-        </p>
-        <div id="semaforo" class="alert waiting">
-          <div id="semaforo-luz" class="alert-light"></div>
-          <span id="semaforo-mensaje">Sin clasificación disponible</span>
+        <div class="lectura-reciente">
+          <h3 class="subtitulo" id="titulo-ultima-lectura">Tu lectura más reciente</h3>
+          <p class="lectura-origen">
+            Registrada el <span id="last-update">—</span>.
+            <span id="ultima-lectura-mide"></span>
+            La clasificación corresponde a esta lectura completa, no a cada
+            medición por separado.
+          </p>
+          <div id="semaforo" class="alert waiting">
+            <div id="semaforo-luz" class="alert-light"></div>
+            <span id="semaforo-mensaje">Sin clasificación disponible</span>
+          </div>
+          <ul class="semaforo" aria-label="Qué significa cada color">
+            <li class="semaforo-item ok"><span class="alert-light"></span><span><strong>Verde:</strong> dentro de lo esperado</span></li>
+            <li class="semaforo-item warning"><span class="alert-light"></span><span><strong>Ámbar:</strong> conviene repetir la medición</span></li>
+            <li class="semaforo-item error"><span class="alert-light"></span><span><strong>Rojo:</strong> comunícate con tu personal de seguimiento</span></li>
+          </ul>
         </div>
+      </section>
 
-        <div class="semaforo">
-          <div class="semaforo-item ok">
-            <span class="alert-light"></span>
-            <span>Verde: dentro de lo esperado</span>
+      <!-- Graficas del embarazo en curso: las mismas lecturas, en el tiempo. -->
+      <section class="bloque-graficas" aria-labelledby="titulo-graficas-inicio">
+        <div class="bloque-titulo bloque-titulo-fila">
+          <div class="bloque-titulo">
+            <span class="icono-circulo morado"><svg class="icono"><use href="#i-grafica"/></svg></span>
+            <h3 class="subtitulo" id="titulo-graficas-inicio">Tus registros en el tiempo</h3>
           </div>
-          <div class="semaforo-item warning">
-            <span class="alert-light"></span>
-            <span>Ámbar: conviene repetir la medición</span>
-          </div>
-          <div class="semaforo-item error">
-            <span class="alert-light"></span>
-            <span>Rojo: comunícate con tu personal de seguimiento</span>
-          </div>
+          <label class="campo campo-periodo">
+            <span class="campo-etiqueta">Período</span>
+            <select id="periodo-inicio">
+              <option value="todo">Todo el embarazo</option>
+              <option value="ultimos30">Últimos 30 días con registros</option>
+            </select>
+          </label>
         </div>
-
-        <p class="texto-apoyo" id="datos-actualizados" hidden></p>
-        <button type="button" class="btn-enlace" id="btn-actualizar-datos">
-          Actualizar información
-        </button>
+        <div class="graficas" id="graficas-inicio"></div>
       </section>
 
       <!-- Registro de movimientos y su envio ------------------------------
            Mensajes breves basados en el estado real de la cola de esta
            cuenta. El envio es manual: no se promete nada automatico. -->
-      <div class="result-card bloque-registro">
-        <h3 class="subtitulo">Registrar movimientos</h3>
-
-        <div class="mov-buttons">
-          <button id="btn-registrar-movimientos"
-                  class="btn-iniciar-conteo" type="button" disabled>
-            Registrar sesión de movimientos
-          </button>
+      <section class="tarjeta bloque-registro" aria-labelledby="titulo-registro">
+        <div class="bloque-titulo">
+          <span class="icono-circulo lila"><svg class="icono"><use href="#i-huellas"/></svg></span>
+          <h3 class="subtitulo" id="titulo-registro">Sesión de movimientos</h3>
         </div>
-        <p class="texto-ayuda-conteo" id="nota-movimientos">
-          Necesitas un embarazo en curso para registrar movimientos.
-        </p>
-
-        <div class="envio" id="envio">
-          <p class="envio-estado" id="envio-estado" role="status"></p>
-          <button id="btn-sincronizar-movimientos" class="btn-secundario" type="button" hidden>
-            Enviar ahora
-          </button>
-          <p class="envio-resultado" id="envio-resultado" role="status" hidden></p>
-          <p class="texto-apoyo" id="envio-ultimo" hidden></p>
+        <div class="registro-acciones">
+          <div class="registro-paso">
+            <button id="btn-registrar-movimientos"
+                    class="btn-iniciar-conteo" type="button" disabled>
+              Registrar sesión de movimientos
+            </button>
+            <p class="texto-ayuda-conteo" id="nota-movimientos">
+              Necesitas un embarazo en curso para registrar movimientos.
+            </p>
+          </div>
+          <div class="envio" id="envio">
+            <p class="envio-estado" id="envio-estado" role="status"></p>
+            <button id="btn-sincronizar-movimientos" class="btn-secundario" type="button" hidden>
+              Enviar ahora
+            </button>
+            <p class="envio-resultado" id="envio-resultado" role="status" hidden></p>
+            <p class="texto-apoyo" id="envio-ultimo" hidden></p>
+          </div>
         </div>
+      </section>
+
+      <div class="pie-datos">
+        <p class="texto-apoyo" id="datos-actualizados" hidden></p>
+        <button type="button" class="btn-enlace" id="btn-actualizar-datos">
+          Actualizar información
+        </button>
       </div>
-
     </section>
 
     <!-- =================================================================
@@ -277,10 +327,9 @@
          ================================================================= -->
     <section id="vista-historial" class="vista" hidden>
       <h2 class="titulo-vista">Mi historial</h2>
-
       <p class="texto-apoyo texto-centrado">
-        Elige un embarazo para consultar sus lecturas, de la más reciente a la
-        más antigua. Esta selección no cambia lo que muestra «Inicio».
+        Elige un embarazo para ver sus registros. Esta elección no cambia
+        lo que muestra «Inicio».
       </p>
 
       <div class="selector-embarazo">
@@ -290,218 +339,246 @@
             <option value="">No disponible</option>
           </select>
         </label>
+        <label class="campo campo-en-linea campo-periodo">
+          <span class="campo-etiqueta">Período de las gráficas</span>
+          <select id="periodo-historial">
+            <option value="todo">Todo el embarazo</option>
+            <option value="ultimos30">Últimos 30 días con registros</option>
+          </select>
+        </label>
       </div>
 
-      <!-- Las filas se construyen en app.js con lo que entrega el adaptador. -->
+      <!-- Se construye en app.js con lo que entrega el adaptador. -->
       <div id="historial-lista" class="historial-lista"></div>
     </section>
 
     <!-- =================================================================
          VISTA 4 — MANUAL DE USO
+         Una accion por paso, con un recorte de la pantalla real que marca
+         donde tocar. Los recortes usan los mismos estilos que la interfaz,
+         pero son ilustraciones: no responden al toque.
          ================================================================= -->
     <section id="vista-manual" class="vista" hidden>
       <h2 class="titulo-vista">Manual de uso</h2>
+      <p class="texto-apoyo texto-centrado">Una acción por paso. El recuadro rosa marca dónde tocar.</p>
 
-      <div class="manual-step">
-        <div class="card">
-          <h2>1. Iniciar sesión</h2>
-          <ul>
-            <li>Escribe el correo y la contraseña de tu cuenta de FetalAlert.</li>
-            <li>La cuenta la crea el personal administrador; aquí no existe
-                registro ni creación de cuentas.</li>
-            <li>La primera vez necesitas conexión con el servidor.</li>
-            <li>Tu contraseña no se guarda en este equipo en ningún momento.</li>
-          </ul>
-        </div>
-      </div>
+      <ol class="manual-pasos">
+        <li class="manual-step tarjeta">
+          <div class="paso-texto">
+            <span class="paso-numero">1</span>
+            <span class="icono-circulo morado"><svg class="icono"><use href="#i-usuario"/></svg></span>
+            <h3>Entra</h3>
+            <p>Escribe tu correo y tu contraseña y toca «Iniciar sesión».</p>
+          </div>
+          <div class="recorte" aria-hidden="true">
+            <span class="recorte-campo">nombre@ejemplo.com</span>
+            <span class="recorte-campo">••••••••</span>
+            <span class="recorte-boton primario marcado">Iniciar sesión</span>
+          </div>
+        </li>
 
-      <div class="manual-step">
-        <div class="card">
-          <h2>2. Inicio</h2>
-          <ul>
-            <li>Muestra tu embarazo en curso y su última lectura: las tres
-                tarjetas y el semáforo corresponden a esa misma lectura, con
-                su fecha.</li>
-            <li>Si esa lectura no midió algún valor, verás «—».</li>
-            <li>Desde aquí se registra una sesión de movimientos fetales.</li>
-          </ul>
-        </div>
-      </div>
+        <li class="manual-step tarjeta">
+          <div class="paso-texto">
+            <span class="paso-numero">2</span>
+            <span class="icono-circulo rosa"><svg class="icono"><use href="#i-corazon"/></svg></span>
+            <h3>Mira tus últimos registros</h3>
+            <p>En «Inicio», cada tarjeta muestra el último valor y su fecha.</p>
+          </div>
+          <div class="recorte" aria-hidden="true">
+            <span class="recorte-tarjeta marcado">
+              <span class="recorte-etiqueta">Saturación de oxígeno</span>
+              <span class="recorte-valor">— %</span>
+              <span class="recorte-pie">Fecha y hora del registro</span>
+            </span>
+          </div>
+        </li>
 
-      <div class="manual-step">
-        <div class="card">
-          <h2>3. Mi historial</h2>
-          <ul>
-            <li>Reúne tus embarazos, incluidos los anteriores, con todas sus
-                lecturas.</li>
-            <li>Cada embarazo se muestra por separado: la información de uno
-                nunca se mezcla con la de otro.</li>
-            <li>Elegir otro embarazo aquí no cambia lo que muestra «Inicio».</li>
-            <li>Solo verás información tuya.</li>
-          </ul>
-        </div>
-      </div>
+        <li class="manual-step tarjeta">
+          <div class="paso-texto">
+            <span class="paso-numero">3</span>
+            <span class="icono-circulo morado"><svg class="icono"><use href="#i-grafica"/></svg></span>
+            <h3>Recorre tus gráficas</h3>
+            <p>Toca un punto o una barra para ver su fecha y su valor.</p>
+          </div>
+          <div class="recorte" aria-hidden="true">
+            <svg class="recorte-grafica" viewBox="0 0 160 70">
+              <line x1="10" y1="60" x2="150" y2="60"/>
+              <polyline points="18,40 55,30 90,38 140,24"/>
+              <circle cx="18" cy="40" r="3.5"/><circle cx="55" cy="30" r="3.5"/>
+              <circle cx="90" cy="38" r="3.5"/><circle class="marcado-punto" cx="140" cy="24" r="6"/>
+            </svg>
+          </div>
+        </li>
 
-      <div class="manual-step">
-        <div class="card">
-          <h2>4. Estado de conexión</h2>
-          <p>Indica la comunicación con el servidor de FetalAlert, no con un
-             dispositivo: esta versión no se conecta a ningún sensor.</p>
-          <ul>
-            <li><strong>Conectada al servidor</strong>: el servidor responde y
-                acepta tu sesión.</li>
-            <li><strong>Servidor disponible · inicia sesión de nuevo</strong>:
-                el servidor responde, pero tu sesión con él terminó. Pulsa
-                «Volver a iniciar sesión»; lo que tengas guardado se
-                conserva.</li>
-            <li><strong>Sin conexión con el servidor</strong>: el servidor no
-                responde. La interfaz sigue funcionando y lo que registres se
-                guarda en este equipo.</li>
-          </ul>
-        </div>
-      </div>
+        <li class="manual-step tarjeta">
+          <div class="paso-texto">
+            <span class="paso-numero">4</span>
+            <span class="icono-circulo lila"><svg class="icono"><use href="#i-calendario"/></svg></span>
+            <h3>Consulta otros embarazos</h3>
+            <p>En «Mi historial», elige el embarazo en la lista.</p>
+          </div>
+          <div class="recorte" aria-hidden="true">
+            <span class="recorte-campo recorte-lista marcado">Desde … — Finalizado ▾</span>
+          </div>
+        </li>
 
-      <div class="manual-step">
-        <div class="card">
-          <h2>5. Estado de los envíos</h2>
-          <ul>
-            <li><strong>Pendiente de envío</strong>: guardado en este equipo,
-                todavía sin enviar. No se pierde al cerrar la aplicación.</li>
-            <li><strong>Enviado</strong>: el servidor confirmó que lo
-                recibió.</li>
-            <li><strong>No se pudo enviar</strong>: el registro sigue guardado
-                en este equipo. Pulsa «Reintentar» cuando haya conexión.</li>
-            <li>El envío no es automático: se hace con el botón «Enviar
-                ahora».</li>
-          </ul>
-        </div>
-      </div>
+        <li class="manual-step tarjeta">
+          <div class="paso-texto">
+            <span class="paso-numero">5</span>
+            <span class="icono-circulo rosa"><svg class="icono"><use href="#i-huellas"/></svg></span>
+            <h3>Registra una sesión de movimientos</h3>
+            <p>Toca el botón una sola vez y espera el mensaje de guardado.</p>
+          </div>
+          <div class="recorte" aria-hidden="true">
+            <span class="recorte-boton rosa marcado">Registrar sesión de movimientos</span>
+            <span class="recorte-pie">Registro guardado en este dispositivo, pendiente de envío.</span>
+          </div>
+        </li>
 
-      <div class="manual-step">
-        <div class="card">
-          <h2>6. Qué significa «No disponible» o «—»</h2>
-          <ul>
-            <li>Que ese dato no existe todavía o no se pudo consultar.</li>
-            <li><strong>No significa cero.</strong> Un valor ausente nunca se
-                muestra como 0: una medición que no se tomó y una medición de
-                valor cero son cosas distintas.</li>
-          </ul>
-        </div>
-      </div>
+        <li class="manual-step tarjeta">
+          <div class="paso-texto">
+            <span class="paso-numero">6</span>
+            <span class="icono-circulo morado"><svg class="icono"><use href="#i-enviar"/></svg></span>
+            <h3>Envía lo guardado</h3>
+            <p>Guardado no es enviado. Con conexión, toca «Enviar ahora» o «Reintentar».</p>
+          </div>
+          <div class="recorte" aria-hidden="true">
+            <span class="recorte-pie">Registro guardado, pendiente de envío.</span>
+            <span class="recorte-boton secundario marcado">Enviar ahora</span>
+          </div>
+        </li>
 
-      <div class="manual-step">
-        <div class="card">
-          <h2>7. Uso sin conexión</h2>
-          <ul>
-            <li>Tras iniciar sesión con conexión, el equipo queda autorizado
-                durante una ventana de tiempo configurada.</li>
-            <li>Dentro de esa ventana puedes cerrar y abrir la aplicación las
-                veces que quieras, aunque no haya internet.</li>
-            <li>Abrir la aplicación sin conexión no alarga esa ventana: solo la
-                consume. Únicamente una validación con conexión la renueva.</li>
-            <li>Cuando la ventana termina, hay que volver a iniciar sesión con
-                conexión.</li>
-          </ul>
-        </div>
-      </div>
+        <li class="manual-step tarjeta">
+          <div class="paso-texto">
+            <span class="paso-numero">7</span>
+            <span class="icono-circulo lila"><svg class="icono"><use href="#i-candado"/></svg></span>
+            <h3>Si te lo pide, vuelve a entrar</h3>
+            <p>Toca «Volver a iniciar sesión». Tus registros guardados se conservan.</p>
+          </div>
+          <div class="recorte" aria-hidden="true">
+            <span class="recorte-pildora aviso">Vuelve a iniciar sesión</span>
+            <span class="recorte-boton primario marcado">Volver a iniciar sesión</span>
+          </div>
+        </li>
 
-      <div class="manual-step">
-        <div class="card">
-          <h2>8. Registrar movimientos fetales</h2>
-          <ul>
-            <li>El botón está en «Inicio» y registra la sesión en tu embarazo
-                en curso.</li>
-            <li>Primero se guarda en este equipo; después se envía con
-                «Enviar ahora».</li>
-            <li>Si no tienes un embarazo en curso, el botón aparece
-                desactivado.</li>
-          </ul>
-        </div>
-      </div>
+        <li class="manual-step tarjeta">
+          <div class="paso-texto">
+            <span class="paso-numero">8</span>
+            <span class="icono-circulo morado"><svg class="icono"><use href="#i-sin-red"/></svg></span>
+            <h3>Sin conexión</h3>
+            <p>Sigues viendo lo ya consultado y puedes guardar registros. Para enviarlos hace falta conexión.</p>
+          </div>
+          <div class="recorte" aria-hidden="true">
+            <span class="recorte-pildora sin-red marcado">Sin conexión con el servidor</span>
+          </div>
+        </li>
 
-      <div class="manual-step">
-        <div class="card">
-          <h2>9. Cerrar sesión</h2>
-          <ul>
-            <li>El botón está arriba, en el área de tu cuenta.</li>
-            <li>Se te pedirá confirmar. «Cancelar» mantiene la sesión
-                abierta.</li>
-            <li>Tus registros pendientes se conservan en este equipo.</li>
-            <li>Para volver a entrar hace falta el correo y la contraseña.</li>
-          </ul>
-        </div>
+        <li class="manual-step tarjeta">
+          <div class="paso-texto">
+            <span class="paso-numero">9</span>
+            <span class="icono-circulo rosa"><svg class="icono"><use href="#i-salir"/></svg></span>
+            <h3>Cierra sesión</h3>
+            <p>Arriba a la derecha, «Cerrar sesión». Confirma o toca «Cancelar».</p>
+          </div>
+          <div class="recorte" aria-hidden="true">
+            <span class="recorte-boton cuenta marcado">Cerrar sesión</span>
+          </div>
+        </li>
+      </ol>
+
+      <div class="tarjeta manual-colores">
+        <h3>¿Qué significan los colores?</h3>
+        <p>El color es la clasificación de una lectura completa, junto a su fecha.</p>
+        <ul class="semaforo">
+          <li class="semaforo-item ok"><span class="alert-light"></span><span><strong>Verde:</strong> dentro de lo esperado</span></li>
+          <li class="semaforo-item warning"><span class="alert-light"></span><span><strong>Ámbar:</strong> conviene repetir la medición</span></li>
+          <li class="semaforo-item error"><span class="alert-light"></span><span><strong>Rojo:</strong> comunícate con tu personal de seguimiento</span></li>
+        </ul>
+        <p class="texto-apoyo">«—» o «Sin registros» significa que no hay dato. No significa cero.</p>
       </div>
     </section>
 
     <!-- =================================================================
          VISTA 5 — ACERCA DE FETALALERT
+         La explicacion del prototipo vive aqui, y solo aqui.
          ================================================================= -->
     <section id="vista-acerca" class="vista" hidden>
-      <div class="hero-about">
+      <div class="hero-about tarjeta">
         <h2>Acerca de FetalAlert</h2>
         <p>
           FetalAlert es un proyecto académico de seguimiento prenatal pensado
-          para entornos con conectividad intermitente.
+          para lugares donde la conexión a internet no siempre está disponible.
         </p>
       </div>
 
-      <section class="values-section">
-        <div class="values-grid">
-          <div class="value-card">
-            <h4>Qué busca</h4>
-            <p>
-              Acompañar el seguimiento del embarazo cuando la conexión a
-              internet no puede darse por segura, conservando lo que se registra
-              hasta que sea posible enviarlo.
-            </p>
-          </div>
+      <div class="values-grid">
+        <article class="value-card">
+          <span class="icono-circulo rosa"><svg class="icono"><use href="#i-corazon"/></svg></span>
+          <h4>Propósito</h4>
+          <p>
+            Facilitar que las gestantes consulten sus registros y que estos
+            lleguen al sistema central aunque la conexión sea intermitente.
+          </p>
+        </article>
 
-          <div class="value-card">
-            <h4>Cómo funciona sin conexión</h4>
-            <p>
-              Lo que se captura se guarda primero en el propio dispositivo. Al
-              recuperarse la conexión se envía al servidor central sin
-              duplicarse, conservando su identidad original.
-            </p>
-          </div>
+        <article class="value-card">
+          <span class="icono-circulo morado"><svg class="icono"><use href="#i-pantalla"/></svg></span>
+          <h4>Esta interfaz</h4>
+          <p>
+            Es la vista de la gestante: sus registros, sus embarazos y sus
+            sesiones de movimientos. El análisis para el personal médico
+            autorizado está previsto aparte, en Power BI, sobre una capa de
+            datos seudonimizada; no forma parte de esta pantalla.
+          </p>
+        </article>
 
-          <div class="value-card">
-            <h4>Datos simulados</h4>
-            <p>
-              Toda la información de esta versión es simulada. No corresponde a
-              pacientes reales ni procede de sensores reales. Las sesiones de
-              movimientos que se registran desde «Inicio» usan valores
-              simulados fijos: no son una medición.
-            </p>
-          </div>
+        <article class="value-card">
+          <span class="icono-circulo lila"><svg class="icono"><use href="#i-guardar"/></svg></span>
+          <h4>Guardado y envío</h4>
+          <p>
+            Una sesión registrada se guarda primero en este dispositivo. Se
+            envía al servidor cuando tocas «Enviar ahora», sin duplicarse si
+            se reintenta. El envío no es automático.
+          </p>
+        </article>
 
-          <div class="value-card">
-            <h4>Alcance de esta versión</h4>
-            <p>
-              Prototipo académico. No está validado clínicamente, no emite
-              diagnósticos, no sustituye la consulta con personal de salud y
-              no incorpora hardware dentro del alcance de esta
-              implementación.
-            </p>
-          </div>
+        <article class="value-card">
+          <span class="icono-circulo rosa"><svg class="icono"><use href="#i-candado"/></svg></span>
+          <h4>Acceso autorizado</h4>
+          <p>
+            Las cuentas las crea el personal administrador. Cada gestante ve
+            solo su propia información; el servidor también permite consultarla
+            al personal de salud autorizado para su seguimiento.
+          </p>
+        </article>
 
-          <div class="value-card">
-            <h4>Privacidad</h4>
-            <p>
-              Cada persona accede únicamente a su propia información. Las
-              cuentas las crea el personal administrador sobre perfiles que ya
-              existen en el sistema.
-            </p>
-          </div>
+        <article class="value-card">
+          <span class="icono-circulo morado"><svg class="icono"><use href="#i-documento"/></svg></span>
+          <h4>Datos simulados</h4>
+          <p>
+            Toda la información de esta versión es simulada con fines
+            académicos: no corresponde a pacientes reales ni procede de
+            sensores. Las sesiones de movimientos que se registran desde
+            «Inicio» usan valores simulados fijos; no son una medición.
+          </p>
+        </article>
 
-          <div class="value-card">
-            <h4>Autoría</h4>
-            <p>
-              Trabajo de tesis desarrollado por Tinuola Fagbemi y Viviana Jaén.
-            </p>
-          </div>
-        </div>
-      </section>
+        <article class="value-card">
+          <span class="icono-circulo lila"><svg class="icono"><use href="#i-libro"/></svg></span>
+          <h4>Alcance</h4>
+          <p>
+            Prototipo académico. No está validado clínicamente, no emite
+            diagnósticos, no monitorea de forma continua y no sustituye la
+            atención de tu personal de salud. Esta versión no incluye
+            hardware; la captura con un dispositivo propio queda como trabajo
+            futuro.
+          </p>
+        </article>
+      </div>
+
+      <p class="autoria texto-centrado">
+        Trabajo de tesis de Tinuola Fagbemi y Viviana Jaén.
+      </p>
     </section>
 
   </main>
@@ -510,6 +587,7 @@
     <p>FetalAlert Panamá &copy; 2026</p>
   </footer>
 
+  <script src="graficas.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

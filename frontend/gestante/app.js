@@ -116,7 +116,7 @@
   const FORMATO_FECHA_HORA = new Intl.DateTimeFormat(IDIOMA, {
     timeZone: ZONA_HORARIA,
     day: 'numeric',
-    month: 'numeric',
+    month: 'short',
     year: 'numeric',
     hour: '2-digit',
     minute: '2-digit',
@@ -125,7 +125,7 @@
   const FORMATO_FECHA = new Intl.DateTimeFormat(IDIOMA, {
     timeZone: ZONA_HORARIA,
     day: 'numeric',
-    month: 'numeric',
+    month: 'short',
     year: 'numeric'
   });
   // Una fecha de calendario («2026-03-19») es un día, no un instante: se
@@ -134,9 +134,27 @@
   const FORMATO_DIA_CALENDARIO = new Intl.DateTimeFormat(IDIOMA, {
     timeZone: 'UTC',
     day: 'numeric',
-    month: 'numeric',
+    month: 'short',
     year: 'numeric'
   });
+  // Marcas del eje temporal de las gráficas: día, mes y año corto.
+  const FORMATO_EJE = new Intl.DateTimeFormat(IDIOMA, {
+    timeZone: ZONA_HORARIA,
+    day: 'numeric',
+    month: 'short',
+    year: '2-digit'
+  });
+
+  // Las tres gráficas: mismas variables que las tarjetas. El color es de
+  // marca, no clínico; la forma (línea o barras) sigue el tipo de dato.
+  const GRAFICAS = [
+    { clave: 'frecuencia_cardiaca', titulo: 'Frecuencia cardíaca materna', unidad: 'BPM',
+      tipo: 'linea', clase: 'grafica-rosa', icono: 'i-corazon', circulo: 'rosa' },
+    { clave: 'saturacion_oxigeno', titulo: 'Saturación de oxígeno', unidad: '%',
+      tipo: 'linea', clase: 'grafica-morada', icono: 'i-pulmones', circulo: 'morado' },
+    { clave: 'movimientos_fetales', titulo: 'Movimientos fetales', unidad: 'movimientos',
+      tipo: 'barras', clase: 'grafica-lila', icono: 'i-huellas', circulo: 'lila' }
+  ];
 
   // Estado de la comunicación con el servidor, tal como lo comprueba
   // `/adaptador/estado-conexion`. Son dos preguntas distintas y se responden
@@ -215,6 +233,7 @@
   const TEXTO_LISTO_PARA_REGISTRAR =
     'Se guardará primero en este dispositivo.';
   const TEXTO_CARGANDO_LECTURAS = 'Cargando lecturas…';
+  const TEXTO_BOTON_REGISTRAR = 'Registrar sesión de movimientos';
   const TEXTO_SIN_CONEXION_CONTEXTO_CONSERVADO =
     'Sin conexión con el servidor. Se muestra la última información consultada; ' +
     'lo que registres se guarda en este dispositivo.';
@@ -283,7 +302,10 @@
     botonSincronizarMovimientos: document.getElementById('btn-sincronizar-movimientos'),
 
     selectorEmbarazo: document.getElementById('selector-embarazo'),
-    historialLista: document.getElementById('historial-lista')
+    historialLista: document.getElementById('historial-lista'),
+    graficasInicio: document.getElementById('graficas-inicio'),
+    periodoInicio: document.getElementById('periodo-inicio'),
+    periodoHistorial: document.getElementById('periodo-historial')
   };
 
   /** Los elementos de la tarjeta de una variable, por el prefijo de sus `id`. */
@@ -313,6 +335,11 @@
   // (milisegundos), o null. Es «última actualización de los datos», que no
   // tiene nada que ver con el último envío confirmado.
   let datosConsultadosEn = null;
+
+  // Series ya recibidas, para volver a dibujar al cambiar el período sin
+  // pedir nada a la red. Se vacían al cerrar sesión.
+  let seriesInicio = null;
+  let seriesHistorial = null;
 
   // Si el portal privado está abierto, y un número que cambia en cada cierre
   // de sesión: una respuesta que vuelve con otra época no pinta nada.
@@ -473,13 +500,13 @@
       return { texto: 'Sin conexión con el servidor', clase: 'status-disconnected' };
     }
     if (estado.api_central === API_CENTRAL.CON_ERRORES) {
-      return { texto: 'El servidor no responde bien', clase: 'status-disconnected' };
+      return { texto: 'Error del servidor', clase: 'status-disconnected' };
     }
     if (estado.autenticacion_central === AUTENTICACION.VIGENTE) {
       return { texto: 'Conectada al servidor', clase: 'status-connected' };
     }
     if (estado.autenticacion_central === AUTENTICACION.REQUERIDA) {
-      return { texto: 'Servidor disponible · inicia sesión de nuevo', clase: 'status-idle' };
+      return { texto: 'Vuelve a iniciar sesión', clase: 'status-idle' };
     }
     if (estado.autenticacion_central === AUTENTICACION.DENEGADA) {
       return { texto: 'Acceso no autorizado', clase: 'status-disconnected' };
@@ -572,11 +599,12 @@
    * guardados en el dispositivo no se tocan.
    */
   function limpiarPanel() {
-    ui.saludo.textContent = 'Bienvenida';
+    ui.saludo.textContent = '¡Hola!';
+    seriesHistorial = null;
 
     ui.embarazoEstado.textContent = NO_DISPONIBLE;
     ui.embarazoInicio.textContent = NO_DISPONIBLE;
-    ui.embarazoSemanaEtiqueta.textContent = 'Semana actual:';
+    ui.embarazoSemanaEtiqueta.textContent = 'Semana actual';
     ui.embarazoSemana.textContent = NO_DISPONIBLE;
     ui.embarazoAnteriores.textContent = NO_DISPONIBLE;
     mostrarNota(ui.notaEmbarazo, null);
@@ -1047,6 +1075,7 @@
    * curso, porque el dato no permite decidirlo.
    */
   function pintarEpisodios(datos) {
+    const inicioAnterior = idInicio;
     episodios = datos;
 
     // La semana de **hoy** del embarazo en curso, calculada por el adaptador
@@ -1057,9 +1086,17 @@
     // `pintarSemanaDelUltimoRegistro`.
     const conSemanaActual = datos.actual && !datos.ambiguo && !ausente(datos.semana_actual);
     ui.embarazoSemanaEtiqueta.textContent = conSemanaActual
-      ? 'Semana actual:'
-      : 'Semana en el último registro:';
-    ui.embarazoSemana.textContent = conSemanaActual ? String(datos.semana_actual) : NO_DISPONIBLE;
+      ? 'Semana actual'
+      : 'Semana en el último registro';
+    const mismoEpisodio = Boolean(datos.actual) && inicioAnterior === datos.actual.id_embarazo;
+    if (conSemanaActual) {
+      ui.embarazoSemana.textContent = String(datos.semana_actual);
+    } else if (!mismoEpisodio) {
+      // Si es el mismo embarazo, se conserva la semana del último registro
+      // ya mostrada hasta que llegue el monitoreo: borrarla dejaba la fila en
+      // «No disponible» junto a unas tarjetas que sí tienen datos.
+      ui.embarazoSemana.textContent = NO_DISPONIBLE;
+    }
 
     const todos = datos.todos || [];
     const anteriores = datos.anteriores || [];
@@ -1146,6 +1183,7 @@
    */
   function actualizarBotonDeRegistro() {
     ui.botonRegistrarMovimiento.disabled = idInicio === null;
+    ui.botonRegistrarMovimiento.textContent = TEXTO_BOTON_REGISTRAR;
     ui.notaMovimientos.textContent =
       idInicio === null ? TEXTO_SIN_EMBARAZO_EN_CURSO : TEXTO_LISTO_PARA_REGISTRAR;
   }
@@ -1220,6 +1258,9 @@
     Object.keys(ui.tarjetas).forEach(function (clave) {
       pintarTarjeta(ui.tarjetas[clave], undefined);
     });
+    // Las gráficas de Inicio son las mismas lecturas: se van con ellas.
+    seriesInicio = null;
+    dibujarGraficas(ui.graficasInicio, null);
     ui.ultimaLectura.textContent = SIN_DATO;
     ui.ultimaLecturaMide.textContent = '';
   }
@@ -1279,6 +1320,84 @@
     pintarUltimosRegistros(datos.ultimos_registros);
     pintarUltimaLectura(datos.ultima_lectura);
     pintarSemanaDelUltimoRegistro(datos.ultima_lectura);
+    seriesInicio = datos.series || null;
+    dibujarGraficas(ui.graficasInicio, seriesInicio, periodoElegido(ui.periodoInicio));
+  }
+
+  function periodoElegido(selector) {
+    return selector && selector.value === 'ultimos30' ? 'ultimos30' : 'todo';
+  }
+
+  /** Un icono del juego de la página, dentro de un círculo de color de marca. */
+  function iconoEnCirculo(nombre, circulo) {
+    const envoltura = document.createElement('span');
+    envoltura.className = 'icono-circulo ' + circulo;
+    const motor = typeof window !== 'undefined' ? window.FetalAlertGraficas : undefined;
+    if (motor) {
+      envoltura.appendChild(motor.icono(nombre));
+    }
+    return envoltura;
+  }
+
+  /**
+   * Las tres gráficas de un embarazo, a partir de las series del adaptador.
+   *
+   * Solo se traducen textos (fecha y valor, en español y hora de Panamá); lo
+   * que se dibuja lo decide graficas.js con esos mismos registros. Sin
+   * series (no llegaron, o no se pudieron consultar) no se dibuja nada.
+   */
+  function dibujarGraficas(contenedor, series, periodo) {
+    if (!contenedor) {
+      return;
+    }
+    contenedor.innerHTML = '';
+    if (!series) {
+      return;
+    }
+    const motor = typeof window !== 'undefined' ? window.FetalAlertGraficas : undefined;
+    GRAFICAS.forEach(function (g) {
+      const tarjeta = document.createElement('article');
+      tarjeta.className = 'tarjeta grafica';
+      const cabecera = document.createElement('div');
+      cabecera.className = 'grafica-cabecera';
+      cabecera.appendChild(iconoEnCirculo(g.icono, g.circulo));
+      const titulo = document.createElement('h4');
+      titulo.textContent = g.titulo;
+      cabecera.appendChild(titulo);
+      tarjeta.appendChild(cabecera);
+      const cuerpo = document.createElement('div');
+      tarjeta.appendChild(cuerpo);
+      contenedor.appendChild(tarjeta);
+
+      const serie = series[g.clave];
+      if (!serie || !motor) {
+        const nota = document.createElement('p');
+        nota.className = 'grafica-periodo';
+        nota.textContent = serie ? 'No se pudo preparar la gráfica.' : NO_DISPONIBLE;
+        cuerpo.appendChild(nota);
+        return;
+      }
+      motor.dibujar(cuerpo, {
+        titulo: g.titulo,
+        unidad: g.unidad,
+        tipo: g.tipo,
+        clase: g.clase,
+        periodo: periodo,
+        formatoEje: function (ms) {
+          return FORMATO_EJE.format(new Date(ms));
+        },
+        puntos: (serie.puntos || []).map(function (p) {
+          return {
+            instante: new Date(p.fecha_hora_captura).getTime(),
+            valor: p.valor,
+            textoValor: conUnidad(p.valor, g.unidad),
+            textoFecha: fechaLegible(p.fecha_hora_captura),
+            textoFechaCorta: fechaCortaLegible(p.fecha_hora_captura),
+            semana: p.semana_gestacion_lectura
+          };
+        })
+      });
+    });
   }
 
   /**
@@ -1292,7 +1411,7 @@
     if (!episodios || !episodios.actual || episodios.ambiguo || !ausente(episodios.semana_actual)) {
       return;
     }
-    ui.embarazoSemanaEtiqueta.textContent = 'Semana en el último registro:';
+    ui.embarazoSemanaEtiqueta.textContent = 'Semana en el último registro';
     ui.embarazoSemana.textContent = lectura && !ausente(lectura.semana_gestacion)
       ? lectura.semana_gestacion + ' (' + fechaCortaLegible(lectura.fecha_hora_captura) + ')'
       : 'Sin registros';
@@ -1308,6 +1427,7 @@
 
   function mostrarHistorialVacio(mensaje) {
     ui.historialLista.innerHTML = '';
+    seriesHistorial = null;
     const tarjeta = document.createElement('div');
     tarjeta.className = 'result-card estado-vacio';
     const parrafo = document.createElement('p');
@@ -1394,8 +1514,26 @@
     resumen.className = 'texto-apoyo';
     resumen.textContent =
       (lecturas.length === 1 ? '1 lectura' : lecturas.length + ' lecturas') +
-      ', de la más reciente a la más antigua. «—» indica un valor no registrado.';
+      ' en este embarazo. Cada gráfica muestra solo los registros de su medición.';
     tarjeta.appendChild(resumen);
+
+    const graficas = document.createElement('div');
+    graficas.className = 'graficas';
+    tarjeta.appendChild(graficas);
+    seriesHistorial = datos.series || null;
+    dibujarGraficas(graficas, seriesHistorial, periodoElegido(ui.periodoHistorial));
+
+    // La tabla completa, a un toque: todas las lecturas con su semáforo.
+    const detalle = document.createElement('details');
+    detalle.className = 'historial-detalle';
+    const titular = document.createElement('summary');
+    titular.textContent = 'Ver ' + (lecturas.length === 1 ? 'la lectura' : 'las ' + lecturas.length + ' lecturas') +
+      ' en tabla (de la más reciente a la más antigua)';
+    detalle.appendChild(titular);
+    const leyenda = document.createElement('p');
+    leyenda.className = 'texto-apoyo';
+    leyenda.textContent = '«—» indica un valor no registrado.';
+    detalle.appendChild(leyenda);
 
     const tabla = document.createElement('table');
     tabla.className = 'tabla-lecturas';
@@ -1427,7 +1565,8 @@
     const contenedor = document.createElement('div');
     contenedor.className = 'tabla-contenedor';
     contenedor.appendChild(tabla);
-    tarjeta.appendChild(contenedor);
+    detalle.appendChild(contenedor);
+    tarjeta.appendChild(detalle);
 
     ui.historialLista.appendChild(tarjeta);
   }
@@ -1689,7 +1828,10 @@
     }
     const destino = idInicio;
 
+    // Deshabilitado hasta que responda el adaptador: sin la API, guardar
+    // puede tardar unos segundos y una segunda pulsación no debe duplicar.
     ui.botonRegistrarMovimiento.disabled = true;
+    ui.botonRegistrarMovimiento.textContent = 'Guardando…';
     ui.notaMovimientos.textContent = 'Guardando…';
 
     pedir(API.sesionesSimuladas(destino), {
@@ -1862,6 +2004,17 @@
     ui.botonRegistrarMovimiento.addEventListener('click', manejarRegistrarMovimiento);
     ui.botonSincronizarMovimientos.addEventListener('click', manejarSincronizarMovimientos);
     ui.botonVerAnteriores.addEventListener('click', verEmbarazosAnteriores);
+
+    // El período solo cambia el dibujo de lo ya recibido: no pide nada.
+    ui.periodoInicio.addEventListener('change', function () {
+      dibujarGraficas(ui.graficasInicio, seriesInicio, periodoElegido(ui.periodoInicio));
+    });
+    ui.periodoHistorial.addEventListener('change', function () {
+      const graficas = ui.historialLista.querySelector('.graficas');
+      if (graficas && seriesHistorial) {
+        dibujarGraficas(graficas, seriesHistorial, periodoElegido(ui.periodoHistorial));
+      }
+    });
     ui.botonActualizarDatos.addEventListener('click', refrescar);
     ui.botonMostrarReautenticar.addEventListener('click', abrirReautenticacion);
     ui.botonCancelarReautenticar.addEventListener('click', cancelarReautenticacion);
