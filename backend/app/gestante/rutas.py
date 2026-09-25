@@ -787,10 +787,12 @@ def crear_router(contexto: ContextoAdaptador) -> APIRouter:
     def _punto(punto: Punto | None, variable: Variable) -> dict | None:
         """Un valor de una variable con su trazabilidad, o ``None`` si nunca se registró.
 
-        ``codigo_semaforo_lectura`` es la clasificación **global de la lectura
-        de origen**, tal como la entrega el servidor. La API no publica una
-        clasificación por métrica, y este nombre existe para que nadie la lea
-        como si lo fuera. ``id_lectura`` e ``id_sesion`` son trazabilidad: la
+        **Sin semáforo, a propósito.** La API solo clasifica cada lectura en su
+        conjunto; no publica una clasificación por métrica. Adjuntar aquí el
+        código de la lectura haría que una tarjeta o un punto de la serie lo
+        presentaran como propio de esa variable. Quien necesite la clasificación
+        la tiene, con su alcance real, en ``sesiones[].lecturas[]`` y en
+        ``ultima_lectura``. ``id_lectura`` e ``id_sesion`` son trazabilidad: la
         interfaz no los muestra.
         """
         if punto is None:
@@ -801,7 +803,6 @@ def crear_router(contexto: ContextoAdaptador) -> APIRouter:
             "unidad": variable.unidad,
             "fecha_hora_captura": punto.lectura.fecha_hora_captura.isoformat(),
             "semana_gestacion_lectura": punto.lectura.semana_gestacion,
-            "codigo_semaforo_lectura": punto.lectura.codigo_semaforo,
             "id_lectura": punto.lectura.id_lectura,
             "id_sesion": punto.id_sesion,
         }
@@ -846,22 +847,32 @@ def crear_router(contexto: ContextoAdaptador) -> APIRouter:
 
         # «Hoy» es el día de calendario en Panamá, la misma zona con la que el
         # ETL decide el día clínico. La semana se calcula con la aritmética del
-        # servidor --``semana_gestacional``--, sin topes: si el episodio sigue
-        # ACTIVO más allá de la semana 42, eso es lo que dice el dato.
+        # servidor --``semana_gestacional``--, sin topes numéricos.
+        #
+        # Solo se publica mientras hoy no pase de la fecha probable de parto
+        # **registrada en el propio episodio**. Pasada esa fecha, el calendario
+        # del episodio ya no describe el presente --en el dataset simulado hay
+        # episodios ACTIVO con fechas de 2025-2026-- y un «semana actual: 53»
+        # se leería como un dato vigente de seguimiento. Entonces va ``None`` y
+        # la interfaz muestra la semana del último registro, con su fecha. No
+        # se cambia ni una fecha ni un estado del episodio.
         hoy = contexto.reloj().astimezone(ZONA_HORARIA_CLINICA)
-        semana_actual = (
-            None
-            if episodios.actual is None
-            else semana_gestacional(episodios.actual.fecha_inicio, hoy)
-        )
+        semana_actual = None
+        actual = episodios.actual
+        if actual is not None and (
+            actual.fecha_probable_parto is None or hoy.date() <= actual.fecha_probable_parto
+        ):
+            semana_actual = semana_gestacional(actual.fecha_inicio, hoy)
 
         return json(
             {
                 "disponible": True,
                 "datos": {
                     "hoy": hoy.date().isoformat(),
-                    # Semana del embarazo en curso **hoy**. No es la semana de
-                    # ninguna lectura: esa viaja con cada lectura.
+                    # Semana del embarazo en curso **hoy**, o ``None`` si no hay
+                    # episodio en curso o su fecha probable de parto ya pasó.
+                    # No es la semana de ninguna lectura: esa viaja con cada
+                    # lectura.
                     "semana_actual": semana_actual,
                     "actual": None if episodios.actual is None else _episodio(episodios.actual),
                     "anteriores": [_episodio(e) for e in episodios.anteriores],

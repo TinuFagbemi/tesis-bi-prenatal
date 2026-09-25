@@ -378,7 +378,6 @@ function registro(lectura, idSesion, campo, unidad) {
     unidad,
     fecha_hora_captura: lectura.fecha_hora_captura,
     semana_gestacion_lectura: lectura.semana_gestacion,
-    codigo_semaforo_lectura: lectura.codigo_semaforo,
     id_lectura: lectura.id_lectura,
     id_sesion: idSesion
   };
@@ -476,6 +475,7 @@ test('Semana actual y semana de la lectura son cosas distintas', async () => {
   const { $ } = await arrancar(rutasBase());
 
   // semana_actual del adaptador (hoy), no la 27 de la lectura del 24/9.
+  assert.equal($('embarazo-semana-etiqueta').textContent, 'Semana actual:');
   assert.equal($('embarazo-semana').textContent, '28');
   assert.equal($('mov-semana').textContent, 'Semana 27 en esa lectura');
 });
@@ -498,7 +498,9 @@ const LECTURA_1259 = {
 function rutasPaciente30(cambios) {
   return rutasBase(Object.assign({
     'GET /adaptador/embarazos': [200, { disponible: true, datos: {
-      hoy: '2026-09-25', semana_actual: 53, actual: EMBARAZO_129,
+      // Su fecha probable de parto (1/7/2026) ya pasó: el adaptador no
+      // publica una semana actual.
+      hoy: '2026-09-25', semana_actual: null, actual: EMBARAZO_129,
       anteriores: [], todos: [EMBARAZO_129], ambiguo: false
     } }],
     'GET /adaptador/embarazos/129/monitoreo': monitoreo(129, [
@@ -514,7 +516,7 @@ function rutasPaciente30(cambios) {
   }, cambios || {}));
 }
 
-test('paciente30: FC/SpO2 y movimientos de lecturas distintas, cada uno con su fecha y su clasificación', async () => {
+test('paciente30: FC/SpO2 y movimientos de lecturas distintas, cada uno con su fecha, en tarjetas neutrales', async () => {
   const { $ } = await arrancar(rutasPaciente30());
 
   assert.equal($('hr-value').textContent, '83');
@@ -526,17 +528,28 @@ test('paciente30: FC/SpO2 y movimientos de lecturas distintas, cada uno con su f
   assert.equal($('mov-fecha').textContent, 'Registrado el 21/6/2026, 09:56');
   assert.equal($('tarjeta-hr').getAttribute('data-id-lectura'), '549');
   assert.equal($('tarjeta-mov').getAttribute('data-id-lectura'), '1259');
-  // La clasificación es la de la lectura de origen, rotulada como tal.
-  assert.equal($('hr-clasificacion').textContent, 'Clasificación de esa lectura: Verde');
-  assert.equal($('mov-clasificacion').textContent, 'Clasificación de esa lectura: Ámbar');
+  // Tarjetas neutrales: la API solo clasifica lecturas completas, así que
+  // ninguna tarjeta lleva el semáforo de su lectura de origen.
+  ['hr', 'spo2', 'mov'].forEach((p) => {
+    assert.equal($(p + '-clasificacion'), undefined, 'sin elemento de clasificación');
+    ['-value', '-status', '-fecha', '-semana'].forEach((s) =>
+      assert.doesNotMatch($(p + s).textContent, /Verde|Ámbar|Rojo|Clasificación/));
+  });
   // El semáforo grande es el de UNA lectura, la más reciente, y dice qué midió.
   assert.ok($('semaforo').classList.contains('warning'));
   assert.equal($('last-update').textContent, '21/6/2026, 09:56');
   assert.equal($('ultima-lectura-mide').textContent, 'Midió movimientos fetales.');
-  // Semana de hoy sin topes; la de cada lectura, aparte.
-  assert.equal($('embarazo-semana').textContent, '53');
+  // Sin semana actual vigente: la del último registro, rotulada y con fecha.
+  assert.equal($('embarazo-semana-etiqueta').textContent, 'Semana en el último registro:');
+  assert.equal($('embarazo-semana').textContent, '39 (21/6/2026)');
   assert.equal($('hr-semana').textContent, 'Semana 36 en esa lectura');
-  assert.match($('nota-embarazo').textContent, /fecha probable de parto \(1\/7\/2026\) ya pasó/);
+  // El desfase del escenario de demostración no se convierte en un aviso.
+  assert.equal($('nota-embarazo').hidden, true);
+});
+
+test('El alcance del semáforo está escrito: es de la lectura completa', () => {
+  assert.match(HTML, /La clasificación corresponde a esta lectura completa, no a cada\s+medición por separado\./);
+  assert.doesNotMatch(HTML, /-clasificacion"/);
 });
 
 test('El cero es un valor registrado, no una ausencia', async () => {

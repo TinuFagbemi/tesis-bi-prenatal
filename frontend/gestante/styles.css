@@ -424,12 +424,10 @@ main{max-width:1100px;margin:0 auto;padding:2rem 1.5rem 3rem;}
 .bloque-lectura > #datos-actualizados{text-align:center;margin-top:1.5rem;}
 .bloque-lectura > #btn-actualizar-datos{display:block;margin:.5rem auto 0;}
 
-/* Origen de cada tarjeta: su fecha, la semana de esa lectura y la
-   clasificacion de esa lectura. Tres lineas pequenas bajo el valor. */
+/* Origen de cada tarjeta: su fecha y la semana de esa lectura. Sin
+   clasificacion: la API solo clasifica lecturas completas. */
 .card .registro-fecha,
-.card .registro-semana,
-.card .registro-clasificacion{font-size:.85rem;margin-top:.35rem;}
-.card .registro-clasificacion .semaforo-item{display:inline-flex;}
+.card .registro-semana{font-size:.85rem;margin-top:.35rem;}
 
 /* Aviso de sesion central vencida: arriba de todo y sin tapar nada. */
 .aviso-sesion-central{max-width:640px;margin:0 auto 1.5rem;text-align:center;}
