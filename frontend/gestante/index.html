@@ -59,6 +59,33 @@
 
   <main>
 
+    <!-- Sesion con el servidor central vencida o rechazada. La sesion de este
+         dispositivo sigue abierta y los registros guardados no se tocan: solo
+         falta volver a presentar las credenciales de la MISMA cuenta. -->
+    <div class="result-card aviso-sesion-central" id="aviso-sesion-central" role="status" hidden>
+      <p id="aviso-sesion-central-texto"></p>
+      <button type="button" class="btn-primario" id="btn-mostrar-reautenticar">
+        Volver a iniciar sesión
+      </button>
+      <form id="form-reautenticar" class="form-login" autocomplete="on" novalidate hidden>
+        <label class="campo">
+          <span class="campo-etiqueta">Correo</span>
+          <input type="email" id="reauth-email" name="email"
+                 autocomplete="username" required>
+        </label>
+        <label class="campo">
+          <span class="campo-etiqueta">Contraseña</span>
+          <input type="password" id="reauth-password" name="password"
+                 autocomplete="current-password" required>
+        </label>
+        <div class="dialogo-acciones">
+          <button type="button" class="btn-secundario" id="btn-cancelar-reautenticar">Cancelar</button>
+          <button type="submit" class="btn-primario" id="btn-reautenticar">Iniciar sesión</button>
+        </div>
+      </form>
+      <p id="reauth-mensaje" class="mensaje-error" role="alert" hidden></p>
+    </div>
+
     <!-- =================================================================
          VISTA 1 — INICIO DE SESION
          ================================================================= -->
@@ -122,7 +149,7 @@
           <span class="value" id="embarazo-inicio">No disponible</span>
         </div>
         <div class="data-row">
-          <span class="label">Semana gestacional:</span>
+          <span class="label">Semana actual:</span>
           <span class="value" id="embarazo-semana">No disponible</span>
         </div>
         <div class="data-row">
@@ -135,44 +162,62 @@
         </button>
       </div>
 
-      <!-- Ultima lectura: las tres tarjetas son UNA misma lectura ---------->
-      <section class="bloque-lectura" aria-labelledby="titulo-ultima-lectura">
-        <h3 class="subtitulo" id="titulo-ultima-lectura">Última lectura</h3>
+      <!-- Tus ultimos registros: el ultimo valor de CADA variable, cada uno
+           con su propia fecha y su propia lectura de origen. No son
+           simultaneos y no se combinan en un semaforo comun. -->
+      <section class="bloque-lectura" aria-labelledby="titulo-ultimos-registros">
+        <h3 class="subtitulo" id="titulo-ultimos-registros">Tus últimos registros</h3>
         <p class="lectura-origen">
-          Registrada el <span id="last-update">—</span>.
-          Las tres mediciones corresponden a esta misma lectura.
+          El último valor registrado de cada medición. Pueden corresponder a
+          momentos distintos. Horas en hora de Panamá.
         </p>
 
         <div class="cards">
 
-          <div class="card">
+          <div class="card" id="tarjeta-hr">
             <h2>Frecuencia Cardíaca</h2>
             <div class="value">
               <span id="hr-value">—</span><span class="unit">BPM</span>
             </div>
-            <p id="hr-status">Sin lectura</p>
+            <p id="hr-status">No disponible</p>
+            <p class="registro-fecha" id="hr-fecha"></p>
+            <p class="registro-semana" id="hr-semana"></p>
+            <p class="registro-clasificacion" id="hr-clasificacion" hidden></p>
           </div>
 
-          <div class="card">
+          <div class="card" id="tarjeta-spo2">
             <h2>Saturación de Oxígeno</h2>
             <div class="value">
               <span id="spo2-value">—</span><span class="unit">%</span>
             </div>
-            <p id="spo2-status">Sin lectura</p>
+            <p id="spo2-status">No disponible</p>
+            <p class="registro-fecha" id="spo2-fecha"></p>
+            <p class="registro-semana" id="spo2-semana"></p>
+            <p class="registro-clasificacion" id="spo2-clasificacion" hidden></p>
           </div>
 
-          <div class="card">
+          <div class="card" id="tarjeta-mov">
             <h2>Actividad Fetal</h2>
             <div class="value">
-              <span id="movs-value">—</span>
+              <span id="mov-value">—</span>
             </div>
             <div class="movements-text">Movimientos fetales</div>
-            <p id="mov-status">Sin lectura</p>
+            <p id="mov-status">No disponible</p>
+            <p class="registro-fecha" id="mov-fecha"></p>
+            <p class="registro-semana" id="mov-semana"></p>
+            <p class="registro-clasificacion" id="mov-clasificacion" hidden></p>
           </div>
 
         </div>
 
-        <!-- Semaforo de esa misma lectura -->
+        <!-- La lectura mas reciente del embarazo y SU clasificacion, tal como
+             la decidio el servidor. Es una sola lectura, no un resumen de las
+             tarjetas. -->
+        <h3 class="subtitulo" id="titulo-ultima-lectura">Tu lectura más reciente</h3>
+        <p class="lectura-origen">
+          Registrada el <span id="last-update">—</span>.
+          <span id="ultima-lectura-mide"></span>
+        </p>
         <div id="semaforo" class="alert waiting">
           <div id="semaforo-luz" class="alert-light"></div>
           <span id="semaforo-mensaje">Sin clasificación disponible</span>
@@ -192,6 +237,11 @@
             <span>Rojo: comunícate con tu personal de seguimiento</span>
           </div>
         </div>
+
+        <p class="texto-apoyo" id="datos-actualizados" hidden></p>
+        <button type="button" class="btn-enlace" id="btn-actualizar-datos">
+          Actualizar información
+        </button>
       </section>
 
       <!-- Registro de movimientos y su envio ------------------------------
@@ -216,6 +266,7 @@
             Enviar ahora
           </button>
           <p class="envio-resultado" id="envio-resultado" role="status" hidden></p>
+          <p class="texto-apoyo" id="envio-ultimo" hidden></p>
         </div>
       </div>
 
@@ -294,12 +345,18 @@
       <div class="manual-step">
         <div class="card">
           <h2>4. Estado de conexión</h2>
+          <p>Indica la comunicación con el servidor de FetalAlert, no con un
+             dispositivo: esta versión no se conecta a ningún sensor.</p>
           <ul>
-            <li><strong>Conectado</strong>: hay comunicación con el servidor
-                central.</li>
-            <li><strong>Sin conexión</strong>: el servidor no responde. La
-                interfaz sigue funcionando y lo que registres se guarda en este
-                equipo.</li>
+            <li><strong>Conectada al servidor</strong>: el servidor responde y
+                acepta tu sesión.</li>
+            <li><strong>Servidor disponible · inicia sesión de nuevo</strong>:
+                el servidor responde, pero tu sesión con él terminó. Pulsa
+                «Volver a iniciar sesión»; lo que tengas guardado se
+                conserva.</li>
+            <li><strong>Sin conexión con el servidor</strong>: el servidor no
+                responde. La interfaz sigue funcionando y lo que registres se
+                guarda en este equipo.</li>
           </ul>
         </div>
       </div>

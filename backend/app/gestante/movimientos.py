@@ -32,7 +32,9 @@ Todos los datos son ficticios y simulados.
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Callable
+from contextlib import closing
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -97,6 +99,29 @@ def registrar_sesion_simulada(
 
 
 MENSAJE_SIN_REGISTROS = "Todavia no has registrado ninguna sesion simulada."
+
+
+def ultimo_envio_confirmado(settings: GestanteSettings, id_usuario: int) -> str | None:
+    """Cuándo aceptó el servidor por última vez un registro de esta cuenta, o ``None``.
+
+    Es ``enviado_en`` de la outbox: lo escribe ``app.edge`` solo cuando el
+    servidor confirmó la entrega. Un ``/health`` correcto o una lectura clínica
+    no lo mueven, y por eso es la única fuente de «último envío». Se abre en
+    solo lectura y no se crea el archivo si no existe.
+    """
+    ruta = ruta_para_la_cuenta(settings, id_usuario)
+    if not ruta.exists():
+        return None
+    try:
+        with closing(
+            sqlite3.connect(f"{ruta.resolve().as_uri()}?mode=ro", uri=True)
+        ) as conexion:
+            fila = conexion.execute(
+                "SELECT max(enviado_en) FROM outbox WHERE estado = 'ENVIADO'"
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+    return fila[0] if fila else None
 
 
 def leer_estado_de_la_cuenta(

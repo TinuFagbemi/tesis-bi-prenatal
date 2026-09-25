@@ -55,6 +55,8 @@
     iniciarSesion: '/adaptador/iniciar-sesion',
     cerrarSesion: '/adaptador/cerrar-sesion',
     conectividad: '/adaptador/conectividad',
+    estadoConexion: '/adaptador/estado-conexion',
+    reautenticar: '/adaptador/reautenticar',
     embarazos: '/adaptador/embarazos',
     monitoreo: function (idEmbarazo) {
       // El identificador procede siempre de la lista de episodios que devolvio
@@ -93,9 +95,69 @@
     SIN_CONEXION: 'sin_conexion'
   };
 
-  // Cada cuanto se refrescan conectividad, envios y lectura, en milisegundos.
-  // No es un sondeo de sensores: son lecturas baratas del adaptador.
+  // Cada cuanto se comprueba el estado de la conexion y de los envios, en
+  // milisegundos. **No recarga lo clinico**: cada lectura clinica queda
+  // registrada en la auditoria del servidor (SCRUM-98), y repetirla cada
+  // veinte segundos llenaba esa traza sin que la paciente hiciera nada. Lo
+  // clinico se pide al entrar, al volver a Inicio, al cambiar de embarazo, al
+  // volver a la pestaña con datos viejos, al recuperar la conexion o la
+  // autenticacion, tras un envio confirmado y con «Actualizar».
   const INTERVALO_REFRESCO_MS = 20000;
+
+  // Al volver a la pestaña, lo clinico se vuelve a pedir si lo mostrado tiene
+  // mas de este tiempo.
+  const ANTIGUEDAD_MAXIMA_DATOS_MS = 60000;
+
+  // Toda fecha visible se presenta en español y en la hora de Panamá, sea
+  // cual sea la configuración del navegador. Las marcas almacenadas no se
+  // tocan: solo cambia cómo se leen.
+  const IDIOMA = 'es';
+  const ZONA_HORARIA = 'America/Panama';
+  const FORMATO_FECHA_HORA = new Intl.DateTimeFormat(IDIOMA, {
+    timeZone: ZONA_HORARIA,
+    day: 'numeric',
+    month: 'numeric',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23'
+  });
+  const FORMATO_FECHA = new Intl.DateTimeFormat(IDIOMA, {
+    timeZone: ZONA_HORARIA,
+    day: 'numeric',
+    month: 'numeric',
+    year: 'numeric'
+  });
+  // Una fecha de calendario («2026-03-19») es un día, no un instante: se
+  // construye como medianoche UTC y se formatea en UTC, así que ninguna zona
+  // horaria puede moverla al día anterior.
+  const FORMATO_DIA_CALENDARIO = new Intl.DateTimeFormat(IDIOMA, {
+    timeZone: 'UTC',
+    day: 'numeric',
+    month: 'numeric',
+    year: 'numeric'
+  });
+
+  // Estado de la comunicación con el servidor, tal como lo comprueba
+  // `/adaptador/estado-conexion`. Son dos preguntas distintas y se responden
+  // por separado: si el servidor contesta, y si acepta la sesión de la
+  // paciente.
+  const API_CENTRAL = {
+    DISPONIBLE: 'disponible',
+    NO_DISPONIBLE: 'no_disponible',
+    CON_ERRORES: 'con_errores'
+  };
+  const AUTENTICACION = {
+    VIGENTE: 'vigente',
+    REQUERIDA: 'reautenticacion_requerida',
+    DENEGADA: 'acceso_denegado',
+    NO_COMPROBADA: 'no_comprobada'
+  };
+  // Cuando ni siquiera la aplicación local contestó: no se sabe nada.
+  const ESTADO_NO_COMPROBADO = {
+    api_central: 'no_comprobada',
+    autenticacion_central: AUTENTICACION.NO_COMPROBADA
+  };
 
   const SIN_DATO = '—';
   const NO_DISPONIBLE = 'No disponible';
@@ -110,8 +172,8 @@
   // centrales. Ninguno provoca cierre de sesion.
   const AVISOS = {};
   AVISOS[MOTIVO.REAUTENTICACION] =
-    'Tu sesión en este dispositivo sigue activa, pero para ver tu información ' +
-    'clínica hace falta iniciar sesión de nuevo cuando haya conexión.';
+    'Tu sesión con el servidor terminó. Pulsa «Volver a iniciar sesión» para ' +
+    'consultar tu información; tus registros guardados se conservan.';
   AVISOS[MOTIVO.SIN_CONEXION] =
     'Sin conexión con el servidor. Tu información clínica se mostrará cuando ' +
     'vuelva la conexión.';
@@ -156,6 +218,9 @@
   const TEXTO_SIN_CONEXION_CONTEXTO_CONSERVADO =
     'Sin conexión con el servidor. Se muestra la última información consultada; ' +
     'lo que registres se guarda en este dispositivo.';
+  const TEXTO_REAUTENTICACION_CONTEXTO_CONSERVADO =
+    'Se muestra la última información consultada. Para actualizarla, vuelve a ' +
+    'iniciar sesión; lo que registres se guarda en este dispositivo.';
 
   // =======================================================================
   // Referencias al DOM
@@ -185,16 +250,30 @@
     notaEmbarazo: document.getElementById('nota-embarazo'),
     botonVerAnteriores: document.getElementById('btn-ver-anteriores'),
 
-    hrValor: document.getElementById('hr-value'),
-    hrEstado: document.getElementById('hr-status'),
-    spo2Valor: document.getElementById('spo2-value'),
-    spo2Estado: document.getElementById('spo2-status'),
-    movValor: document.getElementById('movs-value'),
-    movEstado: document.getElementById('mov-status'),
+    // Una tarjeta por variable, cada una con su propio registro de origen.
+    tarjetas: {
+      frecuencia_cardiaca: tarjeta('hr'),
+      saturacion_oxigeno: tarjeta('spo2'),
+      movimientos_fetales: tarjeta('mov')
+    },
     ultimaLectura: document.getElementById('last-update'),
+    ultimaLecturaMide: document.getElementById('ultima-lectura-mide'),
+    datosActualizados: document.getElementById('datos-actualizados'),
+    botonActualizarDatos: document.getElementById('btn-actualizar-datos'),
 
     semaforo: document.getElementById('semaforo'),
     semaforoMensaje: document.getElementById('semaforo-mensaje'),
+
+    avisoSesionCentral: document.getElementById('aviso-sesion-central'),
+    avisoSesionCentralTexto: document.getElementById('aviso-sesion-central-texto'),
+    botonMostrarReautenticar: document.getElementById('btn-mostrar-reautenticar'),
+    formReautenticar: document.getElementById('form-reautenticar'),
+    reautenticarEmail: document.getElementById('reauth-email'),
+    reautenticarPassword: document.getElementById('reauth-password'),
+    botonReautenticar: document.getElementById('btn-reautenticar'),
+    botonCancelarReautenticar: document.getElementById('btn-cancelar-reautenticar'),
+    mensajeReautenticar: document.getElementById('reauth-mensaje'),
+    envioUltimo: document.getElementById('envio-ultimo'),
 
     botonRegistrarMovimiento: document.getElementById('btn-registrar-movimientos'),
     notaMovimientos: document.getElementById('nota-movimientos'),
@@ -206,9 +285,39 @@
     historialLista: document.getElementById('historial-lista')
   };
 
+  /** Los elementos de la tarjeta de una variable, por el prefijo de sus `id`. */
+  function tarjeta(prefijo) {
+    return {
+      contenedor: document.getElementById('tarjeta-' + prefijo),
+      valor: document.getElementById(prefijo + '-value'),
+      estado: document.getElementById(prefijo + '-status'),
+      fecha: document.getElementById(prefijo + '-fecha'),
+      semana: document.getElementById(prefijo + '-semana'),
+      clasificacion: document.getElementById(prefijo + '-clasificacion')
+    };
+  }
+
   const VISTAS = ['login', 'inicio', 'historial', 'manual', 'acerca'];
 
   let temporizadorRefresco = null;
+
+  // Último estado comprobado de la comunicación con el servidor, o null si
+  // todavía no se sabe. Solo lo escribe `refrescarEstadoConexion`.
+  let estadoConexion = null;
+
+  // Una sola comprobación de estado en vuelo: el temporizador, la vuelta a la
+  // pestaña y un aviso de reautenticación no abren tres peticiones a la vez.
+  let comprobacionEnCurso = null;
+
+  // Cuándo se recibió por última vez información clínica del servidor
+  // (milisegundos), o null. Es «última actualización de los datos», que no
+  // tiene nada que ver con el último envío confirmado.
+  let datosConsultadosEn = null;
+
+  // Si el portal privado está abierto, y un número que cambia en cada cierre
+  // de sesión: una respuesta que vuelve con otra época no pinta nada.
+  let portalAbierto = false;
+  let epocaSesion = 0;
 
   // Episodios que el adaptador entrego en la ultima consulta. Todo
   // identificador que se usa despues sale de aqui: no se construye a partir
@@ -224,7 +333,7 @@
 
   // Turnos. Cada peticion anota el turno vigente de su contexto y, al volver,
   // solo se pinta si sigue siendo el vigente. Cerrar sesion avanza todos.
-  const turnos = { clinico: 0, inicio: 0, historial: 0, envios: 0 };
+  const turnos = { clinico: 0, inicio: 0, historial: 0, envios: 0, conexion: 0 };
 
   function avanzarTurno(contexto) {
     turnos[contexto] += 1;
@@ -278,7 +387,7 @@
     return ausente(valor) ? SIN_DATO : medida(valor) + ' ' + unidad;
   }
 
-  /** Fecha y hora legibles, o el marcador de ausencia. */
+  /** Fecha y hora legibles en hora de Panamá, o el marcador de ausencia. */
   function fechaLegible(valorIso) {
     if (ausente(valorIso)) {
       return SIN_DATO;
@@ -287,27 +396,29 @@
     if (Number.isNaN(momento.getTime())) {
       return SIN_DATO;
     }
-    return momento.toLocaleString();
+    return FORMATO_FECHA_HORA.format(momento);
   }
 
   /**
    * Solo la fecha, para etiquetas donde la hora no aporta.
    *
-   * Una fecha sin hora («2026-03-19») es un día de calendario, no un instante.
-   * `new Date('2026-03-19')` la leería como medianoche UTC y, en Panamá
-   * (UTC−5), la mostraría como el día anterior. Por eso se ancla a la
-   * medianoche local.
+   * Una fecha sin hora («2026-03-19») es un día de calendario, no un instante:
+   * leída como medianoche UTC y mostrada en Panamá (UTC−5) sería el día
+   * anterior. Por eso se formatea como día de calendario, sin conversión.
    */
   function fechaCortaLegible(valorIso) {
     if (ausente(valorIso)) {
       return SIN_DATO;
     }
-    const soloFecha = /^\d{4}-\d{2}-\d{2}$/.test(valorIso);
-    const momento = new Date(soloFecha ? valorIso + 'T00:00:00' : valorIso);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(valorIso)) {
+      // Medianoche UTC de ese día, formateada en UTC: el mismo día, siempre.
+      return FORMATO_DIA_CALENDARIO.format(new Date(valorIso + 'T00:00:00Z'));
+    }
+    const momento = new Date(valorIso);
     if (Number.isNaN(momento.getTime())) {
       return SIN_DATO;
     }
-    return momento.toLocaleDateString();
+    return FORMATO_FECHA.format(momento);
   }
 
   function estadoLegible(estado) {
@@ -337,18 +448,49 @@
     ui.semaforoMensaje.textContent = texto(mensaje, SIN_CLASIFICACION);
   }
 
-  /** Estado visual de la conexion con el servidor central. */
-  function pintarConectividad(disponible) {
-    if (disponible === true) {
-      ui.conexion.textContent = 'Conectado';
-      ui.conexion.className = 'connection-status status-connected';
-    } else if (disponible === false) {
-      ui.conexion.textContent = 'Sin conexión';
-      ui.conexion.className = 'connection-status status-disconnected';
-    } else {
-      ui.conexion.textContent = 'Comprobando conexión…';
-      ui.conexion.className = 'connection-status status-connecting';
+  /**
+   * Texto y estilo del indicador para un estado **comprobado**.
+   *
+   * Habla del servidor central, nunca de un dispositivo: en este MVP no hay
+   * hardware que conectar. `estado` es `null` mientras no se sabe, un booleano
+   * en la pantalla de inicio de sesión (solo se puede preguntar si el servidor
+   * contesta) o la respuesta de `/adaptador/estado-conexion` con sesión.
+   *
+   * Un servidor que contesta pero rechaza el token **no** es «sin conexión»:
+   * la red funciona y lo que falta es volver a autenticarse.
+   */
+  function describirConectividad(estado) {
+    if (estado === null || estado === undefined) {
+      return { texto: 'Comprobando conexión…', clase: 'status-connecting' };
     }
+    if (estado === true) {
+      return { texto: 'Servidor disponible', clase: 'status-connected' };
+    }
+    if (estado === false) {
+      return { texto: 'Sin conexión con el servidor', clase: 'status-disconnected' };
+    }
+    if (estado.api_central === API_CENTRAL.NO_DISPONIBLE) {
+      return { texto: 'Sin conexión con el servidor', clase: 'status-disconnected' };
+    }
+    if (estado.api_central === API_CENTRAL.CON_ERRORES) {
+      return { texto: 'El servidor no responde bien', clase: 'status-disconnected' };
+    }
+    if (estado.autenticacion_central === AUTENTICACION.VIGENTE) {
+      return { texto: 'Conectada al servidor', clase: 'status-connected' };
+    }
+    if (estado.autenticacion_central === AUTENTICACION.REQUERIDA) {
+      return { texto: 'Servidor disponible · inicia sesión de nuevo', clase: 'status-idle' };
+    }
+    if (estado.autenticacion_central === AUTENTICACION.DENEGADA) {
+      return { texto: 'Acceso no autorizado', clase: 'status-disconnected' };
+    }
+    return { texto: 'No se pudo comprobar la conexión', clase: 'status-connecting' };
+  }
+
+  function pintarConectividad(estado) {
+    const descripcion = describirConectividad(estado);
+    ui.conexion.textContent = descripcion.texto;
+    ui.conexion.className = 'connection-status ' + descripcion.clase;
   }
 
   function mostrarMensajeLogin(mensaje) {
@@ -392,6 +534,7 @@
 
   /** La aplicacion con sesion iniciada. */
   function mostrarPortal() {
+    portalAbierto = true;
     ui.menu.hidden = false;
     ui.areaCuenta.hidden = false;
     document.getElementById('vista-login').hidden = true;
@@ -401,6 +544,9 @@
 
   /** La pantalla de inicio de sesion, con todo lo privado oculto. */
   function mostrarLogin() {
+    portalAbierto = false;
+    epocaSesion += 1;
+    comprobacionEnCurso = null;
     detenerRefrescoPeriodico();
     invalidarTodosLosTurnos();
     cerrarDialogoDeCierre();
@@ -413,6 +559,9 @@
       }
     });
     limpiarPanel();
+    // Sin sesión solo se puede saber si el servidor contesta.
+    pintarConectividad(null);
+    refrescarConectividad();
   }
 
   /**
@@ -437,7 +586,13 @@
 
     mostrarNota(ui.envioEstado, null);
     mostrarNota(ui.envioResultado, null);
+    mostrarNota(ui.envioUltimo, null);
     ui.botonSincronizarMovimientos.hidden = true;
+
+    mostrarNota(ui.datosActualizados, null);
+    ocultarAvisoSesionCentral();
+    estadoConexion = null;
+    datosConsultadosEn = null;
 
     // Nada de un episodio puede sobrevivir a un cierre de sesión.
     episodios = null;
@@ -547,14 +702,180 @@
     });
   }
 
+  /** Solo para la pantalla de inicio de sesión: si el servidor contesta. */
   function refrescarConectividad() {
     return pedir(API.conectividad).then(function (resultado) {
+      if (portalAbierto) {
+        // Con sesión, el indicador lo decide `refrescarEstadoConexion`, que
+        // sabe más. Esta respuesta llegó tarde y no lo pisa.
+        return;
+      }
       if (!resultado.ok || !resultado.cuerpo) {
         pintarConectividad(false);
         return;
       }
-      pintarConectividad(resultado.cuerpo.api_central === 'disponible');
+      pintarConectividad(resultado.cuerpo.api_central === API_CENTRAL.DISPONIBLE);
     });
+  }
+
+  /** Si con este estado se puede consultar y enviar al servidor. */
+  function operativa(estado) {
+    return Boolean(
+      estado &&
+        estado.api_central === API_CENTRAL.DISPONIBLE &&
+        estado.autenticacion_central === AUTENTICACION.VIGENTE
+    );
+  }
+
+  /**
+   * Comprueba la comunicación con el servidor y la sesión central.
+   *
+   * Una sola comprobación en vuelo: si el temporizador, la vuelta a la pestaña
+   * y un aviso coinciden, comparten la misma petición. Una respuesta que llega
+   * después de cerrar sesión se descarta por turno.
+   */
+  function refrescarEstadoConexion() {
+    if (comprobacionEnCurso !== null) {
+      return comprobacionEnCurso;
+    }
+    const turno = avanzarTurno('conexion');
+    const promesa = pedir(API.estadoConexion)
+      .then(function (resultado) {
+        if (!esVigente('conexion', turno)) {
+          return;
+        }
+        if (resultado.estado === 401) {
+          mostrarLogin();
+          return;
+        }
+        if (!resultado.ok || !resultado.cuerpo) {
+          // La petición a la aplicación local no llegó a contestarse. Es lo que
+          // pasa cuando Windows suspende el equipo (por omisión, tras 15
+          // minutos sin uso): el navegador corta las peticiones en curso. Eso
+          // no prueba que el servidor esté caído, así que no se dice «sin
+          // conexión»: se dice que no se pudo comprobar, y se vuelve a
+          // comprobar al reanudar o en el siguiente intervalo.
+          aplicarEstadoConexion(ESTADO_NO_COMPROBADO);
+          return;
+        }
+        aplicarEstadoConexion(resultado.cuerpo);
+      })
+      .finally(function () {
+        if (comprobacionEnCurso === promesa) {
+          comprobacionEnCurso = null;
+        }
+      });
+    comprobacionEnCurso = promesa;
+    return promesa;
+  }
+
+  /**
+   * Pinta un estado comprobado y reacciona a los cambios.
+   *
+   * Cuando la comunicación vuelve a ser operativa --el servidor regresó o la
+   * paciente se volvió a autenticar--, lo clínico y los envíos se consultan de
+   * nuevo una vez. No hay reintentos en bucle: la siguiente comprobación es la
+   * del temporizador.
+   */
+  function aplicarEstadoConexion(nuevo) {
+    const anterior = estadoConexion;
+    estadoConexion = nuevo;
+    pintarConectividad(nuevo);
+
+    if (nuevo.autenticacion_central === AUTENTICACION.REQUERIDA) {
+      mostrarAvisoSesionCentral(AVISOS[MOTIVO.REAUTENTICACION], true);
+    } else if (nuevo.autenticacion_central === AUTENTICACION.DENEGADA) {
+      // Reautenticarse no cambia un 403: no se ofrece.
+      mostrarAvisoSesionCentral(AVISOS[CLASE.ACCESO_DENEGADO], false);
+    } else if (nuevo.autenticacion_central === AUTENTICACION.VIGENTE) {
+      ocultarAvisoSesionCentral();
+    }
+
+    if (operativa(nuevo) && anterior !== null && !operativa(anterior)) {
+      cargarClinico();
+      refrescarEnvios();
+    }
+  }
+
+  function mostrarAvisoSesionCentral(mensaje, ofrecerAccion) {
+    ui.avisoSesionCentralTexto.textContent = mensaje;
+    ui.avisoSesionCentral.hidden = false;
+    ui.botonMostrarReautenticar.hidden = !ofrecerAccion || !ui.formReautenticar.hidden;
+    if (!ofrecerAccion) {
+      ui.formReautenticar.hidden = true;
+    }
+  }
+
+  function ocultarAvisoSesionCentral() {
+    ui.avisoSesionCentral.hidden = true;
+    ui.formReautenticar.hidden = true;
+    ui.reautenticarPassword.value = '';
+    mostrarNota(ui.mensajeReautenticar, null);
+  }
+
+  function abrirReautenticacion() {
+    ui.formReautenticar.hidden = false;
+    ui.botonMostrarReautenticar.hidden = true;
+    mostrarNota(ui.mensajeReautenticar, null);
+    ui.reautenticarEmail.focus();
+  }
+
+  function cancelarReautenticacion() {
+    ui.formReautenticar.hidden = true;
+    ui.reautenticarPassword.value = '';
+    mostrarNota(ui.mensajeReautenticar, null);
+    ui.botonMostrarReautenticar.hidden = false;
+    ui.botonMostrarReautenticar.focus();
+  }
+
+  /**
+   * Vuelve a autenticar **la misma cuenta** sin cerrar la sesión local.
+   *
+   * La contraseña viaja una vez y se borra del campo en cuanto sale, igual que
+   * en el inicio de sesión. Los registros guardados no se tocan: viven en este
+   * dispositivo y no dependen del token.
+   */
+  function manejarReautenticar(evento) {
+    evento.preventDefault();
+    const correo = ui.reautenticarEmail.value.trim();
+    const contrasena = ui.reautenticarPassword.value;
+    if (!correo || !contrasena) {
+      mostrarNota(ui.mensajeReautenticar, 'Escribe tu correo y tu contraseña.');
+      return;
+    }
+
+    ui.botonReautenticar.disabled = true;
+    const epoca = epocaSesion;
+    pedir(API.reautenticar, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ email: correo, password: contrasena })
+    })
+      .then(function (resultado) {
+        ui.reautenticarPassword.value = '';
+        if (epoca !== epocaSesion) {
+          // Se cerró sesión mientras tanto: esta respuesta ya no es de nadie.
+          return;
+        }
+        if (resultado.estado === 401) {
+          mostrarLogin();
+          return;
+        }
+        if (resultado.ok && resultado.cuerpo) {
+          ui.reautenticarEmail.value = '';
+          aplicarEstadoConexion(resultado.cuerpo);
+          return;
+        }
+        mostrarNota(
+          ui.mensajeReautenticar,
+          resultado.cuerpo && typeof resultado.cuerpo.detail === 'string'
+            ? resultado.cuerpo.detail
+            : MENSAJE_SIN_CONEXION
+        );
+      })
+      .finally(function () {
+        ui.botonReautenticar.disabled = false;
+      });
   }
 
   // =======================================================================
@@ -642,6 +963,13 @@
       if (resumen.accion !== null) {
         ui.botonSincronizarMovimientos.textContent = resumen.accion;
       }
+      // Solo cambia cuando el servidor confirmó una entrega: una conexión
+      // disponible o una consulta clínica no la mueven.
+      const ultimoEnvio = resultado.cuerpo.ultimo_envio_confirmado;
+      mostrarNota(
+        ui.envioUltimo,
+        ausente(ultimoEnvio) ? null : 'Último envío confirmado por el servidor: ' + fechaLegible(ultimoEnvio) + '.'
+      );
     });
   }
 
@@ -674,7 +1002,7 @@
       ));
     }
     if (r.detenida_por_credencial) {
-      frases.push('Para enviar hace falta iniciar sesión de nuevo con conexión.');
+      frases.push('Para enviar hace falta volver a iniciar sesión; tus registros siguen guardados.');
     }
     return frases.join(' ') || 'No se envió ningún registro.';
   }
@@ -720,6 +1048,12 @@
   function pintarEpisodios(datos) {
     episodios = datos;
 
+    // La semana de **hoy** del embarazo en curso, calculada por el adaptador
+    // con la aritmética del servidor. Nunca la semana de una lectura, que
+    // puede ser de hace meses. Sin topes: si el dato dice 53, se dice 53.
+    ui.embarazoSemana.textContent =
+      datos.actual && !datos.ambiguo ? texto(datos.semana_actual, NO_DISPONIBLE) : NO_DISPONIBLE;
+
     const todos = datos.todos || [];
     const anteriores = datos.anteriores || [];
     let nota = null;
@@ -737,6 +1071,7 @@
       ui.embarazoEstado.textContent = estadoLegible(datos.actual.estado_embarazo);
       ui.embarazoInicio.textContent = fechaCortaLegible(datos.actual.fecha_inicio);
       ui.embarazoAnteriores.textContent = String(anteriores.length);
+      nota = notaDeFechaProbable(datos.actual, datos.hoy);
     } else if (todos.length) {
       idInicio = null;
       ui.embarazoEstado.textContent = 'Sin embarazo en curso';
@@ -762,6 +1097,22 @@
 
     llenarSelector(todos, datos.actual);
     actualizarBotonDeRegistro();
+  }
+
+  /**
+   * Un hecho, sin interpretarlo: el episodio sigue registrado en curso y su
+   * fecha probable de parto ya pasó. Las fechas son días de calendario en
+   * formato ISO, así que se comparan como texto sin conversión horaria.
+   */
+  function notaDeFechaProbable(actual, hoy) {
+    const fpp = actual.fecha_probable_parto;
+    if (ausente(fpp) || ausente(hoy) || fpp >= hoy) {
+      return null;
+    }
+    return (
+      'La fecha probable de parto (' + fechaCortaLegible(fpp) + ') ya pasó y este ' +
+      'embarazo sigue registrado como en curso.'
+    );
   }
 
   /**
@@ -831,52 +1182,123 @@
     mostrarHistorialVacio(aviso);
   }
 
-  function limpiarMetricas() {
-    ui.hrValor.textContent = SIN_DATO;
-    ui.spo2Valor.textContent = SIN_DATO;
-    ui.movValor.textContent = SIN_DATO;
-    ui.hrEstado.textContent = 'Sin lectura';
-    ui.spo2Estado.textContent = 'Sin lectura';
-    ui.movEstado.textContent = 'Sin lectura';
-    ui.ultimaLectura.textContent = SIN_DATO;
-    ui.embarazoSemana.textContent = NO_DISPONIBLE;
+  /**
+   * Pinta la tarjeta de una variable, o su ausencia.
+   *
+   * `registro` es `undefined` cuando no se sabe (el adaptador no lo envió o
+   * no se pudo consultar) y `null` cuando el embarazo **nunca** registró esa
+   * variable: son dos frases distintas, y ninguna es cero.
+   *
+   * La clasificación que acompaña al valor es la de **la lectura de origen**,
+   * tal como la entrega el servidor. La API no clasifica cada métrica por
+   * separado, y el texto lo dice para que nadie la lea como si lo hiciera.
+   * `id_lectura` e `id_sesion` quedan como atributos para trazabilidad y
+   * pruebas; no se muestran.
+   */
+  function pintarTarjeta(t, registro) {
+    t.contenedor.removeAttribute('data-id-lectura');
+    t.contenedor.removeAttribute('data-id-sesion');
+    t.clasificacion.textContent = '';
+    t.clasificacion.hidden = true;
+
+    if (registro === undefined) {
+      t.valor.textContent = SIN_DATO;
+      t.estado.textContent = NO_DISPONIBLE;
+      t.fecha.textContent = '';
+      t.semana.textContent = '';
+      return;
+    }
+    if (registro === null) {
+      t.valor.textContent = SIN_DATO;
+      t.estado.textContent = 'Sin registros';
+      t.fecha.textContent = '';
+      t.semana.textContent = '';
+      return;
+    }
+
+    t.valor.textContent = medida(registro.valor);
+    t.estado.textContent = 'Último registro';
+    t.fecha.textContent = 'Registrado el ' + fechaLegible(registro.fecha_hora_captura);
+    t.semana.textContent = ausente(registro.semana_gestacion_lectura)
+      ? ''
+      : 'Semana ' + registro.semana_gestacion_lectura + ' en esa lectura';
+
+    t.clasificacion.appendChild(textoPlano('Clasificación de esa lectura: '));
+    t.clasificacion.appendChild(marcaDeSemaforo(registro.codigo_semaforo_lectura));
+    t.clasificacion.hidden = false;
+
+    t.contenedor.setAttribute('data-id-lectura', String(registro.id_lectura));
+    t.contenedor.setAttribute('data-id-sesion', String(registro.id_sesion));
   }
 
-  function estadoDeMetrica(valor) {
-    return ausente(valor) ? 'No registrado en esta lectura' : 'Registrado en esta lectura';
+  function textoPlano(contenido) {
+    const nodo = document.createElement('span');
+    nodo.textContent = contenido;
+    return nodo;
+  }
+
+  function limpiarMetricas() {
+    Object.keys(ui.tarjetas).forEach(function (clave) {
+      pintarTarjeta(ui.tarjetas[clave], undefined);
+    });
+    ui.ultimaLectura.textContent = SIN_DATO;
+    ui.ultimaLecturaMide.textContent = '';
   }
 
   /**
-   * Pinta **una** lectura, entera y coherente.
+   * «Tus últimos registros»: el último valor de **cada** variable, cada uno con
+   * su fecha y su lectura de origen.
    *
-   * Las tres métricas, el instante y el semáforo salen de la misma captura. No
-   * se compone un panel con la última frecuencia cardíaca de una lectura y el
-   * último movimiento de otra: serían instantes distintos bajo un único
-   * «última lectura», y eso sería engañoso.
+   * Pueden ser momentos distintos y la pantalla no afirma lo contrario. Nada se
+   * combina: no hay semáforo común de las tres tarjetas, ni una variable que
+   * tome el valor de otra lectura para parecer completa.
+   */
+  function pintarUltimosRegistros(ultimos) {
+    Object.keys(ui.tarjetas).forEach(function (clave) {
+      const registro = ultimos && Object.prototype.hasOwnProperty.call(ultimos, clave)
+        ? ultimos[clave]
+        : undefined;
+      pintarTarjeta(ui.tarjetas[clave], registro);
+    });
+  }
+
+  /** Qué midió una lectura, en palabras. */
+  function queMidio(lectura) {
+    const partes = [];
+    if (!ausente(lectura.hr_valor)) partes.push('frecuencia cardíaca');
+    if (!ausente(lectura.spo2_valor)) partes.push('saturación de oxígeno');
+    if (!ausente(lectura.mov_valor)) partes.push('movimientos fetales');
+    return partes.join(' y ');
+  }
+
+  /**
+   * La lectura más reciente del embarazo y **su** clasificación.
    *
-   * Una métrica que esa lectura no midió se muestra como «—». Nunca como 0.
+   * Es una sola lectura, con su instante y su semáforo, tal como los decidió el
+   * servidor. No resume las tarjetas: puede que solo haya medido una variable,
+   * y así se dice.
    */
   function pintarUltimaLectura(lectura) {
     if (!lectura) {
-      limpiarMetricas();
+      ui.ultimaLectura.textContent = SIN_DATO;
+      ui.ultimaLecturaMide.textContent = '';
       pintarSemaforo(null, null);
       return;
     }
 
-    ui.hrValor.textContent = medida(lectura.hr_valor);
-    ui.spo2Valor.textContent = medida(lectura.spo2_valor);
-    ui.movValor.textContent = texto(lectura.mov_valor);
-
-    ui.hrEstado.textContent = estadoDeMetrica(lectura.hr_valor);
-    ui.spo2Estado.textContent = estadoDeMetrica(lectura.spo2_valor);
-    ui.movEstado.textContent = estadoDeMetrica(lectura.mov_valor);
-
-    ui.embarazoSemana.textContent = texto(lectura.semana_gestacion, NO_DISPONIBLE);
     ui.ultimaLectura.textContent = fechaLegible(lectura.fecha_hora_captura);
+    const midio = queMidio(lectura);
+    ui.ultimaLecturaMide.textContent = midio ? 'Midió ' + midio + '.' : '';
 
     // El nivel llega ya clasificado por la fuente autorizada. Aquí sólo se
     // traduce a una clase CSS.
     pintarSemaforo(lectura.codigo_semaforo, mensajeDeSemaforo(lectura.codigo_semaforo));
+  }
+
+  /** Inicio completo a partir del monitoreo del embarazo en curso. */
+  function pintarInicio(datos) {
+    pintarUltimosRegistros(datos.ultimos_registros);
+    pintarUltimaLectura(datos.ultima_lectura);
   }
 
   /** Texto acompañante del nivel. No es una interpretación clínica. */
@@ -1034,6 +1456,7 @@
     const destino = idInicio;
 
     if (destino === null) {
+      limpiarMetricas();
       pintarUltimaLectura(null);
       return Promise.resolve();
     }
@@ -1046,6 +1469,12 @@
         mostrarLogin();
         return;
       }
+      if (clasificacion.clase === CLASE.NO_DISPONIBLE) {
+        // Sin conexión o sin token: lo ya mostrado se conserva --cada tarjeta
+        // lleva su fecha, así que no se presenta como nuevo-- y se explica.
+        avisarContextoConservado(clasificacion);
+        return;
+      }
       if (clasificacion.clase !== CLASE.DATOS) {
         // Un 403, un 404 o un fallo del servidor dejan el portal abierto: sólo
         // se vacía lo clínico y se explica por qué.
@@ -1054,8 +1483,22 @@
         mostrarNota(ui.notaEmbarazo, avisoDe(clasificacion));
         return;
       }
-      pintarUltimaLectura(clasificacion.datos.ultima_lectura);
+      pintarInicio(clasificacion.datos);
     });
+  }
+
+  function avisarContextoConservado(clasificacion) {
+    if (clasificacion.motivo === MOTIVO.REAUTENTICACION) {
+      // Que el indicador y el aviso con la acción lo reflejen ya, sin esperar
+      // al temporizador.
+      refrescarEstadoConexion();
+    }
+    mostrarNota(
+      ui.notaEmbarazo,
+      clasificacion.motivo === MOTIVO.SIN_CONEXION
+        ? TEXTO_SIN_CONEXION_CONTEXTO_CONSERVADO
+        : TEXTO_REAUTENTICACION_CONTEXTO_CONSERVADO
+    );
   }
 
   /** Contexto de Historial: todas las lecturas del episodio elegido allí. */
@@ -1102,41 +1545,73 @@
       if (clasificacion.clase === CLASE.NO_DISPONIBLE && episodios !== null) {
         // Sin conexión (o con reautenticación pendiente) no cambia nada de lo
         // que ya se sabía en esta sesión: el embarazo en curso sigue siendo el
-        // mismo, y la última lectura mostrada lleva su propia fecha. Se avisa
+        // mismo, y cada registro mostrado lleva su propia fecha. Se avisa
         // y se conserva el contexto, para que el registro local --que el
         // adaptador admite sin conexión-- siga disponible.
-        mostrarNota(
-          ui.notaEmbarazo,
-          clasificacion.motivo === MOTIVO.SIN_CONEXION
-            ? TEXTO_SIN_CONEXION_CONTEXTO_CONSERVADO
-            : avisoDe(clasificacion)
-        );
+        avisarContextoConservado(clasificacion);
         return;
       }
 
       if (clasificacion.clase !== CLASE.DATOS) {
+        if (clasificacion.clase === CLASE.NO_DISPONIBLE &&
+            clasificacion.motivo === MOTIVO.REAUTENTICACION) {
+          refrescarEstadoConexion();
+        }
         pintarSinDatosClinicos(clasificacion);
         return;
       }
 
       pintarEpisodios(clasificacion.datos);
+      datosConsultadosEn = Date.now();
+      mostrarNota(
+        ui.datosActualizados,
+        'Información consultada al servidor el ' + fechaLegible(new Date(datosConsultadosEn).toISOString()) + '.'
+      );
 
       const compartidas = {};
       return Promise.all([cargarInicio(compartidas), cargarHistorial(compartidas)]);
     });
   }
 
+  /** Todo: estado, envíos y lo clínico. Para entrar, volver a Inicio o «Actualizar». */
   function refrescar() {
     return Promise.all([
-      refrescarConectividad(),
+      refrescarEstadoConexion(),
       refrescarEnvios(),
       cargarClinico()
     ]);
   }
 
+  /**
+   * Lo que se repite cada `INTERVALO_REFRESCO_MS`: el estado de la conexión y
+   * de la cola de envíos. Ni una lectura clínica (ver la constante).
+   */
+  function refrescarPeriodico() {
+    return Promise.all([refrescarEstadoConexion(), refrescarEnvios()]);
+  }
+
+  /**
+   * Al volver a la pestaña. El navegador frena o congela los temporizadores
+   * de una pestaña oculta, así que lo mostrado puede ser viejo: se comprueba
+   * el estado enseguida y, si es operativo y los datos tienen más de un
+   * minuto, se vuelven a pedir.
+   */
+  function alVolverALaPestana() {
+    if (!portalAbierto || document.visibilityState !== 'visible') {
+      return Promise.resolve();
+    }
+    return Promise.all([refrescarEstadoConexion(), refrescarEnvios()]).then(function () {
+      const viejos =
+        datosConsultadosEn === null || Date.now() - datosConsultadosEn > ANTIGUEDAD_MAXIMA_DATOS_MS;
+      if (portalAbierto && operativa(estadoConexion) && viejos) {
+        return cargarClinico();
+      }
+    });
+  }
+
   function iniciarRefrescoPeriodico() {
     detenerRefrescoPeriodico();
-    temporizadorRefresco = window.setInterval(refrescar, INTERVALO_REFRESCO_MS);
+    temporizadorRefresco = window.setInterval(refrescarPeriodico, INTERVALO_REFRESCO_MS);
   }
 
   function detenerRefrescoPeriodico() {
@@ -1285,7 +1760,7 @@
             'No se pudo enviar; tus registros continúan guardados en este dispositivo. ' +
               avisoDe({ clase: CLASE.NO_DISPONIBLE, motivo: resultado.cuerpo.motivo })
           );
-          return refrescarEnvios();
+          return Promise.all([refrescarEnvios(), refrescarEstadoConexion()]);
         }
 
         if (!resultado.ok || !resultado.cuerpo) {
@@ -1298,6 +1773,10 @@
 
         mostrarNota(ui.envioResultado, describirRonda(resultado.cuerpo));
         const recargas = [refrescarEnvios()];
+        if (resultado.cuerpo.detenida_por_credencial || resultado.cuerpo.detenida_por_transporte) {
+          // El envío descubrió un cambio de estado: que el indicador lo diga.
+          recargas.push(refrescarEstadoConexion());
+        }
         if (conteo(resultado.cuerpo.entregados) !== 0) {
           // Lo entregado ya es parte del embarazo en el servidor central.
           recargas.push(cargarClinico());
@@ -1386,6 +1865,18 @@
     ui.botonRegistrarMovimiento.addEventListener('click', manejarRegistrarMovimiento);
     ui.botonSincronizarMovimientos.addEventListener('click', manejarSincronizarMovimientos);
     ui.botonVerAnteriores.addEventListener('click', verEmbarazosAnteriores);
+    ui.botonActualizarDatos.addEventListener('click', refrescar);
+    ui.botonMostrarReautenticar.addEventListener('click', abrirReautenticacion);
+    ui.botonCancelarReautenticar.addEventListener('click', cancelarReautenticacion);
+    ui.formReautenticar.addEventListener('submit', manejarReautenticar);
+    // Volver a la pestaña, reanudar una página congelada o recuperar la red:
+    // en los tres casos lo mostrado puede ser viejo y se comprueba enseguida.
+    document.addEventListener('visibilitychange', alVolverALaPestana);
+    document.addEventListener('resume', alVolverALaPestana);
+    if (typeof window.addEventListener === 'function') {
+      window.addEventListener('online', alVolverALaPestana);
+      window.addEventListener('pageshow', alVolverALaPestana);
+    }
 
     const enlaces = ui.menu.querySelectorAll('a[data-vista]');
     Array.prototype.forEach.call(enlaces, function (enlace) {
@@ -1425,14 +1916,13 @@
     pintarConectividad(null);
 
     consultarSesion().then(function (sesion) {
+      // Con sesión, el indicador lo pinta `refrescarEstadoConexion`; sin ella,
+      // `mostrarLogin` comprueba si el servidor contesta.
       if (sesion) {
         mostrarPortal();
       } else {
         mostrarLogin();
       }
-      // La conectividad se comprueba tambien sin sesion: la pantalla de
-      // inicio de sesion tiene que poder decir que el servidor no responde.
-      refrescarConectividad();
     });
   }
 
