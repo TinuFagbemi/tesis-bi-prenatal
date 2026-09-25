@@ -23,13 +23,12 @@ from pathlib import Path
 
 import pytest
 
-PRUEBA_JS = (
-    Path(__file__).resolve().parents[2]
-    / "frontend"
-    / "gestante"
-    / "pruebas"
-    / "app.comportamiento.test.js"
+DIRECTORIO_PRUEBAS_JS = (
+    Path(__file__).resolve().parents[2] / "frontend" / "gestante" / "pruebas"
 )
+# Todas las suites de Node de la interfaz: app.js y graficas.js. Las mismas
+# que ejecuta el paso de Node del workflow de CI.
+PRUEBAS_JS = sorted(DIRECTORIO_PRUEBAS_JS.glob("*.test.js"))
 
 
 def test_el_comportamiento_de_app_js_pasa_en_node():
@@ -41,8 +40,9 @@ def test_el_comportamiento_de_app_js_pasa_en_node():
             pytest.fail("node no está disponible en CI; las pruebas de app.js no se ejecutaron")
         pytest.skip("node no está instalado; no se pueden ejecutar las pruebas de app.js")
 
+    assert len(PRUEBAS_JS) >= 2, PRUEBAS_JS
     resultado = subprocess.run(
-        [node, "--test", str(PRUEBA_JS)],
+        [node, "--test", *map(str, PRUEBAS_JS)],
         capture_output=True,
         text=True,
         encoding="utf-8",

@@ -169,9 +169,10 @@ def iniciar_sesion(cliente: TestClient, **cuerpo):
         ("/", "FetalAlert", "text/html"),
         ("/styles.css", "--clr-purple", "text/css"),
         ("/app.js", "adaptador", "text/javascript"),
+        ("/graficas.js", "FetalAlertGraficas", "text/javascript"),
     ],
 )
-def test_sirve_los_tres_archivos_de_la_interfaz(tmp_path, ruta, fragmento, tipo):
+def test_sirve_los_archivos_de_la_interfaz(tmp_path, ruta, fragmento, tipo):
     cliente, _, _, _ = construir_cliente(tmp_path)
     respuesta = cliente.get(ruta)
 

@@ -35,8 +35,11 @@ DIRECTORIO_FRONTEND = Path(__file__).resolve().parents[2] / "frontend" / "gestan
 HTML = DIRECTORIO_FRONTEND / "index.html"
 CSS = DIRECTORIO_FRONTEND / "styles.css"
 JS = DIRECTORIO_FRONTEND / "app.js"
+# Las graficas: las mismas salvaguardas de todo el frontend (sin
+# almacenamiento, sin endpoints del prototipo, sin clasificar lecturas).
+GRAFICAS = DIRECTORIO_FRONTEND / "graficas.js"
 
-ARCHIVOS = (HTML, CSS, JS)
+ARCHIVOS = (HTML, CSS, JS, GRAFICAS)
 
 
 def leer(ruta: Path) -> str:

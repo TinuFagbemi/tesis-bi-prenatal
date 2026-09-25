@@ -47,7 +47,7 @@ El sistema se organiza en cinco capas:
 El objetivo general contempla un seguimiento **dual** entre la gestante y el personal médico, con niveles de acceso distintos:
 
 - **Personal médico/autorizado:** accede a la analítica y los dashboards en Power BI, alimentados por el ETL *batch* en su ejecución periódica, no tras cada sincronización.
-- **Gestante:** el sistema contempla algún mecanismo de acceso limitado a su propia información, separado de Power BI. **La forma concreta de implementación de este acceso (aplicación, portal, u otro canal) todavía no está definida** y se documentará en esta sección una vez confirmada. No debe asumirse que ya existe una interfaz para la gestante.
+- **Gestante:** accede solo a su propia información, separada de Power BI, mediante el portal local de SCRUM-72 ([Interfaz web de la gestante](#interfaz-web-de-la-gestante-scrum-72)): un proceso en su dispositivo que consulta la API central con su propia sesión y guarda localmente las sesiones de movimientos hasta enviarlas.
 
 ## Flujo simulado de conectividad intermitente
 
@@ -1760,7 +1760,7 @@ analítico y en `publicacion` hay que ejecutar después
     `semana_gestacional` —la aritmética del servidor—, sin topes numéricos, y
     **solo mientras hoy no pase de la fecha probable de parto registrada en el
     episodio**. Pasada esa fecha el adaptador envía `semana_actual: null` y
-    la fila pasa a «**Semana en el último registro:** 39 (21/6/2026)»: la
+    la fila pasa a «**Semana en el último registro** 39 (21 jun 2026)»: la
     semana de la lectura más reciente, con su fecha. No se muestra ningún
     aviso a la paciente ni se toca una fecha o un estado del episodio.
   - **Tus últimos registros**: una tarjeta por variable (FC, SpO₂,
@@ -1773,6 +1773,14 @@ analítico y en `publicacion` hay que ejecutar después
     registrada es «Sin registros»; una que no llegó es «No disponible».
     `id_lectura`/`id_sesion` viajan como atributos para trazabilidad y
     pruebas, no se muestran.
+  - **Tus registros en el tiempo**: tres gráficas (FC materna y SpO₂ con
+    puntos y línea; movimientos con una barra por registro) dibujadas con
+    `frontend/gestante/graficas.js`, servido por el propio portal, sin
+    dependencias ni CDN. Eje temporal proporcional, sin puntos inventados,
+    sin interpolación ni agregación y sin bandas clínicas; período «Todo el
+    embarazo» o «Últimos 30 días con registros» (contados desde el último
+    registro, no desde hoy). Cada punto se consulta con ratón, toque o
+    flechas del teclado, y hay una tabla alternativa por gráfica.
   - **Tu lectura más reciente**: la `ultima_lectura` de siempre —una sola
     lectura, con su fecha y lo que midió— y **su** semáforo, con el alcance
     escrito: «La clasificación corresponde a esta lectura completa, no a cada
@@ -1805,10 +1813,10 @@ El indicador refleja **dos comprobaciones**, las de
 | Indicador | Qué se comprobó |
 |---|---|
 | Conectada al servidor | La API respondió y `/yo` aceptó el token. |
-| Servidor disponible · inicia sesión de nuevo | La API respondió 401 (token vencido, inválido o cuenta desactivada, indistinguibles por diseño) o el portal se reinició y no tiene token. Se ofrece **Volver a iniciar sesión**. |
+| Vuelve a iniciar sesión | La API respondió 401 (token vencido, inválido o cuenta desactivada, indistinguibles por diseño) o el portal se reinició y no tiene token. Se ofrece **Volver a iniciar sesión**. |
 | Acceso no autorizado | 403: identidad válida sin permiso. No se ofrece reautenticar. |
 | Sin conexión con el servidor | La API no respondió. |
-| El servidor no responde bien | Respuesta fuera de contrato (5xx…). |
+| Error del servidor | Respuesta fuera de contrato (5xx…). |
 | No se pudo comprobar la conexión | Ni el portal local contestó: típico al suspenderse el equipo. |
 
 `POST /adaptador/reautenticar` vuelve a pedir la contraseña **de la misma
@@ -1881,10 +1889,14 @@ conexión unos 8 segundos.
 Dos cuentas (la contraseña de ambas es la `PASSWORD_SIMULADA` del generador):
 
 - `paciente30@example.com` (embarazo canónico 129, `ACTIVO`): consulta y
-  gráficas. Inicio muestra FC 83 y SpO₂ 96 del 29/5/2026 03:27 (lectura 549)
-  y 7 movimientos del 21/6/2026 09:56 (lectura 1259), en tarjetas neutrales;
-  «Semana en el último registro: 39 (21/6/2026)» y el semáforo Ámbar de la
+  gráficas. Inicio muestra FC 83 y SpO₂ 96 del 29 may 2026 03:27 (lectura 549)
+  y 7 movimientos del 21 jun 2026 09:56 (lectura 1259), en tarjetas neutrales;
+  «Semana en el último registro 39 (21 jun 2026)»; gráficas con 30, 30 y 20
+  registros; y el semáforo Ámbar de la
   lectura 1259 en su propio bloque.
+
+- `paciente01@example.com`: historial longitudinal y registro de
+  movimientos.
 
 **Limitación del escenario de demostración.** El dataset simulado se generó
 con fechas de 2025-2026 y sus episodios `ACTIVO` quedaron atrás en el
@@ -1892,17 +1904,16 @@ calendario real: el embarazo 129 tiene fecha probable de parto 1/7/2026 y sus
 últimas lecturas son de junio. Es un desfase del escenario, no un hecho
 clínico: por eso Inicio no presenta una «semana actual» para él ni lo
 convierte en un aviso, y no se modifican fechas ni estados del dataset.
-- `paciente01@example.com`: historial longitudinal y registro de
-  movimientos.
 
 Con `paciente01` comprobar:
 
-1. **Inicio** muestra el embarazo en curso (inicio 19/03/2026, semana actual
+1. **Inicio** muestra el embarazo en curso (inicio 19 mar 2026, semana actual
    28). FC/SpO₂ dicen «Sin registros» —ese episodio nunca los midió— y
    movimientos muestra 12, que es `MOV_SIMULADO`, con su fecha.
-2. **Ver embarazos anteriores en «Mi historial»** abre el embarazo 100 con sus
-   41 lecturas; la fila del 08/09/2025 a las 12:13 (hora de Panamá; 17:13 UTC)
-   muestra 86 BPM, 97 %, semana 36 y semáforo verde.
+2. **Ver embarazos anteriores en «Mi historial»** abre el embarazo 100: 41
+   lecturas, con gráficas de 20, 20 y 21 registros por medición. En «Ver las
+   41 lecturas en tabla», la fila del 8 sept 2025 a las 12:13 (hora de
+   Panamá; 17:13 UTC) muestra 86 BPM, 97 %, semana 36 y semáforo verde.
 3. Volver a **Inicio**: sigue mostrando el embarazo en curso.
 4. **Registrar movimientos / Enviar ahora**: el resumen dice lo que la cola de
    la cuenta contiene; el envío es manual. Sin conexión, el registro se guarda

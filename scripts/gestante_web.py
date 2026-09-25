@@ -6,7 +6,7 @@ Uso desde la raiz del repositorio::
     python scripts/gestante_web.py --puerto 9000    # otro puerto
     python scripts/gestante_web.py --comprobar      # revisa la configuracion y sale
 
-Este proceso corre **en el dispositivo de la paciente**. Sirve los tres archivos
+Este proceso corre **en el dispositivo de la paciente**. Sirve los cuatro archivos
 de la interfaz y actua de intermediario con lo que ya existe: la API central,
 por HTTP; el almacenamiento del nodo edge compartido, en solo lectura; y su
 propio archivo SQLite por cuenta para las sesiones de movimiento simuladas,
@@ -120,11 +120,12 @@ def construir_parser(settings: GestanteSettings) -> argparse.ArgumentParser:
 
 
 def _archivos_de_la_interfaz(settings: GestanteSettings) -> list[Path]:
-    """Los tres archivos que el adaptador sirve."""
+    """Los cuatro archivos que el adaptador sirve."""
     return [
         settings.frontend_dir / "index.html",
         settings.frontend_dir / "styles.css",
         settings.frontend_dir / "app.js",
+        settings.frontend_dir / "graficas.js",
     ]
 
 
@@ -153,7 +154,7 @@ def comprobar(settings: GestanteSettings) -> int:
             print(f"  - {ruta}", file=sys.stderr)
         return CODIGO_DE_ERROR
 
-    print("  archivos            : los tres estan presentes.")
+    print("  archivos            : los cuatro estan presentes.")
     return CODIGO_DE_EXITO
 
 

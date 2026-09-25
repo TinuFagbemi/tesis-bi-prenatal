@@ -1,6 +1,6 @@
 """Las rutas del adaptador local de la interfaz de la gestante (SCRUM-72).
 
-Quince rutas: tres sirven los archivos de la interfaz, siete atienden sesion,
+Dieciseis rutas: cuatro sirven los archivos de la interfaz, siete atienden sesion,
 conexion y estado local, dos exponen la lectura clinica minima de SCRUM-98 --embarazos
 de la cuenta y el monitoreo de un episodio-- traducida desde
 ``app.gestante.central`` y ``app.gestante.clinico``, y tres registran y
@@ -356,9 +356,9 @@ def crear_router(contexto: ContextoAdaptador) -> APIRouter:
 
     # -- Archivos de la interfaz ----------------------------------------
     #
-    # Se sirven como tres rutas explicitas y no como un directorio montado. Son
-    # tres archivos conocidos, asi que no existe un nombre que el cliente pueda
-    # elegir y, con ello, no existe recorrido de rutas que impedir.
+    # Se sirven como cuatro rutas explicitas y no como un directorio montado.
+    # Son cuatro archivos conocidos, asi que no existe un nombre que el cliente
+    # pueda elegir y, con ello, no existe recorrido de rutas que impedir.
 
     def archivo(nombre: str, tipo: str) -> FileResponse:
         # ``no-cache`` obliga a revalidar con el ETag en cada carga. Sin esta
@@ -381,6 +381,12 @@ def crear_router(contexto: ContextoAdaptador) -> APIRouter:
     @router.get("/app.js", include_in_schema=False)
     def guion() -> FileResponse:
         return archivo("app.js", "text/javascript; charset=utf-8")
+
+    @router.get("/graficas.js", include_in_schema=False)
+    def graficas() -> FileResponse:
+        # Las graficas se sirven desde aqui y no desde una CDN: la pagina tiene
+        # que poder dibujarlas sin internet cuando ya tiene los datos.
+        return archivo("graficas.js", "text/javascript; charset=utf-8")
 
     # -- Inicio de sesion ------------------------------------------------
 
