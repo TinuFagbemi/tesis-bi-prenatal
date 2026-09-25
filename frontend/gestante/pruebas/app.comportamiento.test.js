@@ -184,6 +184,7 @@ function construirDocumento() {
   const oyentes = {};
   return {
     porId,
+    visibilityState: 'visible',
     getElementById(id) {
       return porId[id] || null;
     },
@@ -255,20 +256,39 @@ async function asentar() {
   }
 }
 
+/**
+ * Arranca app.js con un reloj y unos temporizadores controlados.
+ *
+ * `reloj.ms` es lo que devuelve `Date.now()` dentro de app.js; `tic()` ejecuta
+ * una vez cada intervalo activo, como si hubieran pasado sus milisegundos. Así
+ * se reproducen la inactividad y el vencimiento sin esperar de verdad.
+ */
 async function arrancar(rutas) {
   const documento = construirDocumento();
   const adaptador = crearAdaptador(rutas);
+  const reloj = { ms: Date.UTC(2026, 8, 25, 15, 0, 0) };
+  const intervalos = new Map();
+  let siguiente = 0;
   const contexto = vm.createContext({
     document: documento,
-    window: { setInterval: () => 1, clearInterval: () => {} },
+    window: {
+      setInterval: (fn) => { siguiente += 1; intervalos.set(siguiente, fn); return siguiente; },
+      clearInterval: (id) => { intervalos.delete(id); }
+    },
     fetch: adaptador.fetch,
-    console
+    console,
+    __reloj: () => reloj.ms
   });
+  vm.runInContext('Date.now = function () { return __reloj(); };', contexto);
   vm.runInContext(JS, contexto, { filename: 'app.js' });
   documento.disparar('DOMContentLoaded');
   await asentar();
   const $ = (id) => documento.porId[id];
-  return { $, adaptador, documento };
+  const tic = async () => {
+    Array.from(intervalos.values()).forEach((fn) => fn());
+    await asentar();
+  };
+  return { $, adaptador, documento, reloj, intervalos, tic };
 }
 
 // ---------------------------------------------------------------------------
@@ -296,6 +316,9 @@ function embarazos(extra) {
   return [200, {
     disponible: true,
     datos: Object.assign({
+      hoy: '2026-09-25',
+      // Semana de HOY del embarazo 130 (inicio 2026-03-19), no de una lectura.
+      semana_actual: 28,
       actual: EMBARAZO_ACTUAL,
       anteriores: [EMBARAZO_ANTERIOR],
       todos: [EMBARAZO_ACTUAL, EMBARAZO_ANTERIOR],
@@ -344,17 +367,41 @@ const LECTURA_679 = {
   mov_valor: 7
 };
 
-function monitoreo(idEmbarazo, sesiones, ultima) {
+/**
+ * Un registro de «Tus últimos registros» con la forma que entrega el
+ * adaptador. Solo copia campos de la lectura indicada: **no elige** cuál es
+ * la última; eso lo decide el adaptador y se prueba en Python.
+ */
+function registro(lectura, idSesion, campo, unidad) {
+  return {
+    valor: lectura[campo],
+    unidad,
+    fecha_hora_captura: lectura.fecha_hora_captura,
+    semana_gestacion_lectura: lectura.semana_gestacion,
+    codigo_semaforo_lectura: lectura.codigo_semaforo,
+    id_lectura: lectura.id_lectura,
+    id_sesion: idSesion
+  };
+}
+
+function ultimos(hr, spo2, mov) {
+  return { frecuencia_cardiaca: hr, saturacion_oxigeno: spo2, movimientos_fetales: mov };
+}
+
+function monitoreo(idEmbarazo, sesiones, ultima, ultimosRegistros) {
   return [200, {
     disponible: true,
-    datos: { id_embarazo: idEmbarazo, sesiones, ultima_lectura: ultima, id_sesion_de_la_ultima: null }
+    datos: {
+      id_embarazo: idEmbarazo, sesiones, ultima_lectura: ultima, id_sesion_de_la_ultima: null,
+      ultimos_registros: ultimosRegistros
+    }
   }];
 }
 
 const MONITOREO_130 = monitoreo(130, [
   { id_sesion: 9001, tipo_sesion: 'MOVIMIENTOS_FETALES', estado_sesion: 'COMPLETADA',
     fecha_inicio: LECTURA_SIMULADA.fecha_hora_captura, fecha_fin: null, lecturas: [LECTURA_SIMULADA] }
-], LECTURA_SIMULADA);
+], LECTURA_SIMULADA, ultimos(null, null, registro(LECTURA_SIMULADA, 9001, 'mov_valor', 'movimientos')));
 
 const MONITOREO_100 = monitoreo(100, [
   { id_sesion: 102, tipo_sesion: 'SIGNOS_MATERNOS', estado_sesion: 'COMPLETADA',
@@ -363,7 +410,19 @@ const MONITOREO_100 = monitoreo(100, [
   { id_sesion: 231, tipo_sesion: 'MOVIMIENTOS_FETALES', estado_sesion: 'COMPLETADA',
     fecha_inicio: '2025-10-01T14:52:00+00:00', fecha_fin: '2025-10-01T16:04:00+00:00',
     lecturas: [LECTURA_679] }
-], LECTURA_679);
+], LECTURA_679, ultimos(
+  registro(LECTURA_111, 102, 'hr_valor', 'BPM'),
+  registro(LECTURA_111, 102, 'spo2_valor', '%'),
+  registro(LECTURA_679, 231, 'mov_valor', 'movimientos')
+));
+
+function estadoConexion(api, autenticacion) {
+  return [200, {
+    api_central: api, autenticacion_central: autenticacion,
+    sesion_local_expira_en: '2026-09-28T15:00:00+00:00'
+  }];
+}
+const CONECTADA = estadoConexion('disponible', 'vigente');
 
 function estadoEnvios(cambios) {
   return [200, Object.assign({
@@ -376,6 +435,7 @@ function rutasBase(cambios) {
   return Object.assign({
     'GET /adaptador/sesion': [200, { autenticada: true, rol: 'PACIENTE' }],
     'GET /adaptador/conectividad': [200, { api_central: 'disponible' }],
+    'GET /adaptador/estado-conexion': CONECTADA,
     'GET /adaptador/embarazos': embarazos(),
     'GET /adaptador/embarazos/130/monitoreo': MONITOREO_130,
     'GET /adaptador/embarazos/100/monitoreo': MONITOREO_100,
@@ -390,53 +450,165 @@ function elegirEnHistorial($, id) {
 }
 
 // ---------------------------------------------------------------------------
-// Inicio: una sola lectura, con sus nulos
+// Inicio: «Tus últimos registros», una tarjeta por variable
 // ---------------------------------------------------------------------------
 
-test('Inicio muestra la última lectura del embarazo en curso, con los nulos como «—»', async () => {
+test('Inicio: cada tarjeta es su propio último registro; lo nunca registrado dice «Sin registros»', async () => {
   const { $ } = await arrancar(rutasBase());
 
   assert.equal($('embarazo-estado').textContent, 'En curso');
   assert.equal($('embarazo-anteriores').textContent, '1');
-  assert.equal($('movs-value').textContent, '12');
+  assert.equal($('mov-value').textContent, '12');
+  assert.equal($('mov-status').textContent, 'Último registro');
+  assert.equal($('mov-fecha').textContent, 'Registrado el 24/9/2026, 01:40');
+  assert.equal($('mov-semana').textContent, 'Semana 27 en esa lectura');
+  assert.equal($('tarjeta-mov').getAttribute('data-id-lectura'), '5001');
+  // El 130 nunca registró FC ni SpO2: no se rellena con otra lectura ni embarazo.
   assert.equal($('hr-value').textContent, '—');
-  assert.equal($('spo2-value').textContent, '—');
-  assert.equal($('hr-status').textContent, 'No registrado en esta lectura');
-  assert.equal($('spo2-status').textContent, 'No registrado en esta lectura');
-  assert.equal($('mov-status').textContent, 'Registrado en esta lectura');
-  assert.notEqual($('last-update').textContent, '—', 'la fecha de la lectura se muestra');
-  assert.equal($('embarazo-semana').textContent, '27');
+  assert.equal($('hr-status').textContent, 'Sin registros');
+  assert.equal($('hr-fecha').textContent, '');
+  assert.equal($('spo2-status').textContent, 'Sin registros');
+  assert.equal($('tarjeta-hr').getAttribute('data-id-lectura'), null);
   assert.equal($('btn-ver-anteriores').hidden, false);
+});
+
+test('Semana actual y semana de la lectura son cosas distintas', async () => {
+  const { $ } = await arrancar(rutasBase());
+
+  // semana_actual del adaptador (hoy), no la 27 de la lectura del 24/9.
+  assert.equal($('embarazo-semana').textContent, '28');
+  assert.equal($('mov-semana').textContent, 'Semana 27 en esa lectura');
+});
+
+// Cuenta paciente30@example.com, embarazo 129 (data/generated): su última FC
+// y SpO2 es la lectura 549 y su último movimiento la 1259, semanas después.
+const EMBARAZO_129 = {
+  id_embarazo: 129, fecha_inicio: '2025-09-24', fecha_probable_parto: '2026-07-01',
+  estado_embarazo: 'ACTIVO', fecha_cierre: null
+};
+const LECTURA_549 = {
+  id_lectura: 549, fecha_hora_captura: '2026-05-29T08:27:00+00:00', codigo_semaforo: 'OK',
+  semana_gestacion: 36, hr_valor: '83.00', spo2_valor: '96.00', mov_valor: null
+};
+const LECTURA_1259 = {
+  id_lectura: 1259, fecha_hora_captura: '2026-06-21T14:56:00+00:00', codigo_semaforo: 'WARNING',
+  semana_gestacion: 39, hr_valor: null, spo2_valor: null, mov_valor: 7
+};
+
+function rutasPaciente30(cambios) {
+  return rutasBase(Object.assign({
+    'GET /adaptador/embarazos': [200, { disponible: true, datos: {
+      hoy: '2026-09-25', semana_actual: 53, actual: EMBARAZO_129,
+      anteriores: [], todos: [EMBARAZO_129], ambiguo: false
+    } }],
+    'GET /adaptador/embarazos/129/monitoreo': monitoreo(129, [
+      { id_sesion: 1, tipo_sesion: 'SIGNOS_MATERNOS', estado_sesion: 'COMPLETADA',
+        fecha_inicio: LECTURA_549.fecha_hora_captura, fecha_fin: null, lecturas: [LECTURA_549] },
+      { id_sesion: 811, tipo_sesion: 'MOVIMIENTOS_FETALES', estado_sesion: 'COMPLETADA',
+        fecha_inicio: LECTURA_1259.fecha_hora_captura, fecha_fin: null, lecturas: [LECTURA_1259] }
+    ], LECTURA_1259, ultimos(
+      registro(LECTURA_549, 1, 'hr_valor', 'BPM'),
+      registro(LECTURA_549, 1, 'spo2_valor', '%'),
+      registro(LECTURA_1259, 811, 'mov_valor', 'movimientos')
+    ))
+  }, cambios || {}));
+}
+
+test('paciente30: FC/SpO2 y movimientos de lecturas distintas, cada uno con su fecha y su clasificación', async () => {
+  const { $ } = await arrancar(rutasPaciente30());
+
+  assert.equal($('hr-value').textContent, '83');
+  assert.equal($('spo2-value').textContent, '96');
+  assert.equal($('mov-value').textContent, '7');
+  // Fechas en hora de Panamá (UTC−5): 08:27Z → 03:27; 14:56Z → 09:56.
+  assert.equal($('hr-fecha').textContent, 'Registrado el 29/5/2026, 03:27');
+  assert.equal($('spo2-fecha').textContent, 'Registrado el 29/5/2026, 03:27');
+  assert.equal($('mov-fecha').textContent, 'Registrado el 21/6/2026, 09:56');
+  assert.equal($('tarjeta-hr').getAttribute('data-id-lectura'), '549');
+  assert.equal($('tarjeta-mov').getAttribute('data-id-lectura'), '1259');
+  // La clasificación es la de la lectura de origen, rotulada como tal.
+  assert.equal($('hr-clasificacion').textContent, 'Clasificación de esa lectura: Verde');
+  assert.equal($('mov-clasificacion').textContent, 'Clasificación de esa lectura: Ámbar');
+  // El semáforo grande es el de UNA lectura, la más reciente, y dice qué midió.
+  assert.ok($('semaforo').classList.contains('warning'));
+  assert.equal($('last-update').textContent, '21/6/2026, 09:56');
+  assert.equal($('ultima-lectura-mide').textContent, 'Midió movimientos fetales.');
+  // Semana de hoy sin topes; la de cada lectura, aparte.
+  assert.equal($('embarazo-semana').textContent, '53');
+  assert.equal($('hr-semana').textContent, 'Semana 36 en esa lectura');
+  assert.match($('nota-embarazo').textContent, /fecha probable de parto \(1\/7\/2026\) ya pasó/);
+});
+
+test('El cero es un valor registrado, no una ausencia', async () => {
+  const cero = Object.assign({}, LECTURA_1259, { id_lectura: 1300, mov_valor: 0 });
+  const { $ } = await arrancar(rutasPaciente30({
+    'GET /adaptador/embarazos/129/monitoreo': monitoreo(129, [], cero,
+      ultimos(null, null, registro(cero, 811, 'mov_valor', 'movimientos')))
+  }));
+
+  assert.equal($('mov-value').textContent, '0');
+  assert.equal($('mov-status').textContent, 'Último registro');
+  assert.equal($('hr-status').textContent, 'Sin registros');
+});
+
+test('Sin ninguna lectura: las tres tarjetas dicen «Sin registros» y no hay semáforo', async () => {
+  const { $ } = await arrancar(rutasPaciente30({
+    'GET /adaptador/embarazos/129/monitoreo': monitoreo(129, [], null, ultimos(null, null, null))
+  }));
+
+  ['hr', 'spo2', 'mov'].forEach((p) => {
+    assert.equal($(p + '-value').textContent, '—');
+    assert.equal($(p + '-status').textContent, 'Sin registros');
+  });
+  assert.ok($('semaforo').classList.contains('waiting'), 'la ausencia de datos no es verde');
+  assert.equal($('last-update').textContent, '—');
+});
+
+test('Respuesta parcial: una variable que no llegó es «No disponible», no «Sin registros»', async () => {
+  const parcial = { frecuencia_cardiaca: registro(LECTURA_549, 1, 'hr_valor', 'BPM') };
+  const { $ } = await arrancar(rutasPaciente30({
+    'GET /adaptador/embarazos/129/monitoreo': monitoreo(129, [], LECTURA_549, parcial)
+  }));
+
+  assert.equal($('hr-value').textContent, '83');
+  assert.equal($('spo2-status').textContent, 'No disponible');
+  assert.equal($('mov-status').textContent, 'No disponible');
 });
 
 test('Una fecha sin hora es un día de calendario: no se corre al día anterior en UTC−5', async () => {
   const { $ } = await arrancar(rutasBase());
 
   // fecha_inicio '2026-03-19' leída como medianoche UTC mostraría el 18 en Panamá.
-  assert.equal($('embarazo-inicio').textContent, new Date(2026, 2, 19).toLocaleDateString());
+  assert.equal($('embarazo-inicio').textContent, '19/3/2026');
   const opcion = $('selector-embarazo').hijos.find((o) => o.value === '130');
-  assert.match(opcion.textContent, new RegExp(new Date(2026, 2, 19).toLocaleDateString().replace(/\//g, '\\/')));
+  assert.equal(opcion.textContent, 'Desde 19/3/2026 — En curso');
 });
 
 test('Las opciones del selector de Historial no repiten «Embarazo»: a 360 px se cortaban', async () => {
   const { $ } = await arrancar(rutasBase());
 
   const opcion = $('selector-embarazo').hijos.find((o) => o.value === '100');
-  assert.equal(opcion.textContent, 'Desde ' + new Date(2025, 0, 6).toLocaleDateString() + ' — Finalizado');
+  assert.equal(opcion.textContent, 'Desde 6/1/2025 — Finalizado');
 });
 
-test('Una última lectura de signos maternos llena FC y SpO2 con el valor tal cual llega', async () => {
+test('FC y SpO2 se muestran tal cual llegan, sin convertirlos en número', async () => {
   const signos = monitoreo(130, [
     { id_sesion: 9002, tipo_sesion: 'SIGNOS_MATERNOS', estado_sesion: 'COMPLETADA',
       fecha_inicio: LECTURA_111.fecha_hora_captura, fecha_fin: null, lecturas: [LECTURA_111] }
-  ], LECTURA_111);
+  ], LECTURA_111, ultimos(
+    registro(LECTURA_111, 9002, 'hr_valor', 'BPM'),
+    registro(LECTURA_111, 9002, 'spo2_valor', '%'),
+    null
+  ));
   const { $ } = await arrancar(rutasBase({ 'GET /adaptador/embarazos/130/monitoreo': signos }));
 
   // «95.00» del NUMERIC(5,2) se presenta como «95»; nunca se convierte en número.
   assert.equal($('hr-value').textContent, '95');
   assert.equal($('spo2-value').textContent, '99');
-  assert.equal($('movs-value').textContent, '—');
-  assert.equal($('mov-status').textContent, 'No registrado en esta lectura');
+  assert.equal($('mov-value').textContent, '—');
+  assert.equal($('mov-status').textContent, 'Sin registros');
+  assert.equal($('ultima-lectura-mide').textContent,
+    'Midió frecuencia cardíaca y saturación de oxígeno.');
 });
 
 // ---------------------------------------------------------------------------
@@ -473,7 +645,7 @@ test('Cambiar el embarazo en Historial no repinta Inicio ni desvía el registro'
   await asentar();
 
   // Inicio sigue con la lectura del embarazo 130.
-  assert.equal($('movs-value').textContent, '12');
+  assert.equal($('mov-value').textContent, '12');
   assert.equal($('hr-value').textContent, '—');
   assert.equal($('embarazo-estado').textContent, 'En curso');
 
@@ -497,7 +669,7 @@ test('Un refresco conserva la selección de Historial', async () => {
 
   assert.equal($('selector-embarazo').value, '100');
   assert.equal($('historial-lista').filas().length, 3);
-  assert.equal($('movs-value').textContent, '12');
+  assert.equal($('mov-value').textContent, '12');
 });
 
 test('El enlace de Inicio abre Historial en el embarazo anterior', async () => {
@@ -509,7 +681,7 @@ test('El enlace de Inicio abre Historial en el embarazo anterior', async () => {
   assert.equal($('vista-historial').hidden, false);
   assert.equal($('selector-embarazo').value, '100');
   assert.equal($('historial-lista').filas().length, 3);
-  assert.equal($('movs-value').textContent, '12');
+  assert.equal($('mov-value').textContent, '12');
 });
 
 test('Con ambigüedad, Inicio no llama «actual» a ninguno ni habilita el registro', async () => {
@@ -519,7 +691,7 @@ test('Con ambigüedad, Inicio no llama «actual» a ninguno ni habilita el regis
 
   assert.equal($('embarazo-estado').textContent, 'Sin determinar');
   assert.equal($('hr-value').textContent, '—');
-  assert.equal($('movs-value').textContent, '—');
+  assert.equal($('mov-value').textContent, '—');
   assert.equal($('btn-registrar-movimientos').disabled, true);
   // Solo Historial pidió monitoreo, y de un único episodio.
   assert.equal(adaptador.contar('GET', '/adaptador/embarazos/130/monitoreo'), 1);
@@ -542,7 +714,7 @@ test('Sin conexión se conserva el contexto conocido y se puede seguir registran
 
   assert.match($('nota-embarazo').textContent, /^Sin conexión con el servidor/);
   assert.equal($('embarazo-estado').textContent, 'En curso');
-  assert.equal($('movs-value').textContent, '12', 'la última lectura, con su fecha, sigue a la vista');
+  assert.equal($('mov-value').textContent, '12', 'la última lectura, con su fecha, sigue a la vista');
   assert.equal($('btn-registrar-movimientos').disabled, false);
 
   $('btn-registrar-movimientos').click();
@@ -581,7 +753,7 @@ test('Una respuesta tardía de una selección anterior no pisa la vigente', asyn
   const filas = $('historial-lista').filas();
   assert.equal(filas.length, 1, 'solo la lectura del embarazo 130');
   assert.equal(filas[0][3], '12');
-  assert.equal($('movs-value').textContent, '12');
+  assert.equal($('mov-value').textContent, '12');
 });
 
 test('Una respuesta que llega después de cerrar sesión no repinta nada', async () => {
@@ -687,7 +859,7 @@ test('Cerrar sesión: Cancelar conserva la sesión; confirmar la invalida y limp
   assert.ok(!$('dialogo-cerrar-sesion').hasAttribute('open'));
   assert.equal(adaptador.contar('POST', '/adaptador/cerrar-sesion'), 0);
   assert.equal($('vista-inicio').hidden, false);
-  assert.equal($('movs-value').textContent, '12');
+  assert.equal($('mov-value').textContent, '12');
 
   $('btn-cerrar-sesion').click();
   $('btn-confirmar-cierre').click();
@@ -696,8 +868,241 @@ test('Cerrar sesión: Cancelar conserva la sesión; confirmar la invalida y limp
   assert.equal($('vista-login').hidden, false);
   assert.equal($('main-menu').hidden, true);
   assert.equal($('area-cuenta').hidden, true);
-  assert.equal($('movs-value').textContent, '—');
+  assert.equal($('mov-value').textContent, '—');
   assert.equal($('embarazo-estado').textContent, 'No disponible');
   // Ninguna petición que borre registros locales.
   assert.ok(adaptador.llamadas.every((l) => l.metodo !== 'DELETE'));
+});
+
+// ---------------------------------------------------------------------------
+// Conexión y autenticación: estados comprobados, no supuestos
+// ---------------------------------------------------------------------------
+
+test('Con el token vencido el servidor sigue disponible: no se pinta «Sin conexión» y se ofrece reautenticar', async () => {
+  const { $ } = await arrancar(rutasBase({
+    'GET /adaptador/estado-conexion': estadoConexion('disponible', 'reautenticacion_requerida')
+  }));
+
+  assert.equal($('connection-status').textContent, 'Servidor disponible · inicia sesión de nuevo');
+  assert.doesNotMatch($('connection-status').textContent, /Sin conexión/);
+  assert.equal($('aviso-sesion-central').hidden, false);
+  assert.equal($('btn-mostrar-reautenticar').hidden, false);
+  assert.equal($('vista-inicio').hidden, false, 'la sesión local sigue abierta');
+});
+
+test('Con la API caída el indicador dice «Sin conexión con el servidor» y no pide credenciales', async () => {
+  const { $ } = await arrancar(rutasBase({
+    'GET /adaptador/estado-conexion': estadoConexion('no_disponible', 'no_comprobada')
+  }));
+
+  assert.equal($('connection-status').textContent, 'Sin conexión con el servidor');
+  assert.equal($('aviso-sesion-central').hidden, true);
+});
+
+test('Un 403 es «acceso no autorizado»: no se confunde con un token vencido ni se ofrece reautenticar', async () => {
+  const { $ } = await arrancar(rutasBase({
+    'GET /adaptador/estado-conexion': estadoConexion('disponible', 'acceso_denegado')
+  }));
+
+  assert.equal($('connection-status').textContent, 'Acceso no autorizado');
+  assert.equal($('aviso-sesion-central').hidden, false);
+  assert.equal($('btn-mostrar-reautenticar').hidden, true);
+});
+
+test('Reautenticar recupera la sesión central, recarga lo clínico y conserva los registros pendientes', async () => {
+  let vigente = false;
+  const { $, adaptador } = await arrancar(rutasBase({
+    'GET /adaptador/estado-conexion': () =>
+      estadoConexion('disponible', vigente ? 'vigente' : 'reautenticacion_requerida'),
+    'GET /adaptador/movimientos/estado': estadoEnvios({ pendientes: 1 }),
+    'POST /adaptador/reautenticar': () => { vigente = true; return CONECTADA; }
+  }));
+  const clinicasAntes = adaptador.contar('GET', '/adaptador/embarazos');
+
+  $('btn-mostrar-reautenticar').click();
+  assert.equal($('form-reautenticar').hidden, false);
+  $('reauth-email').value = 'paciente01@example.com';
+  $('reauth-password').value = 'clave-de-prueba';
+  $('form-reautenticar').disparar('submit');
+  await asentar();
+
+  assert.equal(adaptador.contar('POST', '/adaptador/reautenticar'), 1);
+  assert.equal($('reauth-password').value, '', 'la contraseña no se conserva');
+  assert.equal($('aviso-sesion-central').hidden, true);
+  assert.equal($('connection-status').textContent, 'Conectada al servidor');
+  assert.equal(adaptador.contar('GET', '/adaptador/embarazos'), clinicasAntes + 1, 'se recarga una vez');
+  assert.equal($('envio-estado').textContent, 'Registro guardado, pendiente de envío.');
+  assert.equal(adaptador.contar('POST', '/adaptador/cerrar-sesion'), 0);
+  assert.ok(adaptador.llamadas.every((l) => l.metodo !== 'DELETE'));
+});
+
+test('Reautenticar con credenciales que no sirven avisa y no cierra la sesión local', async () => {
+  const { $, adaptador } = await arrancar(rutasBase({
+    'GET /adaptador/estado-conexion': estadoConexion('disponible', 'reautenticacion_requerida'),
+    'POST /adaptador/reautenticar': [400, { detail: 'Correo o contraseña incorrectos.' }]
+  }));
+
+  $('btn-mostrar-reautenticar').click();
+  $('reauth-email').value = 'paciente01@example.com';
+  $('reauth-password').value = 'otra';
+  $('form-reautenticar').disparar('submit');
+  await asentar();
+
+  assert.equal($('reauth-mensaje').textContent, 'Correo o contraseña incorrectos.');
+  assert.equal($('vista-inicio').hidden, false);
+  assert.equal($('aviso-sesion-central').hidden, false);
+  assert.equal(adaptador.contar('POST', '/adaptador/cerrar-sesion'), 0);
+});
+
+test('El refresco periódico comprueba conexión y envíos, pero no repite lecturas clínicas', async () => {
+  const { adaptador, tic } = await arrancar(rutasBase());
+  const clinicas = adaptador.contar('GET', '/adaptador/embarazos');
+  const monitoreos = adaptador.contar('GET', '/adaptador/embarazos/130/monitoreo');
+  const estados = adaptador.contar('GET', '/adaptador/estado-conexion');
+
+  await tic();
+  await tic();
+  await tic();
+
+  assert.equal(adaptador.contar('GET', '/adaptador/estado-conexion'), estados + 3);
+  assert.equal(adaptador.contar('GET', '/adaptador/embarazos'), clinicas);
+  assert.equal(adaptador.contar('GET', '/adaptador/embarazos/130/monitoreo'), monitoreos);
+});
+
+test('Cuando la API vuelve, lo clínico se recarga una sola vez', async () => {
+  let api = 'no_disponible';
+  const { $, adaptador, tic } = await arrancar(rutasBase({
+    'GET /adaptador/estado-conexion': () =>
+      estadoConexion(api, api === 'disponible' ? 'vigente' : 'no_comprobada')
+  }));
+  assert.equal($('connection-status').textContent, 'Sin conexión con el servidor');
+  const clinicas = adaptador.contar('GET', '/adaptador/embarazos');
+
+  await tic();
+  assert.equal(adaptador.contar('GET', '/adaptador/embarazos'), clinicas, 'sigue caída: nada');
+
+  api = 'disponible';
+  await tic();
+  assert.equal($('connection-status').textContent, 'Conectada al servidor');
+  assert.equal(adaptador.contar('GET', '/adaptador/embarazos'), clinicas + 1);
+
+  await tic();
+  assert.equal(adaptador.contar('GET', '/adaptador/embarazos'), clinicas + 1, 'sin bucle de recargas');
+});
+
+test('Comprobaciones simultáneas comparten una sola petición', async () => {
+  const { $, adaptador, documento, tic } = await arrancar(rutasBase());
+  const antes = adaptador.contar('GET', '/adaptador/estado-conexion');
+
+  adaptador.diferirSi((clave) => clave === 'GET /adaptador/estado-conexion');
+  tic();
+  documento.disparar('visibilitychange');
+  tic();
+  await asentar();
+  assert.equal(adaptador.contar('GET', '/adaptador/estado-conexion'), antes + 1);
+  adaptador.diferidas.forEach((d) => d.soltar());
+  await asentar();
+  assert.equal($('connection-status').textContent, 'Conectada al servidor');
+});
+
+test('Volver a la pestaña con datos de más de un minuto los vuelve a pedir; con datos recientes, no', async () => {
+  const { adaptador, documento, reloj } = await arrancar(rutasBase());
+  const clinicas = adaptador.contar('GET', '/adaptador/embarazos');
+
+  reloj.ms += 30 * 1000;
+  documento.disparar('visibilitychange');
+  await asentar();
+  assert.equal(adaptador.contar('GET', '/adaptador/embarazos'), clinicas);
+
+  reloj.ms += 15 * 60 * 1000;   // la pestaña estuvo oculta un buen rato
+  documento.disparar('visibilitychange');
+  await asentar();
+  assert.equal(adaptador.contar('GET', '/adaptador/embarazos'), clinicas + 1);
+});
+
+test('Tras cerrar sesión no queda ningún temporizador ni se repinta con una comprobación tardía', async () => {
+  const { $, adaptador, intervalos } = await arrancar(rutasBase());
+  assert.equal(intervalos.size, 1);
+
+  adaptador.diferirSi((clave) => clave === 'GET /adaptador/estado-conexion');
+  $('btn-actualizar-datos').click();
+  $('btn-cerrar-sesion').click();
+  $('btn-confirmar-cierre').click();
+  await asentar();
+  assert.equal(intervalos.size, 0);
+
+  adaptador.rutas['GET /adaptador/estado-conexion'] =
+    estadoConexion('disponible', 'reautenticacion_requerida');
+  adaptador.diferidas.forEach((d) => d.soltar());
+  await asentar();
+  assert.equal($('aviso-sesion-central').hidden, true);
+  assert.equal($('connection-status').textContent, 'Servidor disponible');
+});
+
+test('Iniciar sesión otra vez no duplica el temporizador', async () => {
+  const { $, intervalos } = await arrancar(rutasBase({
+    'POST /adaptador/iniciar-sesion': [200, { autenticada: true }]
+  }));
+  $('btn-cerrar-sesion').click();
+  $('btn-confirmar-cierre').click();
+  await asentar();
+
+  $('login-email').value = 'paciente01@example.com';
+  $('login-password').value = 'clave-de-prueba';
+  $('form-login').disparar('submit');
+  await asentar();
+  assert.equal($('vista-inicio').hidden, false);
+  assert.equal(intervalos.size, 1);
+});
+
+test('Sin token el envío se detiene, se avisa y el indicador lo refleja; nada se da por enviado', async () => {
+  let requerida = false;
+  const ronda = { seleccionados: 1, entregados: 0, reintentables: 0, rechazados: 0,
+    agotados: 0, ya_entregados: 0, detenida_por_transporte: false, detenida_por_credencial: true };
+  const { $ } = await arrancar(rutasBase({
+    'GET /adaptador/estado-conexion': () =>
+      estadoConexion('disponible', requerida ? 'reautenticacion_requerida' : 'vigente'),
+    'GET /adaptador/movimientos/estado': estadoEnvios({ pendientes: 1 }),
+    'POST /adaptador/movimientos/sincronizar': () => { requerida = true; return [200, ronda]; }
+  }));
+
+  $('btn-sincronizar-movimientos').click();
+  await asentar();
+  assert.equal($('envio-resultado').textContent,
+    'Para enviar hace falta volver a iniciar sesión; tus registros siguen guardados.');
+  assert.equal($('connection-status').textContent, 'Servidor disponible · inicia sesión de nuevo');
+  assert.equal($('envio-ultimo').hidden, true, 'un servidor disponible no es un envío confirmado');
+});
+
+test('El último envío confirmado sale de la cola, no de la conexión', async () => {
+  const { $ } = await arrancar(rutasBase({
+    'GET /adaptador/movimientos/estado': estadoEnvios({
+      enviados: 1, ultimo_envio_confirmado: '2026-09-24T07:07:23.784784+00:00'
+    })
+  }));
+
+  assert.equal($('envio-ultimo').textContent,
+    'Último envío confirmado por el servidor: 24/9/2026, 02:07.');
+  assert.match($('datos-actualizados').textContent, /^Información consultada al servidor el 25\/9\/2026, 10:00\./);
+});
+
+test('Si la petición local se corta (equipo suspendido), no se afirma «Sin conexión»; al reanudar se comprueba y recarga una vez', async () => {
+  const { $, adaptador, documento } = await arrancar(rutasBase());
+  const clinicas = adaptador.contar('GET', '/adaptador/embarazos');
+  const vigente = adaptador.rutas['GET /adaptador/estado-conexion'];
+
+  // Sin ruta, el fetch falso rechaza: es lo que ve la página cuando el
+  // navegador corta la petición (ERR_NETWORK_IO_SUSPENDED).
+  delete adaptador.rutas['GET /adaptador/estado-conexion'];
+  documento.disparar('visibilitychange');
+  await asentar();
+  assert.equal($('connection-status').textContent, 'No se pudo comprobar la conexión');
+  assert.doesNotMatch($('connection-status').textContent, /Sin conexión/);
+  assert.equal($('vista-inicio').hidden, false);
+
+  adaptador.rutas['GET /adaptador/estado-conexion'] = vigente;
+  documento.disparar('resume');
+  await asentar();
+  assert.equal($('connection-status').textContent, 'Conectada al servidor');
+  assert.equal(adaptador.contar('GET', '/adaptador/embarazos'), clinicas + 1);
 });

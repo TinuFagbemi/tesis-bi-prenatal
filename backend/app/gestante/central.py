@@ -275,8 +275,14 @@ class ClienteCentralHTTP:
             registrador.warning("Identidad: el servidor central no respondio.")
             return RespuestaIdentidad(EstadoRespuesta.SIN_CONEXION)
 
-        if respuesta.status_code in (CODIGO_NO_AUTENTICADO, CODIGO_PROHIBIDO):
+        if respuesta.status_code == CODIGO_NO_AUTENTICADO:
+            # Token vencido, invalido o cuenta desactivada: SCRUM-70 los hace
+            # indistinguibles. Lo unico que sirve es volver a autenticarse.
             return RespuestaIdentidad(EstadoRespuesta.RECHAZADO)
+        if respuesta.status_code == CODIGO_PROHIBIDO:
+            # La identidad es valida y el servidor la reconoce, pero no puede
+            # hacer esto. No es un token vencido: reautenticarse no lo cambia.
+            return RespuestaIdentidad(EstadoRespuesta.PROHIBIDO)
 
         if respuesta.status_code != CODIGO_OK:
             registrador.warning(

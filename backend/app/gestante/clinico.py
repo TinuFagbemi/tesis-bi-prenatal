@@ -1,10 +1,11 @@
-"""Las dos reglas de lectura clinica del portal, y nada mas (SCRUM-72).
+"""Las reglas de lectura clinica del portal, y nada mas (SCRUM-72).
 
 Este modulo **no clasifica nada clinico**. Recibe lo que SCRUM-98 ya decidio y
-responde dos preguntas de presentacion:
+responde tres preguntas de presentacion:
 
 1. cual de los episodios es el embarazo en curso, si es que hay uno;
-2. cual es la ultima lectura de un episodio.
+2. cual es la ultima lectura de un episodio;
+3. que valores registro cada variable, y cual fue el ultimo de cada una.
 
 Ambas son puras: no abren conexiones, no llaman a la red y no leen
 configuracion, asi que cada rama es alcanzable desde una prueba con datos
@@ -145,6 +146,71 @@ def ultima_lectura(
     if not todas:
         return None
     return max(todas, key=_clave_de_captura)
+
+
+@dataclass(frozen=True)
+class Variable:
+    """Una métrica que la paciente consulta por separado.
+
+    ``campo`` es el atributo de ``LecturaResumen`` que la contiene y ``unidad``
+    la que se muestra. No hay umbrales ni rangos: solo dónde está el valor.
+    """
+
+    clave: str
+    campo: str
+    unidad: str
+
+
+VARIABLES: tuple[Variable, ...] = (
+    Variable("frecuencia_cardiaca", "hr_valor", "BPM"),
+    Variable("saturacion_oxigeno", "spo2_valor", "%"),
+    Variable("movimientos_fetales", "mov_valor", "movimientos"),
+)
+
+
+@dataclass(frozen=True)
+class Punto:
+    """Un valor registrado de una variable, con su lectura y su sesión de origen."""
+
+    lectura: LecturaResumen
+    id_sesion: int
+    valor: object
+
+
+def serie(sesiones: Sequence[SesionConLecturas], variable: Variable) -> tuple[Punto, ...]:
+    """Los valores registrados de una variable, del más antiguo al más reciente.
+
+    **Solo lo que existe.** Una lectura entra si su campo no es ``None``; el cero
+    entra, porque es un valor medido y no una ausencia. No se interpola, no se
+    agrupa por día ni se promedia: cada punto es una lectura del episodio tal
+    como llegó.
+
+    El orden es la misma clave de :func:`ultima_lectura` --``fecha_hora_captura``
+    y, solo para desempatar, ``id_lectura``--, y :func:`ultimo_registro` es
+    literalmente el último punto: la tarjeta de una variable y el final de su
+    serie no pueden discrepar.
+    """
+    puntos = [
+        Punto(lectura=l, id_sesion=entrada.sesion.id_sesion, valor=getattr(l, variable.campo))
+        for entrada in sesiones
+        for l in entrada.lecturas
+        if getattr(l, variable.campo) is not None
+    ]
+    puntos.sort(key=lambda p: _clave_de_captura(p.lectura))
+    return tuple(puntos)
+
+
+def ultimo_registro(
+    sesiones: Sequence[SesionConLecturas], variable: Variable
+) -> Punto | None:
+    """El último valor registrado de una variable dentro del episodio, o ``None``.
+
+    Cada variable se resuelve por separado, así que las tres pueden venir de
+    lecturas y momentos distintos: el resultado no afirma simultaneidad. ``None``
+    significa que el episodio nunca registró esa variable, no que valga cero.
+    """
+    puntos = serie(sesiones, variable)
+    return puntos[-1] if puntos else None
 
 
 def sesion_de_la_lectura(

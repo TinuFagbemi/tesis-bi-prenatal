@@ -1,7 +1,7 @@
 """Las rutas del adaptador local de la interfaz de la gestante (SCRUM-72).
 
-Trece rutas: tres sirven los archivos de la interfaz, cinco atienden sesion y
-estado local, dos exponen la lectura clinica minima de SCRUM-98 --embarazos
+Quince rutas: tres sirven los archivos de la interfaz, siete atienden sesion,
+conexion y estado local, dos exponen la lectura clinica minima de SCRUM-98 --embarazos
 de la cuenta y el monitoreo de un episodio-- traducida desde
 ``app.gestante.central`` y ``app.gestante.clinico``, y tres registran y
 sincronizan sesiones de movimiento simuladas por medio de
@@ -34,6 +34,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal
 from http import HTTPStatus
 
 import httpx
@@ -51,13 +52,20 @@ from app.gestante import (
 )
 from app.gestante.central import ClienteCentral, EstadoRespuesta, RespuestaClinica
 from app.gestante.clinico import (
+    VARIABLES,
+    Punto,
     SesionConLecturas,
+    Variable,
     clasificar_episodios,
+    serie,
     sesion_de_la_lectura,
     ultima_lectura,
+    ultimo_registro,
 )
 from app.gestante.config import NOMBRE_DE_COOKIE, GestanteSettings
+from app.etl.reglas import ZONA_HORARIA_CLINICA
 from app.gestante.simulacion import SimulacionNoAplicable
+from app.services.ingesta import semana_gestacional
 from app.models.enums import NombreRol, TipoSesion
 from app.schemas.autenticacion import CredencialesEntrada
 
@@ -85,8 +93,25 @@ MENSAJE_SOLO_PACIENTES = (
 )
 MENSAJE_SIN_SESION = "Tu sesión no está activa. Inicia sesión de nuevo."
 
+MENSAJE_SIN_CONEXION_REAUTENTICAR = (
+    "No hay conexión con el servidor. Tus registros siguen guardados en este "
+    "dispositivo; vuelve a intentarlo cuando haya conexión."
+)
+MENSAJE_OTRA_CUENTA = (
+    "Esa cuenta no es la de la sesión abierta en este dispositivo. Para usar "
+    "otra cuenta, cierra sesión primero."
+)
+
 ESTADO_DISPONIBLE = "disponible"
 ESTADO_NO_DISPONIBLE = "no_disponible"
+ESTADO_CON_ERRORES = "con_errores"
+
+# Estado de la autenticacion central de una sesion local vigente. Ver
+# ``/adaptador/estado-conexion``.
+AUTENTICACION_VIGENTE = "vigente"
+AUTENTICACION_REQUERIDA = "reautenticacion_requerida"
+AUTENTICACION_DENEGADA = "acceso_denegado"
+AUTENTICACION_NO_COMPROBADA = "no_comprobada"
 
 # ---------------------------------------------------------------------------
 # El contrato de las lecturas clinicas
@@ -302,6 +327,12 @@ def crear_router(contexto: ContextoAdaptador) -> APIRouter:
             contexto.tokens.olvidar(identificador)
             return sesion
 
+        if respuesta.estado is EstadoRespuesta.PROHIBIDO:
+            # 403: la identidad es valida y el servidor la reconoce. El token no
+            # vencio, asi que no se olvida; tampoco se renueva nada, porque el
+            # servidor no confirmo que esta cuenta pueda seguir.
+            return sesion
+
         if respuesta.estado is not EstadoRespuesta.OK:
             # Sin conexion o error remoto: no se sabe nada nuevo, no se cambia
             # nada.
@@ -385,6 +416,8 @@ def crear_router(contexto: ContextoAdaptador) -> APIRouter:
 
         if identidad.estado is EstadoRespuesta.SIN_CONEXION:
             return error(MENSAJE_SIN_CONEXION, HTTPStatus.SERVICE_UNAVAILABLE)
+        if identidad.estado is EstadoRespuesta.PROHIBIDO:
+            return error(MENSAJE_ACCESO_DENEGADO, HTTPStatus.FORBIDDEN)
         if identidad.estado is not EstadoRespuesta.OK or identidad.id_usuario is None:
             return error(MENSAJE_ERROR_REMOTO, HTTPStatus.BAD_GATEWAY)
 
@@ -497,6 +530,138 @@ def crear_router(contexto: ContextoAdaptador) -> APIRouter:
         return json(
             {"api_central": ESTADO_DISPONIBLE if disponible else ESTADO_NO_DISPONIBLE}
         )
+
+    @router.get("/adaptador/estado-conexion")
+    def estado_de_conexion(peticion: Request) -> JSONResponse:
+        """Qué se sabe **ahora** de la comunicación con el servidor, por separado.
+
+        Dos respuestas independientes, cada una comprobada y no supuesta:
+
+        * ``api_central``: ``disponible`` si el servidor contestó --aunque fuera
+          para rechazar--, ``no_disponible`` si no se pudo preguntar,
+          ``con_errores`` si contestó algo fuera del contrato.
+        * ``autenticacion_central``: ``vigente`` (``/yo`` aceptó el token),
+          ``reautenticacion_requerida`` (no hay token en memoria o ``/yo``
+          respondió 401: vencido, inválido o cuenta desactivada, que SCRUM-70
+          hace indistinguibles), ``acceso_denegado`` (403: la identidad es
+          válida y no puede hacer esto; reautenticarse no lo cambia) o
+          ``no_comprobada`` (no se pudo preguntar).
+
+        **No renueva nada.** Ni la ventana local ni el token: consultar el
+        estado cada pocos segundos no puede alargar una sesión. Tampoco escribe
+        auditoría en el servidor: ``/yo`` solo resuelve la identidad.
+        """
+        identificador, sesion = sesion_vigente(peticion)
+        if sesion is None:
+            return error(MENSAJE_SIN_SESION, HTTPStatus.UNAUTHORIZED)
+
+        def estado(api: str, autenticacion: str) -> JSONResponse:
+            return json(
+                {
+                    "api_central": api,
+                    "autenticacion_central": autenticacion,
+                    "sesion_local_expira_en": sesion.expira_en.isoformat(),
+                }
+            )
+
+        token = contexto.tokens.obtener(identificador)
+        if token is None:
+            api = (
+                ESTADO_DISPONIBLE
+                if contexto.cliente_central.disponible()
+                else ESTADO_NO_DISPONIBLE
+            )
+            return estado(api, AUTENTICACION_REQUERIDA)
+
+        identidad = contexto.cliente_central.identidad(token)
+
+        if identidad.estado is EstadoRespuesta.SIN_CONEXION:
+            return estado(ESTADO_NO_DISPONIBLE, AUTENTICACION_NO_COMPROBADA)
+        if identidad.estado is EstadoRespuesta.ERROR_REMOTO:
+            return estado(ESTADO_CON_ERRORES, AUTENTICACION_NO_COMPROBADA)
+        if identidad.estado is EstadoRespuesta.RECHAZADO:
+            contexto.tokens.olvidar(identificador)
+            return estado(ESTADO_DISPONIBLE, AUTENTICACION_REQUERIDA)
+        if identidad.estado is EstadoRespuesta.PROHIBIDO:
+            return estado(ESTADO_DISPONIBLE, AUTENTICACION_DENEGADA)
+
+        if identidad.id_usuario != sesion.id_usuario or identidad.rol is not NombreRol.PACIENTE:
+            # La misma regla que ``revalidar_si_procede``: el token ya no habla
+            # por esta sesión, y es lo único que la cierra.
+            contexto.tokens.olvidar(identificador)
+            with abrir_sesiones() as conexion:
+                sesion_local.cerrar(conexion, identificador, ahora=contexto.reloj())
+            return error(MENSAJE_SIN_SESION, HTTPStatus.UNAUTHORIZED)
+
+        return estado(ESTADO_DISPONIBLE, AUTENTICACION_VIGENTE)
+
+    @router.post("/adaptador/reautenticar")
+    def reautenticar(peticion: Request, credenciales: CredencialesEntrada) -> JSONResponse:
+        """Recupera el token central **de la misma cuenta** sin cerrar la sesión local.
+
+        Existe porque el contrato central no tiene renovación: cuando el token
+        vence, la única salida es volver a presentar credenciales. Hacerlo aquí,
+        en lugar de cerrar sesión y abrir otra, conserva la vista de la paciente
+        y deja intactos sus registros guardados, que viven en el archivo de su
+        cuenta y no dependen del token.
+
+        Las reglas de :func:`iniciar_sesion` se aplican igual --la contraseña
+        viaja una vez y no se guarda; solo PACIENTE--, más una: el token nuevo
+        tiene que ser de la **misma** cuenta que abrió esta sesión. Otra cuenta
+        no puede heredar una sesión local ajena.
+
+        Las credenciales que no sirven responden 400 y no 401: en este adaptador
+        401 significa únicamente «tu sesión local no vale», y eso aquí no es
+        cierto.
+        """
+        identificador, sesion = sesion_vigente(peticion)
+        if sesion is None:
+            return error(MENSAJE_SIN_SESION, HTTPStatus.UNAUTHORIZED)
+
+        autenticacion = contexto.cliente_central.autenticar(
+            email=credenciales.email,
+            password=credenciales.password.get_secret_value(),
+        )
+        if autenticacion.estado is EstadoRespuesta.SIN_CONEXION:
+            return error(MENSAJE_SIN_CONEXION_REAUTENTICAR, HTTPStatus.SERVICE_UNAVAILABLE)
+        if autenticacion.estado is EstadoRespuesta.RECHAZADO:
+            return error(MENSAJE_CREDENCIALES, HTTPStatus.BAD_REQUEST)
+        if autenticacion.estado is not EstadoRespuesta.OK or autenticacion.token is None:
+            return error(MENSAJE_ERROR_REMOTO, HTTPStatus.BAD_GATEWAY)
+
+        identidad = contexto.cliente_central.identidad(autenticacion.token)
+        if identidad.estado is EstadoRespuesta.SIN_CONEXION:
+            return error(MENSAJE_SIN_CONEXION_REAUTENTICAR, HTTPStatus.SERVICE_UNAVAILABLE)
+        if identidad.estado is EstadoRespuesta.PROHIBIDO:
+            return error(MENSAJE_ACCESO_DENEGADO, HTTPStatus.FORBIDDEN)
+        if identidad.estado is not EstadoRespuesta.OK or identidad.id_usuario is None:
+            return error(MENSAJE_ERROR_REMOTO, HTTPStatus.BAD_GATEWAY)
+        if identidad.rol is not NombreRol.PACIENTE:
+            return error(MENSAJE_SOLO_PACIENTES, HTTPStatus.FORBIDDEN)
+        if identidad.id_usuario != sesion.id_usuario:
+            return error(MENSAJE_OTRA_CUENTA, HTTPStatus.FORBIDDEN)
+
+        contexto.tokens.guardar(identificador, autenticacion.token)
+        ahora = contexto.reloj()
+        with abrir_sesiones() as conexion:
+            # Una validación en línea correcta, la misma regla que ya renueva la
+            # ventana en ``revalidar_si_procede``. No se inventa otra.
+            renovada = sesion_local.renovar(
+                conexion,
+                identificador,
+                ventana_segundos=settings.ventana_en_segundos,
+                ahora=ahora,
+            )
+        vigente = renovada or sesion
+        respuesta = json(
+            {
+                "api_central": ESTADO_DISPONIBLE,
+                "autenticacion_central": AUTENTICACION_VIGENTE,
+                "sesion_local_expira_en": vigente.expira_en.isoformat(),
+            }
+        )
+        fijar_cookie(respuesta, identificador, vigente.segundos_restantes(ahora))
+        return respuesta
 
     # -- Estado local del nodo --------------------------------------------
 
@@ -619,6 +784,28 @@ def crear_router(contexto: ContextoAdaptador) -> APIRouter:
             "mov_valor": lectura.mov_valor,
         }
 
+    def _punto(punto: Punto | None, variable: Variable) -> dict | None:
+        """Un valor de una variable con su trazabilidad, o ``None`` si nunca se registró.
+
+        ``codigo_semaforo_lectura`` es la clasificación **global de la lectura
+        de origen**, tal como la entrega el servidor. La API no publica una
+        clasificación por métrica, y este nombre existe para que nadie la lea
+        como si lo fuera. ``id_lectura`` e ``id_sesion`` son trazabilidad: la
+        interfaz no los muestra.
+        """
+        if punto is None:
+            return None
+        valor = punto.valor
+        return {
+            "valor": str(valor) if isinstance(valor, Decimal) else valor,
+            "unidad": variable.unidad,
+            "fecha_hora_captura": punto.lectura.fecha_hora_captura.isoformat(),
+            "semana_gestacion_lectura": punto.lectura.semana_gestacion,
+            "codigo_semaforo_lectura": punto.lectura.codigo_semaforo,
+            "id_lectura": punto.lectura.id_lectura,
+            "id_sesion": punto.id_sesion,
+        }
+
     def _sesion(sesion) -> dict:
         return {
             "id_sesion": sesion.id_sesion,
@@ -657,10 +844,25 @@ def crear_router(contexto: ContextoAdaptador) -> APIRouter:
 
         episodios = clasificar_episodios(resultado.datos)
 
+        # «Hoy» es el día de calendario en Panamá, la misma zona con la que el
+        # ETL decide el día clínico. La semana se calcula con la aritmética del
+        # servidor --``semana_gestacional``--, sin topes: si el episodio sigue
+        # ACTIVO más allá de la semana 42, eso es lo que dice el dato.
+        hoy = contexto.reloj().astimezone(ZONA_HORARIA_CLINICA)
+        semana_actual = (
+            None
+            if episodios.actual is None
+            else semana_gestacional(episodios.actual.fecha_inicio, hoy)
+        )
+
         return json(
             {
                 "disponible": True,
                 "datos": {
+                    "hoy": hoy.date().isoformat(),
+                    # Semana del embarazo en curso **hoy**. No es la semana de
+                    # ninguna lectura: esa viaja con cada lectura.
+                    "semana_actual": semana_actual,
                     "actual": None if episodios.actual is None else _episodio(episodios.actual),
                     "anteriores": [_episodio(e) for e in episodios.anteriores],
                     "todos": [_episodio(e) for e in episodios.todos],
@@ -743,6 +945,25 @@ def crear_router(contexto: ContextoAdaptador) -> APIRouter:
                     "id_sesion_de_la_ultima": (
                         None if sesion_de_la_ultima is None else sesion_de_la_ultima.id_sesion
                     ),
+                    # «Tus últimos registros»: el último valor no nulo de cada
+                    # variable, cada uno con su propia lectura y su propio
+                    # instante. No son simultáneos y no se combinan en un
+                    # semáforo común.
+                    "ultimos_registros": {
+                        variable.clave: _punto(ultimo_registro(con_lecturas, variable), variable)
+                        for variable in VARIABLES
+                    },
+                    # Las mismas lecturas, por variable y en orden cronológico,
+                    # para las gráficas. Sin puntos inventados.
+                    "series": {
+                        variable.clave: {
+                            "unidad": variable.unidad,
+                            "puntos": [
+                                _punto(p, variable) for p in serie(con_lecturas, variable)
+                            ],
+                        }
+                        for variable in VARIABLES
+                    },
                 },
             }
         )
@@ -903,6 +1124,11 @@ def crear_router(contexto: ContextoAdaptador) -> APIRouter:
                 "fallidos_en_revision": estado.fallidos_en_revision,
                 "total": estado.total,
                 "detalle": estado.detalle,
+                # Solo cambia cuando el servidor confirma una entrega; nunca
+                # por un /health correcto.
+                "ultimo_envio_confirmado": movimientos.ultimo_envio_confirmado(
+                    settings, sesion.id_usuario
+                ),
             }
         )
 

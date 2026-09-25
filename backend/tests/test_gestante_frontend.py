@@ -128,7 +128,13 @@ def test_el_semaforo_solo_traduce_codigos_a_clases():
     for codigo in ("OK", "WARNING", "ERROR"):
         assert codigo in contenido
     assert "SIN_CLASIFICACION" in contenido
-    # No hay comparacion de magnitudes en ninguna parte del archivo.
+    # No hay comparacion de magnitudes clinicas en ninguna parte del archivo.
+    # La unica comparacion admitida es la antiguedad de los datos mostrados,
+    # en milisegundos de reloj, y se quita literal antes de buscar: cualquier
+    # otra sigue haciendo fallar esta prueba.
+    antiguedad = "Date.now() - datosConsultadosEn > ANTIGUEDAD_MAXIMA_DATOS_MS"
+    assert contenido.count(antiguedad) == 1
+    contenido = contenido.replace(antiguedad, "")
     assert " < " not in contenido.replace("for (", "")
     assert " > " not in contenido.replace("=>", "").replace("->", "")
 
@@ -189,7 +195,7 @@ def test_el_marcado_no_inicializa_ninguna_metrica_en_cero():
     import re
 
     contenido = leer(HTML)
-    for identificador in ("hr-value", "spo2-value", "movs-value"):
+    for identificador in ("hr-value", "spo2-value", "mov-value"):
         coincidencia = re.search(
             rf'id="{identificador}"[^>]*>([^<]*)<', contenido
         )
