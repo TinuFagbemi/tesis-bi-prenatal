@@ -418,6 +418,13 @@ test('Una fecha sin hora es un día de calendario: no se corre al día anterior 
   assert.match(opcion.textContent, new RegExp(new Date(2026, 2, 19).toLocaleDateString().replace(/\//g, '\\/')));
 });
 
+test('Las opciones del selector de Historial no repiten «Embarazo»: a 360 px se cortaban', async () => {
+  const { $ } = await arrancar(rutasBase());
+
+  const opcion = $('selector-embarazo').hijos.find((o) => o.value === '100');
+  assert.equal(opcion.textContent, 'Desde ' + new Date(2025, 0, 6).toLocaleDateString() + ' — Finalizado');
+});
+
 test('Una última lectura de signos maternos llena FC y SpO2 con el valor tal cual llega', async () => {
   const signos = monitoreo(130, [
     { id_sesion: 9002, tipo_sesion: 'SIGNOS_MATERNOS', estado_sesion: 'COMPLETADA',

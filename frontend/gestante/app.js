@@ -683,10 +683,20 @@
   // Lectura clinica
   // =======================================================================
 
-  /** Descripción legible de un episodio para el selector. */
+  /** Descripción legible de un episodio, para el título de su tarjeta. */
   function etiquetaDeEpisodio(episodio) {
     const desde = fechaCortaLegible(episodio.fecha_inicio);
     return 'Embarazo desde ' + desde + ' — ' + estadoLegible(episodio.estado_embarazo);
+  }
+
+  /**
+   * Texto de la opción del selector. El campo ya se titula «Embarazo», y un
+   * <select> nativo no parte líneas: con la etiqueta completa, a 360 px el
+   * estado quedaba cortado («— Finalizad»).
+   */
+  function etiquetaDeOpcion(episodio) {
+    const desde = fechaCortaLegible(episodio.fecha_inicio);
+    return 'Desde ' + desde + ' — ' + estadoLegible(episodio.estado_embarazo);
   }
 
   function episodioPorId(id) {
@@ -777,7 +787,7 @@
     todos.forEach(function (episodio) {
       const opcion = document.createElement('option');
       opcion.value = String(episodio.id_embarazo);
-      opcion.textContent = etiquetaDeEpisodio(episodio);
+      opcion.textContent = etiquetaDeOpcion(episodio);
       selector.appendChild(opcion);
     });
     selector.disabled = false;
