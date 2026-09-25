@@ -22,6 +22,10 @@
 
 'use strict';
 
+// La zona de la demostración (UTC−5). Fijarla hace deterministas las fechas y
+// es la que destapó el desfase de un día en las fechas sin hora.
+process.env.TZ = 'America/Panama';
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -397,12 +401,21 @@ test('Inicio muestra la última lectura del embarazo en curso, con los nulos com
   assert.equal($('movs-value').textContent, '12');
   assert.equal($('hr-value').textContent, '—');
   assert.equal($('spo2-value').textContent, '—');
-  assert.equal($('hr-status').textContent, 'No medido en esta lectura');
-  assert.equal($('spo2-status').textContent, 'No medido en esta lectura');
-  assert.equal($('mov-status').textContent, 'Medido en esta lectura');
+  assert.equal($('hr-status').textContent, 'No registrado en esta lectura');
+  assert.equal($('spo2-status').textContent, 'No registrado en esta lectura');
+  assert.equal($('mov-status').textContent, 'Registrado en esta lectura');
   assert.notEqual($('last-update').textContent, '—', 'la fecha de la lectura se muestra');
   assert.equal($('embarazo-semana').textContent, '27');
   assert.equal($('btn-ver-anteriores').hidden, false);
+});
+
+test('Una fecha sin hora es un día de calendario: no se corre al día anterior en UTC−5', async () => {
+  const { $ } = await arrancar(rutasBase());
+
+  // fecha_inicio '2026-03-19' leída como medianoche UTC mostraría el 18 en Panamá.
+  assert.equal($('embarazo-inicio').textContent, new Date(2026, 2, 19).toLocaleDateString());
+  const opcion = $('selector-embarazo').hijos.find((o) => o.value === '130');
+  assert.match(opcion.textContent, new RegExp(new Date(2026, 2, 19).toLocaleDateString().replace(/\//g, '\\/')));
 });
 
 test('Una última lectura de signos maternos llena FC y SpO2 con el valor tal cual llega', async () => {
@@ -416,7 +429,7 @@ test('Una última lectura de signos maternos llena FC y SpO2 con el valor tal cu
   assert.equal($('hr-value').textContent, '95');
   assert.equal($('spo2-value').textContent, '99');
   assert.equal($('movs-value').textContent, '—');
-  assert.equal($('mov-status').textContent, 'No medido en esta lectura');
+  assert.equal($('mov-status').textContent, 'No registrado en esta lectura');
 });
 
 // ---------------------------------------------------------------------------
@@ -503,6 +516,40 @@ test('Con ambigüedad, Inicio no llama «actual» a ninguno ni habilita el regis
   assert.equal($('btn-registrar-movimientos').disabled, true);
   // Solo Historial pidió monitoreo, y de un único episodio.
   assert.equal(adaptador.contar('GET', '/adaptador/embarazos/130/monitoreo'), 1);
+});
+
+// ---------------------------------------------------------------------------
+// Sin conexión
+// ---------------------------------------------------------------------------
+
+test('Sin conexión se conserva el contexto conocido y se puede seguir registrando', async () => {
+  const { $, adaptador } = await arrancar(rutasBase({
+    'POST /adaptador/embarazos/130/sesiones-simuladas': [201, { registrado: true, estado: 'local' }]
+  }));
+  assert.equal($('btn-registrar-movimientos').disabled, false);
+
+  // La API central cae: el adaptador responde 200 con disponible: false.
+  adaptador.rutas['GET /adaptador/embarazos'] = [200, { disponible: false, motivo: 'sin_conexion' }];
+  $('main-menu').querySelectorAll('a[data-vista]')[0].click();
+  await asentar();
+
+  assert.match($('nota-embarazo').textContent, /^Sin conexión con el servidor/);
+  assert.equal($('embarazo-estado').textContent, 'En curso');
+  assert.equal($('movs-value').textContent, '12', 'la última lectura, con su fecha, sigue a la vista');
+  assert.equal($('btn-registrar-movimientos').disabled, false);
+
+  $('btn-registrar-movimientos').click();
+  await asentar();
+  assert.equal(adaptador.contar('POST', '/adaptador/embarazos/130/sesiones-simuladas'), 1);
+});
+
+test('Sin conexión y sin contexto previo no se inventa un embarazo en curso', async () => {
+  const { $ } = await arrancar(rutasBase({
+    'GET /adaptador/embarazos': [200, { disponible: false, motivo: 'sin_conexion' }]
+  }));
+
+  assert.equal($('embarazo-estado').textContent, 'No disponible');
+  assert.equal($('btn-registrar-movimientos').disabled, true);
 });
 
 // ---------------------------------------------------------------------------

@@ -330,7 +330,14 @@ def crear_router(contexto: ContextoAdaptador) -> APIRouter:
     # elegir y, con ello, no existe recorrido de rutas que impedir.
 
     def archivo(nombre: str, tipo: str) -> FileResponse:
-        return FileResponse(settings.frontend_dir / nombre, media_type=tipo)
+        # ``no-cache`` obliga a revalidar con el ETag en cada carga. Sin esta
+        # cabecera el navegador aplica una frescura heuristica y puede seguir
+        # ejecutando un ``app.js`` anterior a una correccion.
+        return FileResponse(
+            settings.frontend_dir / nombre,
+            media_type=tipo,
+            headers={"Cache-Control": "no-cache"},
+        )
 
     @router.get("/", include_in_schema=False)
     def pagina() -> FileResponse:

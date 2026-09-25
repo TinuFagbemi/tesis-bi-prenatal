@@ -178,6 +178,9 @@ def test_sirve_los_tres_archivos_de_la_interfaz(tmp_path, ruta, fragmento, tipo)
     assert respuesta.status_code == 200
     assert tipo in respuesta.headers["content-type"]
     assert fragmento in respuesta.text
+    # Revalidar siempre: un app.js en caché anterior a una corrección seguiría
+    # ejecutándose sin que nadie lo note.
+    assert respuesta.headers["cache-control"] == "no-cache"
 
 
 def test_la_interfaz_se_sirve_aunque_la_api_central_no_responda(tmp_path):

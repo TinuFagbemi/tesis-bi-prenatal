@@ -1778,8 +1778,20 @@ La cuenta que aprovisiona `provisionar_demo.py` en el entorno local es la de
 
 | Embarazo | Origen | Estado | Qué contiene |
 |---|---|---|---|
-| 130 | Agregado por `provisionar_demo.py` (inicio 2026-03-19) | `ACTIVO` | Solo las sesiones registradas desde el portal. El valor fijo `MOV_SIMULADO = 12` de `app.gestante.simulacion` procede de ellas; FC y SpO₂ son nulos porque una sesión de movimientos no los mide. |
+| 130 | Agregado por `provisionar_demo.py` (inicio 2026-03-19) | `ACTIVO` | Solo las sesiones registradas desde el portal. Su 12 es la constante `MOV_SIMULADO` de `app.gestante.simulacion`: **no procede del dataset ni es una medición**. FC y SpO₂ son nulos porque una sesión de movimientos no los mide. |
 | 100 | Dataset canónico (`data/generated`) | `FINALIZADO` | 41 lecturas en 25 sesiones. La última (id 679, 2025-10-01) solo midió movimientos; 20 lecturas de signos maternos tienen FC y SpO₂, por ejemplo la 110: 2025-09-08 17:13 UTC, FC 86, SpO₂ 97, semana 36, verde. |
+
+Hay tres procedencias y no se mezclan: las **lecturas canónicas** del dataset
+(embarazo 100 y el resto de `data/generated`), el **episodio de demostración**
+que agrega el aprovisionamiento (embarazo 130, su dispositivo y su seguimiento)
+y los **registros locales de movimiento** que la paciente crea desde el portal
+(sesiones del embarazo 130, con la constante `MOV_SIMULADO`).
+
+**Limitación de procedencia abierta.** Un registro local sincronizado se guarda
+con `origen_dato = DISPOSITIVO`, igual que una sesión canónica: en la base no
+se distingue de una lectura del dataset. Resolverlo —y sustituir la constante
+por un valor preestablecido— exige decidir el mecanismo de simulación (ver la
+sección siguiente) y no se hizo en SCRUM-72.
 
 Los datos no se trasladan de un embarazo a otro. `tests/test_gestante_dataset.py`
 regenera el dataset con su semilla y comprueba que la ruta de monitoreo
@@ -1790,18 +1802,36 @@ muestra la interfaz (`node --test`, sin dependencias; lo lanza también
 
 ### Revisar la interfaz
 
-Con PostgreSQL, la API central y el portal en marcha (ver las secciones
-anteriores), iniciar sesión con la cuenta de demostración (su correo lo
-imprime `python scripts/provisionar_demo.py verificar`) y comprobar:
+El entorno local de revisión usa el PostgreSQL de Docker Compose
+(`tesis-bi-prenatal-db-1`, `127.0.0.1:5433`) y la base `scrum72_demo_gestante`.
+La API y el portal se ejecutan con el entorno virtual del worktree; su `.env`
+(no versionado) define `DATABASE_URL` con el rol restringido `fetalalert_api`,
+`JWT_SECRET_KEY` y `GESTANTE_API_BASE_URL=http://127.0.0.1:8010`:
 
-1. **Inicio** muestra el embarazo en curso y la fecha de la última lectura;
-   con una sesión simulada registrada, movimientos 12 y FC/SpO₂ «—».
+```powershell
+cd backend; ..\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8010
+.venv\Scripts\python.exe scripts\gestante_web.py   # desde la raíz; http://127.0.0.1:8100
+```
+
+En Windows, la URL de la base debe usar `127.0.0.1` y no `localhost`: Docker
+publica el puerto solo en IPv4 y el intento previo por `::1` retrasa cada
+conexión unos 8 segundos.
+
+Iniciar sesión con la cuenta de demostración (`paciente01@example.com`; la
+contraseña es la `PASSWORD_SIMULADA` del generador) y comprobar:
+
+1. **Inicio** muestra el embarazo en curso (inicio 19/03/2026) y la fecha de
+   la última lectura. Si esa lectura es un registro local de movimientos, la
+   tarjeta muestra 12 y FC/SpO₂ «—».
 2. **Ver embarazos anteriores en «Mi historial»** abre el embarazo 100 con sus
-   lecturas; la fila del 08/09/2025 a las 12:13 (hora de Panamá; 17:13 UTC)
-   muestra 86 BPM y 97 %.
+   41 lecturas; la fila del 08/09/2025 a las 12:13 (hora de Panamá; 17:13 UTC)
+   muestra 86 BPM, 97 %, semana 36 y semáforo verde.
 3. Volver a **Inicio**: sigue mostrando el embarazo en curso.
-4. **Cerrar sesión**, arriba a la derecha, pide confirmación; «Cancelar» no
-   cierra nada.
+4. **Registrar movimientos / Enviar ahora**: el resumen dice lo que la cola de
+   la cuenta contiene; el envío es manual. Sin conexión, el registro se guarda
+   en el dispositivo y el intento de envío lo conserva para «Reintentar».
+5. **Cerrar sesión**, arriba a la derecha, pide confirmación; «Cancelar» (o
+   Escape) no cierra nada y devuelve el foco al botón.
 
 ## Calidad del proyecto
 
