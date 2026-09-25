@@ -152,6 +152,10 @@
     'Necesitas un embarazo en curso para registrar movimientos.';
   const TEXTO_LISTO_PARA_REGISTRAR =
     'Se guardará primero en este dispositivo.';
+  const TEXTO_CARGANDO_LECTURAS = 'Cargando lecturas…';
+  const TEXTO_SIN_CONEXION_CONTEXTO_CONSERVADO =
+    'Sin conexión con el servidor. Se muestra la última información consultada; ' +
+    'lo que registres se guarda en este dispositivo.';
 
   // =======================================================================
   // Referencias al DOM
@@ -286,12 +290,20 @@
     return momento.toLocaleString();
   }
 
-  /** Solo la fecha, para etiquetas donde la hora no aporta. */
+  /**
+   * Solo la fecha, para etiquetas donde la hora no aporta.
+   *
+   * Una fecha sin hora («2026-03-19») es un día de calendario, no un instante.
+   * `new Date('2026-03-19')` la leería como medianoche UTC y, en Panamá
+   * (UTC−5), la mostraría como el día anterior. Por eso se ancla a la
+   * medianoche local.
+   */
   function fechaCortaLegible(valorIso) {
     if (ausente(valorIso)) {
       return SIN_DATO;
     }
-    const momento = new Date(valorIso);
+    const soloFecha = /^\d{4}-\d{2}-\d{2}$/.test(valorIso);
+    const momento = new Date(soloFecha ? valorIso + 'T00:00:00' : valorIso);
     if (Number.isNaN(momento.getTime())) {
       return SIN_DATO;
     }
@@ -821,7 +833,7 @@
   }
 
   function estadoDeMetrica(valor) {
-    return ausente(valor) ? 'No medido en esta lectura' : 'Medido en esta lectura';
+    return ausente(valor) ? 'No registrado en esta lectura' : 'Registrado en esta lectura';
   }
 
   /**
@@ -953,7 +965,7 @@
     resumen.className = 'texto-apoyo';
     resumen.textContent =
       (lecturas.length === 1 ? '1 lectura' : lecturas.length + ' lecturas') +
-      ', de la más reciente a la más antigua. «—» indica un valor no medido.';
+      ', de la más reciente a la más antigua. «—» indica un valor no registrado.';
     tarjeta.appendChild(resumen);
 
     const tabla = document.createElement('table');
@@ -1074,6 +1086,21 @@
 
       if (clasificacion.clase === CLASE.SESION_LOCAL_INVALIDA) {
         mostrarLogin();
+        return;
+      }
+
+      if (clasificacion.clase === CLASE.NO_DISPONIBLE && episodios !== null) {
+        // Sin conexión (o con reautenticación pendiente) no cambia nada de lo
+        // que ya se sabía en esta sesión: el embarazo en curso sigue siendo el
+        // mismo, y la última lectura mostrada lleva su propia fecha. Se avisa
+        // y se conserva el contexto, para que el registro local --que el
+        // adaptador admite sin conexión-- siga disponible.
+        mostrarNota(
+          ui.notaEmbarazo,
+          clasificacion.motivo === MOTIVO.SIN_CONEXION
+            ? TEXTO_SIN_CONEXION_CONTEXTO_CONSERVADO
+            : avisoDe(clasificacion)
+        );
         return;
       }
 
@@ -1331,6 +1358,7 @@
       idHistorial = anteriores[0].id_embarazo;
       ui.selectorEmbarazo.value = String(idHistorial);
       ui.historialLista.innerHTML = '';
+      mostrarHistorialVacio(TEXTO_CARGANDO_LECTURAS);
       cargarHistorial();
     }
     mostrarVista('historial');
@@ -1376,6 +1404,7 @@
       // Se vacía antes de pedir, para que no quede a la vista ni una fila del
       // episodio anterior mientras llega la respuesta. Inicio no se toca.
       ui.historialLista.innerHTML = '';
+      mostrarHistorialVacio(TEXTO_CARGANDO_LECTURAS);
       cargarHistorial();
     });
   }

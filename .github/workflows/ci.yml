@@ -95,6 +95,15 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      # Comportamiento de la interfaz de la gestante (SCRUM-72): el app.js real
+      # sobre un DOM mínimo, con node --test y sin dependencias. Usa el Node que
+      # ya trae la imagen ubuntu-latest; si faltara, este paso falla en lugar de
+      # omitirse, y el envoltorio de pytest también falla cuando CI=true.
+      - name: Pruebas de comportamiento de la interfaz (Node)
+        run: |
+          node --version
+          node --test frontend/gestante/pruebas/*.test.js
+
       # Primera capa: todo lo que no necesita un servidor PostgreSQL
       # (API, modelos, migración renderizada offline, dataset simulado,
       # validación del cargador, contratos Pydantic, capa HTTP del endpoint y
