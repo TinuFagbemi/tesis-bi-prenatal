@@ -643,7 +643,7 @@ jobs:
       # La variable de entorno de cada capa es lo único que evita que su archivo
       # quede omitido, y pytest devuelve 0 aunque se salte todo. Por eso los
       # reportes JUnit se revisan después: un solo <skipped> en cualquiera de
-      # los catorce tumba el job.
+      # los quince tumba el job.
       #
       # El guardián detecta **omisiones**. Los fallos y los errores los detecta
       # el código de salida de pytest, en el step que los produce. Son dos
@@ -792,6 +792,55 @@ jobs:
 
           print("Dataset canonico confirmado desde una conexion nueva.")
           PY
+
+      # Aprovisionamiento de la demostracion de la gestante (SCRUM-72). La suite
+      # escribe filas clinicas --un episodio, su dispositivo y su seguimiento-- y
+      # comprueba fila por fila que el dataset canonico no cambia, asi que corre
+      # sobre una base DESECHABLE propia y nunca sobre la que usan las suites de
+      # SCRUM-98 que vienen despues. Su guarda exige un nombre ``scrum72_*`` y no
+      # se relaja aqui.
+      #
+      # La copia se hace con TEMPLATE justo despues de confirmar la carga: es el
+      # dataset canonico recien cargado, con el esquema, las politicas y los
+      # propietarios del migrador, sin repetir migraciones ni carga. Entre steps
+      # no queda ninguna sesion abierta sobre la plantilla, que es lo que
+      # CREATE DATABASE ... TEMPLATE exige. Solo el superusuario la crea; la
+      # suite, y con ella provisionar_demo.py, escriben como el migrador de CI,
+      # sin SUPERUSER ni BYPASSRLS, bajo la politica de mantenimiento.
+      - name: Pruebas del aprovisionamiento de la demo contra PostgreSQL (SCRUM-72)
+        working-directory: backend
+        env:
+          SCRUM72_PROVISION_TEST_DATABASE_URL: postgresql+psycopg://${{ env.CI_MIGRADOR_USER }}:${{ env.CI_MIGRADOR_PASSWORD }}@localhost:5432/scrum72_provision_tmp
+        run: |
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, text
+
+          motor = create_engine(
+              "postgresql+psycopg://"
+              f"{os.environ['POSTGRES_USER']}:{os.environ['POSTGRES_PASSWORD']}"
+              "@localhost:5432/postgres",
+              isolation_level="AUTOCOMMIT",
+          )
+          plantilla = os.environ["POSTGRES_DB"]
+          with motor.connect() as conexion:
+              conexion.exec_driver_sql("DROP DATABASE IF EXISTS scrum72_provision_tmp")
+              conexion.exec_driver_sql(
+                  f'CREATE DATABASE scrum72_provision_tmp TEMPLATE "{plantilla}"'
+              )
+          motor.dispose()
+
+          copia = create_engine(os.environ["SCRUM72_PROVISION_TEST_DATABASE_URL"])
+          with copia.connect() as conexion:
+              lecturas = conexion.execute(
+                  text("SELECT count(*) FROM operacional.lectura_biometrica")
+              ).scalar_one()
+          copia.dispose()
+          if lecturas != 1180:
+              raise SystemExit(f"::error::la copia desechable no trae el dataset: {lecturas}")
+          print("base desechable scrum72_provision_tmp lista, con el dataset canonico")
+          PY
+          python -m pytest -q -rs tests/test_provisionar_demo_postgresql.py --junitxml=pytest-scrum72-provision.xml
 
       # Aislamiento por filas, conectando como **fetalalert_api**: el mismo rol
       # con el que la API atiende peticiones, no un rol de pruebas con politicas
@@ -955,6 +1004,7 @@ jobs:
               "pytest-scrum98-rls.xml": "SCRUM98_RLS_TEST_DATABASE_URL",
               "pytest-scrum98-http.xml": "SCRUM98_HTTP_TEST_DATABASE_URL",
               "pytest-scrum98-pub.xml": "SCRUM98_PUB_TEST_DATABASE_URL",
+              "pytest-scrum72-provision.xml": "SCRUM72_PROVISION_TEST_DATABASE_URL",
           }
 
           fallo = False
