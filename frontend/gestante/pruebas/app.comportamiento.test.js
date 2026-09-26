@@ -533,7 +533,7 @@ test('paciente30: FC/SpO2 y movimientos de lecturas distintas, cada uno con su f
   ['hr', 'spo2', 'mov'].forEach((p) => {
     assert.equal($(p + '-clasificacion'), undefined, 'sin elemento de clasificación');
     ['-value', '-status', '-fecha', '-semana'].forEach((s) =>
-      assert.doesNotMatch($(p + s).textContent, /Verde|Ámbar|Rojo|Clasificación/));
+      assert.doesNotMatch($(p + s).textContent, /Verde|Amarillo|Ámbar|Rojo|Clasificación/));
   });
   // El semáforo grande es el de UNA lectura, la más reciente, y dice qué midió.
   assert.ok($('semaforo').classList.contains('warning'));
@@ -638,7 +638,7 @@ test('Historial lista las lecturas canónicas con FC y SpO2 aunque la última so
   assert.equal(filas.length, 3);
   // La más reciente primero: la 679, que solo midió movimientos.
   assert.deepEqual(filas[0].slice(1, 5), ['—', '—', '7', '39']);
-  assert.match(filas[0][5], /Ámbar/);
+  assert.match(filas[0][5], /Amarillo/);
   // Y debajo, las de signos maternos con sus unidades.
   assert.deepEqual(filas[1].slice(1, 5), ['95 BPM', '99 %', '—', '36']);
   assert.deepEqual(filas[2].slice(1, 5), ['86 BPM', '97 %', '—', '36']);

@@ -120,18 +120,21 @@ summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--clr-purpl
   border-bottom:3px solid rgba(219,112,147,.25);
 }
 .logo{display:flex;align-items:center;}
+/* El logotipo conserva el tamaño y el degradado de la marca original:
+   blanco lila, morados, rosa y lila claro, con el mismo halo. */
 .header-text h1{
-  font-size:2.3rem;font-weight:700;line-height:1.05;letter-spacing:-.5px;
+  font-size:4.6rem;font-weight:700;line-height:1.1;letter-spacing:-.5px;
   background:linear-gradient(135deg,
              var(--clr-bg-grad-1) 0%,
              var(--clr-bg-grad-2) 20%,
-             var(--clr-purple-1) 45%,
-             var(--clr-purple-2) 65%,
-             var(--clr-count-start) 85%,
+             var(--clr-purple-1) 40%,
+             var(--clr-purple-2) 60%,
+             var(--clr-count-start) 80%,
              var(--clr-purple-4) 100%);
   -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;
+  text-shadow:0 4px 8px rgba(139,92,246,.3);
 }
-.slogan{color:#e2e8f0;font-style:italic;font-size:.95rem;margin-top:.15rem;}
+.slogan{color:#e2e8f0;font-style:italic;font-size:1.3rem;margin-top:.1rem;}
 .welcome-text{color:var(--clr-text-sub);font-size:1.1rem;}
 
 .cabecera-estado{display:flex;flex-direction:column;align-items:flex-end;gap:.5rem;}
@@ -171,8 +174,8 @@ summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--clr-purpl
 .main-menu a{
   display:inline-flex;align-items:center;justify-content:center;
   min-height:42px;padding:.45rem 1.2rem;
-  font-size:.95rem;font-weight:600;color:#e2e8f0;text-decoration:none;
-  background:rgba(255,255,255,.06);
+  font-size:.95rem;font-weight:600;color:#831843;text-decoration:none;
+  background:var(--clr-rosa-suave);
   border:1px solid rgba(255,255,255,.22);cursor:pointer;
   border-radius:9999px;
   transition:background .2s,color .2s,border-color .2s;
@@ -305,8 +308,8 @@ summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--clr-purpl
   display:grid;grid-template-columns:1fr minmax(0,560px);gap:1.5rem;align-items:center;
   margin-bottom:1.5rem;
 }
-.saludo .titulo-vista{text-align:left;font-size:2.6rem;margin-bottom:.2rem;}
-.saludo .texto-apoyo{font-size:1.15rem;}
+.saludo .titulo-vista{text-align:left;font-size:2.95rem;margin-bottom:.2rem;}
+.saludo .texto-apoyo{font-size:1.32rem;}
 
 .embarazo-resumen{padding:1.1rem 1.3rem;}
 .embarazo-titulo{display:flex;align-items:center;gap:.8rem;margin-bottom:.6rem;}
@@ -341,7 +344,7 @@ summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--clr-purpl
 .metrica-cuerpo{min-width:0;}
 .card h2{color:var(--clr-header-grad-3);font-size:1rem;font-weight:700;margin-bottom:.2rem;}
 .value{display:flex;align-items:baseline;gap:.4rem;flex-wrap:wrap;}
-.value span:first-child{font-size:2.5rem;font-weight:800;color:var(--clr-header-grad-1);line-height:1.1;}
+.value span:first-child{font-size:2.67rem;font-weight:800;color:var(--clr-header-grad-1);line-height:1.1;}
 .unit{color:var(--clr-text-sub);font-size:1rem;font-weight:600;}
 .movements-text{color:var(--clr-text-sub);}
 .metrica-estado{
@@ -390,24 +393,33 @@ summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--clr-purpl
 .grafica-cabecera{display:flex;align-items:center;gap:.7rem;margin-bottom:.3rem;}
 .grafica-cabecera .icono-circulo{width:2.4rem;height:2.4rem;}
 .grafica-cabecera h4{font-size:1rem;color:var(--clr-header-grad-1);}
-.grafica-periodo{font-size:.8rem;color:var(--clr-text-sub);margin-bottom:.3rem;}
+/* Resumen sobre cada grafica: tres lineas cortas. */
+.grafica-periodo{font-size:.85rem;color:var(--clr-text-sub);margin:.1rem 0 .5rem;line-height:1.35;}
+.grafica-periodo-nombre{font-weight:700;color:var(--clr-header-grad-2);font-size:.9rem;}
+.grafica-rango{color:var(--clr-text-main);}
+.grafica-conteo strong{font-weight:800;color:var(--clr-header-grad-1);}
 .grafica-lienzo{position:relative;}
 .grafica-svg{display:block;width:100%;height:auto;overflow:visible;}
-.grafica-rejilla{stroke:#e5e7f2;stroke-width:1;}
+.grafica-rejilla{stroke:#e8eaf3;stroke-width:1;}
 .grafica-base{stroke:#c7cbe0;stroke-width:1.2;}
 .grafica-eje{fill:#52607a;font-size:10.5px;font-family:inherit;}
-.grafica-linea{fill:none;stroke-width:2.2;stroke-linejoin:round;stroke-linecap:round;}
-.grafica-marca{stroke:#fff;stroke-width:1.6;}
+.grafica-unidad{fill:#52607a;font-size:10.5px;font-weight:600;font-family:inherit;}
+.grafica-valor{fill:var(--clr-header-grad-1);font-size:11px;font-weight:700;font-family:inherit;pointer-events:none;}
+.grafica-linea{fill:none;stroke-width:2.8;stroke-linejoin:round;stroke-linecap:round;}
+.grafica-area{stroke:none;pointer-events:none;}
+.grafica-marca{stroke:#fff;stroke-width:2;}
 .grafica-zona{fill:transparent;cursor:pointer;}
 .grafica-punto{outline:none;cursor:pointer;}
-.grafica-punto.activa .grafica-marca{r:6;stroke-width:2.5;}
-.grafica-punto.activa .grafica-barra{opacity:1;stroke:#1e1b4b;stroke-width:2;}
+.grafica-punto.activa .grafica-marca{r:6.5;stroke-width:2.5;}
+.grafica-punto.activa .grafica-barra{stroke:#1e1b4b;stroke-width:2;}
 .grafica-punto:focus-visible .grafica-zona{stroke:var(--clr-purple-1);stroke-width:2;}
 .grafica-rosa .grafica-linea{stroke:var(--clr-count-start);}
 .grafica-rosa .grafica-marca{fill:var(--clr-count-start);}
+.grafica-rosa .grafica-tono{stop-color:var(--clr-count-start);}
 .grafica-morada .grafica-linea{stroke:#6d5ce8;}
 .grafica-morada .grafica-marca{fill:#6d5ce8;}
-.grafica-barra{fill:var(--clr-purple-3);opacity:.85;}
+.grafica-morada .grafica-tono{stop-color:#6d5ce8;}
+.grafica-lila .grafica-tono{stop-color:#b48cf6;}
 .grafica-aviso{
   position:absolute;z-index:2;pointer-events:none;max-width:78%;
   padding:.35rem .6rem;border-radius:8px;background:var(--clr-header-grad-1);color:#fff;
@@ -550,9 +562,15 @@ summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--clr-purpl
   .manual-pasos{grid-template-columns:repeat(2,minmax(0,1fr));}
 }
 
-@media(max-width:1024px){
+/* Con el logotipo a su tamaño, marca, secciones y cuenta ya no caben en
+   una franja: las secciones pasan a una segunda fila. */
+@media(max-width:1440px){
   .cabecera{grid-template-columns:1fr auto;}
   .main-menu{grid-column:1 / -1;grid-row:2;justify-content:flex-start;}
+}
+
+@media(max-width:1024px){
+  .header-text h1{font-size:3.8rem;}
   .cards,.graficas{grid-template-columns:1fr;}
   .metrica{align-items:center;}
   .values-grid{grid-template-columns:repeat(2,minmax(0,1fr));}
@@ -561,9 +579,10 @@ summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--clr-purpl
 @media(max-width:768px){
   main{padding:1.2rem 1rem 2.2rem;}
   .cabecera{padding:.8rem 1rem;gap:.8rem;}
-  .header-text h1{font-size:1.9rem;}
-  .slogan{font-size:.85rem;}
-  .titulo-vista,.saludo .titulo-vista{font-size:1.9rem;}
+  .header-text h1{font-size:3.2rem;}
+  .slogan{font-size:1.1rem;}
+  .titulo-vista{font-size:1.9rem;}
+  .saludo .titulo-vista{font-size:2.23rem;}
   .embarazo-datos{grid-template-columns:1fr;}
   .data-row{flex-direction:row;justify-content:space-between;border-left:none;padding:.25rem 0;border-bottom:1px solid var(--clr-borde);}
   .registro-acciones{grid-template-columns:1fr;}
@@ -591,7 +610,9 @@ summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--clr-purpl
   .connection-status{max-width:100%;}
   .main-menu{display:grid;grid-template-columns:1fr 1fr;gap:.5rem;}
   .main-menu a{padding:.45rem .6rem;font-size:.88rem;text-align:center;}
-  .value span:first-child{font-size:2.1rem;}
+  .value span:first-child{font-size:2.27rem;}
+  .header-text h1{font-size:2.7rem;}
+  .slogan{font-size:1rem;}
   .campo-periodo{flex-direction:column;align-items:stretch;}
   .campo-en-linea.campo-periodo{max-width:420px;}
 }

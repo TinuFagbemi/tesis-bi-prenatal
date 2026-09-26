@@ -100,3 +100,30 @@ test('El módulo no clasifica ni pide nada a la red', () => {
     assert.ok(!fuente.includes(prohibido), prohibido);
   }
 });
+
+test('Los valores se escriben sobre las marcas solo si caben TODOS', () => {
+  // Separados: caben todos.
+  assert.equal(G.etiquetasCaben([{ x: 40, valor: 82 }, { x: 90, valor: 85 }, { x: 140, valor: 88 }]), true);
+  // Dos lecturas a minutos de distancia quedan casi en la misma x: ninguna
+  // lleva su valor, en lugar de escribir unas sí y otras no.
+  assert.equal(G.etiquetasCaben([{ x: 40, valor: 82 }, { x: 41, valor: 85 }, { x: 140, valor: 88 }]), false);
+  // Uno solo, o ninguno, siempre cabe.
+  assert.equal(G.etiquetasCaben([{ x: 40, valor: 12 }]), true);
+  assert.equal(G.etiquetasCaben([]), true);
+});
+
+test('Las barras son anchas pero nunca se tapan: solo se estrechan las cercanas', () => {
+  const separadas = G.modelo(G.normalizar([punto(0, 8), punto(10, 12), punto(20, 15)]), 'barras');
+  assert.ok(separadas.puntos.every((p) => p.ancho === 26), JSON.stringify(separadas.puntos.map((p) => p.ancho)));
+  // Veinte registros, dos de ellos a un día: las demás conservan el ancho común.
+  const dias = [0, 1, ...Array.from({ length: 18 }, (_, i) => 8 + i * 7)];
+  const m = G.modelo(G.normalizar(dias.map((d) => punto(d, 10))), 'barras');
+  assert.equal(m.puntos.length, 20, 'una barra por registro, sin sumar');
+  for (let i = 1; i < m.puntos.length; i += 1) {
+    const a = m.puntos[i - 1];
+    const b = m.puntos[i];
+    assert.ok(a.x + a.ancho / 2 <= b.x - b.ancho / 2, `las barras ${i - 1} y ${i} se tapan`);
+  }
+  assert.ok(m.puntos[0].ancho < m.anchoBarra, 'la pareja cercana se estrecha');
+  assert.ok(m.puntos.slice(3).every((p) => p.ancho === m.anchoBarra), 'las demás no');
+});

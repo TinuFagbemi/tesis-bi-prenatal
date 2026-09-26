@@ -37,8 +37,16 @@
   // Cerca del ancho real de una tarjeta, para que el texto del eje no se
   // encoja al escalar.
   const ANCHO = 360;
-  const ALTO = 210;
-  const MARGEN = { arriba: 12, derecha: 10, abajo: 28, izquierda: 34 };
+  const ALTO = 220;
+  // Arriba, sitio para el valor escrito sobre cada marca; a la izquierda,
+  // para los números del eje y la unidad en vertical.
+  const MARGEN = { arriba: 24, derecha: 12, abajo: 28, izquierda: 48 };
+
+  // Tamaño de las marcas: puntos visibles con borde blanco y barras anchas,
+  // acotadas por la separación real entre registros.
+  const RADIO_PUNTO = 4.5;
+  const ANCHO_BARRA_MAX = 26;
+  const ANCHO_BARRA_MIN = 4;
 
   const PERIODOS = {
     todo: 'Todo el embarazo',
@@ -137,7 +145,7 @@
     const t0 = puntos[0].instante;
     const t1 = puntos[puntos.length - 1].instante;
     // Las barras necesitan medio ancho de margen a cada lado.
-    const holguraX = barras ? 10 : 6;
+    const holguraX = barras ? ANCHO_BARRA_MAX / 2 + 4 : 10;
     const escalaX = function (t) {
       if (t1 === t0) {
         return (area.x0 + area.x1) / 2;
@@ -156,16 +164,18 @@
       }
     }
 
-    // Ancho de barra: el hueco mínimo entre registros, acotado, para que dos
-    // registros cercanos no se tapen.
-    let anchoBarra = 14;
-    if (barras && puntos.length > 1) {
+    // Ancho de barra: uno común según cuántos registros hay, y solo las
+    // barras de registros muy cercanos se estrechan hasta no tocarse con su
+    // vecina. Así una pareja cercana no adelgaza todas las demás.
+    const xs = puntos.map(function (p) { return escalaX(p.instante); });
+    const anchoBarra = Math.max(ANCHO_BARRA_MIN,
+      Math.min(ANCHO_BARRA_MAX, (0.7 * (area.x1 - area.x0 - 2 * holguraX)) / puntos.length));
+    const anchoDe = function (i) {
       let hueco = Infinity;
-      for (let i = 1; i < puntos.length; i += 1) {
-        hueco = Math.min(hueco, escalaX(puntos[i].instante) - escalaX(puntos[i - 1].instante));
-      }
-      anchoBarra = Math.max(3, Math.min(14, hueco * 0.8));
-    }
+      if (i > 0) hueco = Math.min(hueco, xs[i] - xs[i - 1]);
+      if (i < xs.length - 1) hueco = Math.min(hueco, xs[i + 1] - xs[i]);
+      return Math.max(2, Math.min(anchoBarra, hueco * 0.85));
+    };
 
     return {
       vacio: false,
@@ -174,10 +184,34 @@
       anchoBarra: anchoBarra,
       marcasY: marcasY.map(function (v) { return { valor: v, y: escalaY(v) }; }),
       marcasX: marcasX,
-      puntos: puntos.map(function (p) {
-        return { x: escalaX(p.instante), y: escalaY(p.valor), base: escalaY(yMin), dato: p };
+      puntos: puntos.map(function (p, i) {
+        return { x: xs[i], y: escalaY(p.valor), base: escalaY(yMin), ancho: barras ? anchoDe(i) : 0, dato: p };
       })
     };
+  }
+
+  /** El valor tal como se escribe sobre su marca: «83», «97,5». */
+  function textoCorto(valor) {
+    return String(valor).replace('.', ',');
+  }
+
+  /**
+   * ¿Caben los valores escritos sobre TODAS las marcas sin encimarse?
+   *
+   * Todo o nada: escribir el valor solo en algunas marcas haría pensar que
+   * esas son distintas. Si no caben todos, el valor se consulta tocando la
+   * marca o en la tabla. `marcas` es [{x, valor}] en orden, en unidades del
+   * viewBox; el ancho de cada texto se estima con el cuerpo de la etiqueta.
+   */
+  function etiquetasCaben(marcas) {
+    const ancho = function (v) { return textoCorto(v).length * 6.6 + 4; };
+    for (let i = 1; i < marcas.length; i += 1) {
+      const separacion = marcas[i].x - marcas[i - 1].x;
+      if (separacion < (ancho(marcas[i].valor) + ancho(marcas[i - 1].valor)) / 2 + 2) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /**
@@ -237,6 +271,28 @@
     return nodo;
   }
 
+  // Identificadores únicos de los degradados: puede haber varias gráficas
+  // en la misma página.
+  let secuencia = 0;
+
+  /** Una barra con las esquinas superiores redondeadas. */
+  function trazoBarra(x, y, ancho, alto) {
+    const r = Math.min(6, ancho / 2, alto);
+    return 'M' + x + ',' + (y + alto) +
+      ' L' + x + ',' + (y + r) +
+      ' Q' + x + ',' + y + ' ' + (x + r) + ',' + y +
+      ' L' + (x + ancho - r) + ',' + y +
+      ' Q' + (x + ancho) + ',' + y + ' ' + (x + ancho) + ',' + (y + r) +
+      ' L' + (x + ancho) + ',' + (y + alto) + ' Z';
+  }
+
+  /** Un degradado vertical del color de la serie, de `arriba` a `abajo` de opacidad. */
+  function degradado(defs, id, arriba, abajo) {
+    const g = el('linearGradient', { id: id, x1: 0, y1: 0, x2: 0, y2: 1 }, defs);
+    el('stop', { offset: '0%', 'stop-opacity': arriba, class: 'grafica-tono' }, g);
+    el('stop', { offset: '100%', 'stop-opacity': abajo, class: 'grafica-tono' }, g);
+  }
+
   function vaciar(nodo) {
     while (nodo.firstChild) {
       nodo.removeChild(nodo.firstChild);
@@ -261,20 +317,26 @@
     const puntos = filtrarPorPeriodo(normalizar(config.puntos), periodo);
     const m = modelo(puntos, config.tipo);
 
-    const resumen = html('p', 'grafica-periodo');
     if (m.vacio) {
-      resumen.textContent = 'Sin registros de esta medición en este embarazo.';
-      contenedor.appendChild(resumen);
+      contenedor.appendChild(html('p', 'grafica-periodo', 'Sin registros de esta medición en este embarazo.'));
       return;
     }
     const primero = puntos[0];
     const ultimo = puntos[puntos.length - 1];
-    resumen.textContent =
-      PERIODOS[periodo] + ': ' +
-      (m.unico ? primero.textoFechaCorta : primero.textoFechaCorta + ' – ' + ultimo.textoFechaCorta) +
-      ' · ' + (puntos.length === 1 ? '1 registro' : puntos.length + ' registros') +
-      ' · ' + config.unidad;
+    const rango = m.unico ? primero.textoFechaCorta : primero.textoFechaCorta + ' – ' + ultimo.textoFechaCorta;
+    const cuantos = puntos.length === 1 ? '1 registro' : puntos.length + ' registros';
+
+    // Tres líneas cortas en lugar de una frase larga: el período en negrita,
+    // las fechas que abarca y cuántos registros hay.
+    const resumen = html('div', 'grafica-periodo');
+    resumen.appendChild(html('p', 'grafica-periodo-nombre', PERIODOS[periodo]));
+    resumen.appendChild(html('p', 'grafica-rango', rango));
+    const conteo = html('p', 'grafica-conteo');
+    conteo.appendChild(html('strong', null, String(puntos.length)));
+    conteo.appendChild(document.createTextNode(puntos.length === 1 ? ' registro' : ' registros'));
+    resumen.appendChild(conteo);
     contenedor.appendChild(resumen);
+    const descripcion = PERIODOS[periodo] + ': ' + rango + ' · ' + cuantos + ' · ' + config.unidad;
 
     const lienzo = html('div', 'grafica-lienzo');
     contenedor.appendChild(lienzo);
@@ -283,9 +345,25 @@
       viewBox: '0 0 ' + ANCHO + ' ' + ALTO,
       class: 'grafica-svg ' + (config.clase || ''),
       role: 'group',
-      'aria-label': config.titulo + ', ' + resumen.textContent +
+      'aria-label': config.titulo + ', ' + descripcion +
         '. Usa las flechas para recorrer los registros.'
     }, lienzo);
+    const barras = config.tipo === 'barras';
+    secuencia += 1;
+    const idTono = 'grafica-tono-' + secuencia;
+    const defs = el('defs', {}, svg);
+    if (barras) {
+      degradado(defs, idTono, 1, 0.6);
+    } else {
+      degradado(defs, idTono, 0.22, 0);
+    }
+
+    // La unidad, en vertical junto al eje de valores.
+    const unidad = el('text', {
+      class: 'grafica-unidad', 'text-anchor': 'middle',
+      transform: 'translate(11 ' + ((m.area.y0 + m.area.y1) / 2) + ') rotate(-90)'
+    }, svg);
+    unidad.textContent = config.unidad;
 
     // Rejilla y eje de valores.
     m.marcasY.forEach(function (marca) {
@@ -301,8 +379,19 @@
       texto.textContent = config.formatoEje(marca.instante);
     });
 
-    // Línea: segmentos rectos entre observaciones consecutivas.
-    if (config.tipo !== 'barras' && m.puntos.length > 1) {
+    // Línea: segmentos rectos entre observaciones consecutivas, con un
+    // relleno suave debajo que sigue exactamente la misma línea: no añade
+    // puntos ni suaviza.
+    if (!barras && m.puntos.length > 1) {
+      const primeroX = m.puntos[0].x.toFixed(1);
+      const ultimoX = m.puntos[m.puntos.length - 1].x.toFixed(1);
+      el('path', {
+        class: 'grafica-area',
+        fill: 'url(#' + idTono + ')',
+        d: 'M' + primeroX + ',' + m.area.y1 + ' ' +
+          m.puntos.map(function (p) { return 'L' + p.x.toFixed(1) + ',' + p.y.toFixed(1); }).join(' ') +
+          ' L' + ultimoX + ',' + m.area.y1 + ' Z'
+      }, svg);
       el('polyline', {
         class: 'grafica-linea',
         points: m.puntos.map(function (p) { return p.x.toFixed(1) + ',' + p.y.toFixed(1); }).join(' ')
@@ -315,6 +404,7 @@
     aviso.hidden = true;
     lienzo.appendChild(aviso);
 
+    const conValores = etiquetasCaben(m.puntos.map(function (p) { return { x: p.x, valor: p.dato.valor }; }));
     const marcas = m.puntos.map(function (p, i) {
       const grupo = el('g', {
         class: 'grafica-punto',
@@ -323,20 +413,26 @@
         'aria-label': p.dato.textoFecha + ': ' + p.dato.textoValor +
           (p.dato.semana === null || p.dato.semana === undefined ? '' : ', semana ' + p.dato.semana)
       }, svg);
-      if (config.tipo === 'barras') {
-        el('rect', {
+      if (barras) {
+        const alto = Math.max(1.5, p.base - p.y);
+        el('path', {
           class: 'grafica-barra',
-          x: p.x - m.anchoBarra / 2,
-          y: Math.min(p.y, p.base - 1.5),
-          width: m.anchoBarra,
-          height: Math.max(1.5, p.base - p.y),
-          rx: Math.min(4, m.anchoBarra / 3)
+          fill: 'url(#' + idTono + ')',
+          d: trazoBarra(p.x - p.ancho / 2, p.base - alto, p.ancho, alto)
         }, grupo);
       } else {
-        el('circle', { class: 'grafica-marca', cx: p.x, cy: p.y, r: 3.5 }, grupo);
+        el('circle', { class: 'grafica-marca', cx: p.x, cy: p.y, r: RADIO_PUNTO }, grupo);
+      }
+      if (conValores) {
+        const valor = el('text', {
+          class: 'grafica-valor', 'text-anchor': 'middle', x: p.x,
+          y: (barras ? Math.min(p.y, p.base - 1.5) : p.y) - 8,
+          'aria-hidden': 'true'
+        }, grupo);
+        valor.textContent = textoCorto(p.dato.valor);
       }
       // Zona táctil amplia e invisible.
-      el('circle', { class: 'grafica-zona', cx: p.x, cy: config.tipo === 'barras' ? (p.y + p.base) / 2 : p.y, r: 11 }, grupo);
+      el('circle', { class: 'grafica-zona', cx: p.x, cy: barras ? (p.y + p.base) / 2 : p.y, r: 11 }, grupo);
       return grupo;
     });
 
@@ -383,7 +479,7 @@
     const cercanas = puntos.some(function (p, i) {
       return i !== 0 && p.instante - puntos[i - 1].instante < 60 * 60 * 1000;
     });
-    if (cercanas && config.tipo !== 'barras') {
+    if (cercanas && !barras) {
       contenedor.appendChild(html('p', 'grafica-nota',
         'Las lecturas tomadas con minutos de diferencia aparecen casi en la misma fecha.'));
     }
@@ -391,7 +487,7 @@
     if (m.unico) {
       contenedor.appendChild(html('p', 'grafica-nota',
         'Solo hay un registro en este período: se muestra como ' +
-        (config.tipo === 'barras' ? 'una barra' : 'un punto') + ', sin línea.'));
+        (barras ? 'una barra' : 'un punto') + ', sin línea.'));
     }
 
     // Alternativa textual: los mismos registros, en tabla.
@@ -434,6 +530,7 @@
     normalizar: normalizar,
     filtrarPorPeriodo: filtrarPorPeriodo,
     marcasDeValor: marcasDeValor,
+    etiquetasCaben: etiquetasCaben,
     modelo: modelo,
     dibujar: dibujar
   };

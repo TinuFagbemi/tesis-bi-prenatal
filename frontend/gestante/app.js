@@ -216,7 +216,7 @@
   // Nombre legible del mismo codigo, para la tabla del historial.
   const ETIQUETAS_DE_SEMAFORO = {
     OK: 'Verde',
-    WARNING: 'Ámbar',
+    WARNING: 'Amarillo',
     ERROR: 'Rojo'
   };
 
