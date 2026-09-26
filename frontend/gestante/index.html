@@ -140,7 +140,7 @@
 
         <p class="texto-ayuda">
           ¿No puedes entrar? Comunícate con el personal que gestiona tu
-          seguimiento. Aquí no se crean cuentas ni se recuperan contraseñas.
+          seguimiento.
         </p>
       </div>
     </section>
@@ -173,10 +173,20 @@
               <dd class="value" id="embarazo-inicio">No disponible</dd>
             </div>
             <div class="data-row">
+              <dt class="label">Fecha probable de parto</dt>
+              <dd class="value" id="embarazo-fpp">No disponible</dd>
+            </div>
+            <div class="data-row">
               <dt class="label" id="embarazo-semana-etiqueta">Semana actual</dt>
               <dd class="value" id="embarazo-semana">No disponible</dd>
             </div>
           </dl>
+          <!-- Solo cuando la fecha probable de parto registrada ya pasó: el
+               episodio se muestra como un registro histórico, sin cambiar su
+               estado ni sus fechas. -->
+          <p class="embarazo-historico" id="embarazo-historico" hidden>
+            Registro histórico: la fecha probable de parto ya pasó.
+          </p>
           <p class="nota-pendiente" id="nota-embarazo" hidden></p>
           <div class="embarazo-anteriores">
             <span>Embarazos anteriores: <strong id="embarazo-anteriores">No disponible</strong></span>
@@ -505,10 +515,6 @@
     <section id="vista-acerca" class="vista" hidden>
       <div class="hero-about tarjeta">
         <h2>Acerca de FetalAlert</h2>
-        <p>
-          FetalAlert es un proyecto académico de seguimiento prenatal pensado
-          para lugares donde la conexión a internet no siempre está disponible.
-        </p>
       </div>
 
       <div class="values-grid">

@@ -264,6 +264,8 @@
 
     embarazoEstado: document.getElementById('embarazo-estado'),
     embarazoInicio: document.getElementById('embarazo-inicio'),
+    embarazoFpp: document.getElementById('embarazo-fpp'),
+    embarazoHistorico: document.getElementById('embarazo-historico'),
     embarazoSemana: document.getElementById('embarazo-semana'),
     embarazoSemanaEtiqueta: document.getElementById('embarazo-semana-etiqueta'),
     embarazoAnteriores: document.getElementById('embarazo-anteriores'),
@@ -604,6 +606,8 @@
 
     ui.embarazoEstado.textContent = NO_DISPONIBLE;
     ui.embarazoInicio.textContent = NO_DISPONIBLE;
+    ui.embarazoFpp.textContent = NO_DISPONIBLE;
+    ui.embarazoHistorico.hidden = true;
     ui.embarazoSemanaEtiqueta.textContent = 'Semana actual';
     ui.embarazoSemana.textContent = NO_DISPONIBLE;
     ui.embarazoAnteriores.textContent = NO_DISPONIBLE;
@@ -1074,6 +1078,17 @@
    * sus episodios en «Mi historial», pero la interfaz no afirma cuál está en
    * curso, porque el dato no permite decidirlo.
    */
+  /**
+   * ¿La fecha de calendario `fecha` (AAAA-MM-DD) es anterior a `hoy`?
+   *
+   * Compara fechas, no magnitudes clínicas: en formato ISO el orden del texto
+   * es el orden del calendario. Es la única comparación de este tipo del
+   * archivo y la prueba de «sin umbrales» la admite por su texto literal.
+   */
+  function fechaYaPaso(fecha, hoy) {
+    return String(fecha) < String(hoy);
+  }
+
   function pintarEpisodios(datos) {
     const inicioAnterior = idInicio;
     episodios = datos;
@@ -1130,6 +1145,17 @@
     }
 
     mostrarNota(ui.notaEmbarazo, nota);
+
+    // Fecha probable de parto del embarazo de Inicio, tal como está
+    // registrada. Si ya pasó (comparada con `hoy` del adaptador, ambas fechas
+    // de calendario), el episodio se presenta como registro histórico: no se
+    // cambia su estado ni se deduce que terminó.
+    const actual = !datos.ambiguo && datos.actual ? datos.actual : null;
+    ui.embarazoFpp.textContent = actual && !ausente(actual.fecha_probable_parto)
+      ? fechaCortaLegible(actual.fecha_probable_parto)
+      : NO_DISPONIBLE;
+    ui.embarazoHistorico.hidden = !(actual && !ausente(actual.fecha_probable_parto) &&
+      !ausente(datos.hoy) && fechaYaPaso(actual.fecha_probable_parto, datos.hoy));
 
     // El enlace lleva a los episodios que no son el de Inicio.
     const hayOtros = datos.ambiguo ? todos.length !== 0 : anteriores.length !== 0;
@@ -1194,6 +1220,8 @@
 
     ui.embarazoEstado.textContent = NO_DISPONIBLE;
     ui.embarazoInicio.textContent = NO_DISPONIBLE;
+    ui.embarazoFpp.textContent = NO_DISPONIBLE;
+    ui.embarazoHistorico.hidden = true;
     ui.embarazoSemana.textContent = NO_DISPONIBLE;
     ui.embarazoAnteriores.textContent = NO_DISPONIBLE;
     mostrarNota(ui.notaEmbarazo, aviso);
