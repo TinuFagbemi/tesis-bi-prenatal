@@ -30,6 +30,11 @@ Estado al 2026-09-25. Continúa `docs/scrum72_etapa1_resumen.md`. SCRUM-72
   fecha ya pasó (paciente30, 1 jul 2026) aparece «Registro histórico: la
   fecha probable de parto ya pasó.», sin cambiar el estado ni las fechas del
   dataset.
+- **Botón de registro**: `/adaptador/embarazos` publica
+  `registro_en_este_dispositivo` (la misma comprobación `Provision.sirve_a`
+  que hace el registro). Si es falso, el botón queda deshabilitado con
+  «Este dispositivo no está configurado para registrar sesiones de este
+  embarazo.». En la demo solo `paciente01` (embarazo 130) puede registrar.
 - **Historial**: resumen con el número de lecturas del episodio, las tres
   gráficas (cada una con su número de registros) y la tabla completa en un
   desplegable.

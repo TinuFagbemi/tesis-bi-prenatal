@@ -492,6 +492,39 @@ def test_otra_cuenta_no_puede_usar_el_aprovisionamiento_de_esta(tmp_path):
     assert respuesta.status_code == 404
 
 
+def _registro_en_este_dispositivo(cliente) -> bool:
+    respuesta = cliente.get("/adaptador/embarazos")
+    assert respuesta.status_code == 200
+    datos = respuesta.json()["datos"]
+    assert datos["actual"]["id_embarazo"] == ID_EMBARAZO
+    return datos["registro_en_este_dispositivo"]
+
+
+def test_la_lista_dice_si_este_dispositivo_registra_para_el_embarazo_en_curso(tmp_path):
+    """La interfaz ofrece el boton solo si el registro no se va a rechazar."""
+    cliente, _, _, _ = cliente_con_provision(tmp_path)
+
+    assert _registro_en_este_dispositivo(cliente) is True
+
+
+def test_otra_cuenta_ve_que_este_dispositivo_no_registra_para_ella(tmp_path):
+    escribir_provision(tmp_path, id_usuario=ID_USUARIO_DE_PRUEBA + 1)
+    cliente, _, _, _ = construir_cliente(
+        tmp_path,
+        central=central_que_reconoce_el_embarazo(),
+        provision_path=tmp_path / "provision.json",
+    )
+    iniciar_sesion(cliente)
+
+    assert _registro_en_este_dispositivo(cliente) is False
+
+
+def test_sin_aprovisionamiento_la_lista_dice_que_no_se_puede_registrar(tmp_path):
+    cliente = portal(tmp_path, central_que_reconoce_el_embarazo())
+
+    assert _registro_en_este_dispositivo(cliente) is False
+
+
 def test_registrar_un_embarazo_propio_queda_local_y_pendiente(tmp_path):
     central = ClienteClinicoDoble(
         respuesta_embarazos=RespuestaClinica(

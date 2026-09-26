@@ -232,6 +232,8 @@
     'Necesitas un embarazo en curso para registrar movimientos.';
   const TEXTO_LISTO_PARA_REGISTRAR =
     'Se guardará primero en este dispositivo.';
+  const TEXTO_DISPOSITIVO_NO_CONFIGURADO =
+    'Este dispositivo no está configurado para registrar sesiones de este embarazo.';
   const TEXTO_CARGANDO_LECTURAS = 'Cargando lecturas…';
   const TEXTO_BOTON_REGISTRAR = 'Registrar sesión de movimientos';
   const TEXTO_SIN_CONEXION_CONTEXTO_CONSERVADO =
@@ -1208,10 +1210,18 @@
    * episodio registrar nada. La selección de Historial no cuenta.
    */
   function actualizarBotonDeRegistro() {
-    ui.botonRegistrarMovimiento.disabled = idInicio === null;
+    // El adaptador dice si este dispositivo está aprovisionado para el
+    // embarazo en curso de esta cuenta: sin eso, el registro se rechazaría.
+    const configurado = episodios !== null && episodios.registro_en_este_dispositivo === true;
+    ui.botonRegistrarMovimiento.disabled = idInicio === null || !configurado;
     ui.botonRegistrarMovimiento.textContent = TEXTO_BOTON_REGISTRAR;
-    ui.notaMovimientos.textContent =
-      idInicio === null ? TEXTO_SIN_EMBARAZO_EN_CURSO : TEXTO_LISTO_PARA_REGISTRAR;
+    if (idInicio === null) {
+      ui.notaMovimientos.textContent = TEXTO_SIN_EMBARAZO_EN_CURSO;
+    } else if (!configurado) {
+      ui.notaMovimientos.textContent = TEXTO_DISPOSITIVO_NO_CONFIGURADO;
+    } else {
+      ui.notaMovimientos.textContent = TEXTO_LISTO_PARA_REGISTRAR;
+    }
   }
 
   /** Estado neutro de todo lo clínico, con el aviso que corresponda. */

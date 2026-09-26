@@ -870,11 +870,29 @@ def crear_router(contexto: ContextoAdaptador) -> APIRouter:
         ):
             semana_actual = semana_gestacional(actual.fecha_inicio, hoy)
 
+        # Si este dispositivo puede registrar sesiones para el embarazo en
+        # curso de ESTA cuenta: la misma comprobacion que hace el registro
+        # (``Provision.sirve_a``), adelantada para que la interfaz no ofrezca un
+        # boton que el adaptador va a rechazar. Sin aprovisionamiento valido,
+        # o sin un unico embarazo en curso, es ``False``.
+        registro_en_este_dispositivo = False
+        if actual is not None and not episodios.ambiguo:
+            try:
+                aprovisionamiento = provision.cargar(settings.provision_path)
+            except provision.ProvisionInvalida:
+                aprovisionamiento = None
+            registro_en_este_dispositivo = aprovisionamiento is not None and (
+                aprovisionamiento.sirve_a(sesion.id_usuario, actual.id_embarazo)
+            )
+
         return json(
             {
                 "disponible": True,
                 "datos": {
                     "hoy": hoy.date().isoformat(),
+                    # Si el boton de registrar movimientos sirve para el
+                    # embarazo en curso en este dispositivo.
+                    "registro_en_este_dispositivo": registro_en_este_dispositivo,
                     # Semana del embarazo en curso **hoy**, o ``None`` si no hay
                     # episodio en curso o su fecha probable de parto ya pasó.
                     # No es la semana de ninguna lectura: esa viaja con cada
