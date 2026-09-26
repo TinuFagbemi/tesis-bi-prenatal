@@ -1859,8 +1859,18 @@ distingue sin migraciones: tiene su fila en `operacional.idempotencia_solicitud`
 (las sesiones del dataset, cargadas por el cargador, no tienen ninguna), una
 entrada `SESION_MONITOREO_REGISTRADA` en `auditoria_log` con la cuenta que lo
 envió, y el dispositivo que creó `provisionar_demo.py`, que no existe en el
-dataset. Sustituir la constante `MOV_SIMULADO` por un valor preestablecido es
-una decisión pendiente: ver `docs/scrum72_etapa1_resumen.md`.
+dataset. `MOV_SIMULADO` se conserva a propósito como **nueva captura
+simulada** de la demostración: sustituirla por una lectura histórica del
+dataset haría pasar un dato antiguo por una medición nueva.
+
+**Dataset canónico frente a base de demostración.** El dataset de la tesis es
+`data/generated`: 30 embarazos, 732 sesiones y 1180 lecturas. El embarazo 130,
+su dispositivo y las sesiones registradas desde el portal solo existen en las
+bases de demostración (`scrum72_demo_gestante`, `scrum72_prueba_offline`) y no
+deben usarse para estadísticas del dataset, ETL, Power BI ni resultados
+cuantitativos. Esas cifras salen de una base cargada solo con
+`data/generated`, sin ejecutar `provisionar_demo.py`. Detalle y verificación
+en `docs/scrum72_etapa2_resumen.md`.
 
 Los datos no se trasladan de un embarazo a otro. `tests/test_gestante_dataset.py`
 regenera el dataset con su semilla y comprueba que la ruta de monitoreo
