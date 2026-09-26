@@ -1902,7 +1902,7 @@ Dos cuentas (la contraseña de ambas es la `PASSWORD_SIMULADA` del generador):
   gráficas. Inicio muestra FC 83 y SpO₂ 96 del 29 may 2026 03:27 (lectura 549)
   y 7 movimientos del 21 jun 2026 09:56 (lectura 1259), en tarjetas neutrales;
   «Semana en el último registro 39 (21 jun 2026)»; gráficas con 30, 30 y 20
-  registros; y el semáforo Ámbar de la
+  registros; y el semáforo Amarillo de la
   lectura 1259 en su propio bloque.
 
 - `paciente01@example.com`: historial longitudinal y registro de

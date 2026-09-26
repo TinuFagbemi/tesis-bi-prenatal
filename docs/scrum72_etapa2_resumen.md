@@ -20,6 +20,12 @@ Estado al 2026-09-25. Continúa `docs/scrum72_etapa1_resumen.md`. SCRUM-72
   Período «Todo el embarazo» o «Últimos 30 días con registros», contado desde
   el último registro. Detalle con ratón, toque y teclado (flechas, Inicio,
   Fin; un solo punto en el orden de tabulación) y tabla alternativa.
+  Ajuste visual posterior: línea más gruesa con relleno suave debajo, puntos
+  más grandes con borde blanco, barras anchas con esquinas redondeadas (solo
+  se estrechan las de registros muy cercanos, para no taparse) y la unidad
+  en vertical en el eje. El valor se escribe sobre cada marca solo si caben
+  todos; si no, se consulta tocando la marca o en la tabla. El resumen sobre
+  cada gráfica va en tres líneas: período, fechas y número de registros.
 - **Historial**: resumen con el número de lecturas del episodio, las tres
   gráficas (cada una con su número de registros) y la tabla completa en un
   desplegable.
@@ -96,7 +102,7 @@ frontend no tiene constantes de valores clínicos:
 - Movimientos 7: lectura 1259 (21 jun 2026, 09:56, semana 39).
 - «Semana en el último registro 39 (21 jun 2026)»: la FPP ya pasó en el
   calendario real, así que no se presenta una semana actual.
-- Semáforo Ámbar: el de la lectura más reciente (1259).
+- Semáforo Amarillo: el de la lectura más reciente (1259).
 - Gráficas: 30, 30 y 20 registros («Todo el embarazo») y 10, 10 y 5
   («Últimos 30 días con registros»). Cada punto es una lectura de la base, con
   su fecha y su valor: no se inventan, interpolan, acumulan ni sustituyen
