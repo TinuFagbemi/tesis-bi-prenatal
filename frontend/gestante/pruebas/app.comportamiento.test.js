@@ -322,7 +322,9 @@ function embarazos(extra) {
       actual: EMBARAZO_ACTUAL,
       anteriores: [EMBARAZO_ANTERIOR],
       todos: [EMBARAZO_ACTUAL, EMBARAZO_ANTERIOR],
-      ambiguo: false
+      ambiguo: false,
+      // El dispositivo de la demo está aprovisionado para el 130 de esta cuenta.
+      registro_en_este_dispositivo: true
     }, extra || {})
   }];
 }
@@ -481,6 +483,9 @@ test('Semana actual y semana de la lectura son cosas distintas', async () => {
   // Sin fecha probable de parto en el dato: no se inventa ni se marca histórico.
   assert.equal($('embarazo-fpp').textContent, 'No disponible');
   assert.equal($('embarazo-historico').hidden, true);
+  // Dispositivo aprovisionado para este embarazo: el botón está disponible.
+  assert.equal($('btn-registrar-movimientos').disabled, false);
+  assert.equal($('nota-movimientos').textContent, 'Se guardará primero en este dispositivo.');
 });
 
 // Cuenta paciente30@example.com, embarazo 129 (data/generated): su última FC
@@ -504,7 +509,9 @@ function rutasPaciente30(cambios) {
       // Su fecha probable de parto (1/7/2026) ya pasó: el adaptador no
       // publica una semana actual.
       hoy: '2026-09-25', semana_actual: null, actual: EMBARAZO_129,
-      anteriores: [], todos: [EMBARAZO_129], ambiguo: false
+      anteriores: [], todos: [EMBARAZO_129], ambiguo: false,
+      // Este dispositivo no está aprovisionado para el 129.
+      registro_en_este_dispositivo: false
     } }],
     'GET /adaptador/embarazos/129/monitoreo': monitoreo(129, [
       { id_sesion: 1, tipo_sesion: 'SIGNOS_MATERNOS', estado_sesion: 'COMPLETADA',
@@ -553,6 +560,10 @@ test('paciente30: FC/SpO2 y movimientos de lecturas distintas, cada uno con su f
   assert.equal($('embarazo-fpp').textContent, '1 jul 2026');
   assert.equal($('embarazo-historico').hidden, false);
   assert.equal($('embarazo-estado').textContent, 'En curso');
+  // El dispositivo no sirve a este embarazo: el botón no se ofrece activo.
+  assert.equal($('btn-registrar-movimientos').disabled, true);
+  assert.equal($('nota-movimientos').textContent,
+    'Este dispositivo no está configurado para registrar sesiones de este embarazo.');
 });
 
 test('El alcance del semáforo está escrito: es de la lectura completa', () => {
