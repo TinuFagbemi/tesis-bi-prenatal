@@ -313,9 +313,14 @@ summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--clr-purpl
 
 .embarazo-resumen{padding:1.1rem 1.3rem;}
 .embarazo-titulo{display:flex;align-items:center;gap:.8rem;margin-bottom:.6rem;}
-.embarazo-datos{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.4rem;}
+.embarazo-datos{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.6rem .4rem;}
 .data-row{display:flex;flex-direction:column;gap:.15rem;padding:.2rem .7rem;border-left:2px solid var(--clr-borde);}
-.data-row:first-child{border-left:none;padding-left:0;}
+.data-row:nth-child(odd){border-left:none;padding-left:0;}
+.embarazo-historico{
+  margin-top:.7rem;padding:.35rem .8rem;border-radius:10px;
+  background:#f1f5f9;border-left:4px solid var(--clr-header-grad-5);
+  color:var(--clr-header-grad-3);font-size:.92rem;font-weight:600;
+}
 .data-row .label{font-size:.82rem;font-weight:600;color:var(--clr-text-sub);}
 .data-row .value{font-size:1.05rem;font-weight:700;color:var(--clr-header-grad-1);}
 .embarazo-anteriores{

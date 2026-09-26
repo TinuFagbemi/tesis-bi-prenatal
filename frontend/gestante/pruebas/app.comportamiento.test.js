@@ -478,6 +478,9 @@ test('Semana actual y semana de la lectura son cosas distintas', async () => {
   assert.equal($('embarazo-semana-etiqueta').textContent, 'Semana actual');
   assert.equal($('embarazo-semana').textContent, '28');
   assert.equal($('mov-semana').textContent, 'Semana 27 en esa lectura');
+  // Sin fecha probable de parto en el dato: no se inventa ni se marca histórico.
+  assert.equal($('embarazo-fpp').textContent, 'No disponible');
+  assert.equal($('embarazo-historico').hidden, true);
 });
 
 // Cuenta paciente30@example.com, embarazo 129 (data/generated): su última FC
@@ -545,6 +548,11 @@ test('paciente30: FC/SpO2 y movimientos de lecturas distintas, cada uno con su f
   assert.equal($('hr-semana').textContent, 'Semana 36 en esa lectura');
   // El desfase del escenario de demostración no se convierte en un aviso.
   assert.equal($('nota-embarazo').hidden, true);
+  // La fecha probable de parto registrada (1/7/2026) ya pasó: se muestra
+  // como registro histórico, sin cambiar su estado.
+  assert.equal($('embarazo-fpp').textContent, '1 jul 2026');
+  assert.equal($('embarazo-historico').hidden, false);
+  assert.equal($('embarazo-estado').textContent, 'En curso');
 });
 
 test('El alcance del semáforo está escrito: es de la lectura completa', () => {

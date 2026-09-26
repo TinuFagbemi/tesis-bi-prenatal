@@ -26,6 +26,10 @@ Estado al 2026-09-25. Continúa `docs/scrum72_etapa1_resumen.md`. SCRUM-72
   en vertical en el eje. El valor se escribe sobre cada marca solo si caben
   todos; si no, se consulta tocando la marca o en la tabla. El resumen sobre
   cada gráfica va en tres líneas: período, fechas y número de registros.
+- **Embarazo actual**: muestra también la fecha probable de parto. Si esa
+  fecha ya pasó (paciente30, 1 jul 2026) aparece «Registro histórico: la
+  fecha probable de parto ya pasó.», sin cambiar el estado ni las fechas del
+  dataset.
 - **Historial**: resumen con el número de lecturas del episodio, las tres
   gráficas (cada una con su número de registros) y la tabla completa en un
   desplegable.

@@ -138,6 +138,11 @@ def test_el_semaforo_solo_traduce_codigos_a_clases():
     antiguedad = "Date.now() - datosConsultadosEn > ANTIGUEDAD_MAXIMA_DATOS_MS"
     assert contenido.count(antiguedad) == 1
     contenido = contenido.replace(antiguedad, "")
+    # Y la de dos fechas de calendario ISO (¿ya pasó la fecha probable de
+    # parto?), que ordena fechas, no valores clínicos.
+    calendario = "String(fecha) < String(hoy)"
+    assert contenido.count(calendario) == 1
+    contenido = contenido.replace(calendario, "")
     assert " < " not in contenido.replace("for (", "")
     assert " > " not in contenido.replace("=>", "").replace("->", "")
 
