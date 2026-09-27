@@ -45,7 +45,7 @@ from tests.test_models import ONDELETE_ESPERADOS, TABLAS_ESPERADAS
 # SCRUM-69 adds the third, the analytic schema, which touches nothing here.
 # SCRUM-97 adds the fourth: ck_usuario_email_canonico and the role/link
 # triggers, on tables that already existed.
-CANTIDAD_DE_REVISIONES_ESPERADA = 5
+CANTIDAD_DE_REVISIONES_ESPERADA = 6
 
 # Shape of the deployed schema, pinned so a silent drift in either the models or
 # the revisions fails here. UNIQUE went from 18 to 17 when the 1:1 between
@@ -234,13 +234,30 @@ def sql_downgrade() -> str:
     return _solo_operacional(_renderizar("downgrade"))
 
 
+def _es_relleno_de_una_columna_analitica(sentencia: str) -> bool:
+    """Un ``UPDATE analitico.<tabla> ... FROM operacional.<tabla>``, y nada más.
+
+    SCRUM-99 añadió ``dim_paciente.email_pac`` y ``dim_embarazo.id_clinica`` a un
+    modelo estrella que ya tenía filas, y la única forma de dejarlas NOT NULL es
+    rellenarlas desde el origen antes de endurecerlas. Esa sentencia nombra los
+    dos esquemas, como ya lo hacen las vistas de ``publicacion``, y por la misma
+    razón no rompe la partición: **lee** del operacional una vez, no lo modifica
+    y no crea ninguna referencia entre tablas. La propiedad que esta partición
+    protege -- que ninguna tabla analítica referencie una operacional -- la
+    comprueban ``test_el_unico_cruce_de_esquema_es_el_del_mapa_de_seudonimos`` y
+    ``test_llaves_foraneas_quedan_dentro_del_esquema_analitico``.
+    """
+    normalizada = " ".join(sentencia.split()).upper()
+    return normalizada.startswith(f"UPDATE {ESQUEMA_ANALITICO.upper()}.")
+
+
 @pytest.mark.parametrize("direccion", ["upgrade", "downgrade"])
 def test_solo_se_apartan_sentencias_del_esquema_analitico(direccion):
     """The split must not hide an operational statement from the counts below.
 
-    Everything set aside names the analytic schema and none of it names the
-    operational one -- which also means no analytic table references an
-    operational one.
+    Everything set aside names the analytic schema, and the only ones that may
+    also name the operational one are the backfills of an analytic column: they
+    read from it and change nothing in it.
     """
     apartadas = [
         sentencia
@@ -249,7 +266,37 @@ def test_solo_se_apartan_sentencias_del_esquema_analitico(direccion):
     ]
 
     assert apartadas
-    assert all(SCHEMA_OPERACIONAL not in sentencia for sentencia in apartadas)
+
+    nombran_el_operacional = [
+        sentencia for sentencia in apartadas if SCHEMA_OPERACIONAL in sentencia
+    ]
+    assert all(
+        _es_relleno_de_una_columna_analitica(sentencia)
+        for sentencia in nombran_el_operacional
+    ), nombran_el_operacional
+
+
+def test_el_relleno_de_columnas_analiticas_no_escribe_en_el_operacional():
+    """La contrapartida de la excepción de arriba, dicha como aserción.
+
+    Si alguien escribiera un ``UPDATE analitico...`` que además tocara el
+    operacional -- o lo colara como excepción para esconder otra cosa --, aquí se
+    vería: la única mención permitida del operacional es la del ``FROM``.
+    """
+    rellenos = [
+        " ".join(sentencia.split())
+        for sentencia in _sentencias(_renderizar("upgrade"))
+        if _es_del_esquema_analitico(sentencia)
+        and SCHEMA_OPERACIONAL in sentencia
+    ]
+
+    assert rellenos, "ninguna revisión rellena una columna analítica desde el origen"
+    for sentencia in rellenos:
+        assert _es_relleno_de_una_columna_analitica(sentencia)
+        # El operacional aparece detrás de un FROM y en ningún otro sitio.
+        assert sentencia.upper().count(SCHEMA_OPERACIONAL.upper()) == 1
+        posicion = sentencia.upper().index(SCHEMA_OPERACIONAL.upper())
+        assert "FROM" in sentencia.upper()[:posicion]
 
 
 # --------------------------------------------------------------------------

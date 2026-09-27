@@ -284,29 +284,31 @@ CHEQUEOS: tuple[Chequeo, ...] = (
     Chequeo(
         "dim_paciente_distinta_del_origen",
         "Filas de Dim_Paciente que faltan, sobran o difieren de lo que el origen "
-        "determina (cédula, nombre, teléfono principal, nacimiento y clínica).",
+        "determina (cédula, nombre, teléfono principal, correo, nacimiento y "
+        "clínica).",
         _diferencia_de_conjuntos(
             f"SELECT p.id_paciente, (SELECT CASE WHEN count(DISTINCT e.id_clinica) = 1 "
             f"THEN max(e.id_clinica) END FROM {O}.embarazo e "
             f"WHERE e.id_paciente = p.id_paciente), p.cedula, {_nombre('p')}, "
-            f"{_telefono('telefono_paciente', 'id_paciente', 'p')}, p.fecha_nac "
-            f"FROM {O}.paciente p",
+            f"{_telefono('telefono_paciente', 'id_paciente', 'p')}, p.email_pac, "
+            f"p.fecha_nac FROM {O}.paciente p",
             "SELECT id_paciente, id_clinica, cedula, nombre_completo, telefono_pac, "
-            f"fecha_nac FROM {A}.dim_paciente",
+            f"email_pac, fecha_nac FROM {A}.dim_paciente",
         ),
     ),
     Chequeo(
         "dim_embarazo_distinta_del_origen",
-        "Filas de Dim_Embarazo que faltan, sobran o difieren del origen, incluida "
-        "la duración estimada en semanas.",
+        "Filas de Dim_Embarazo que faltan, sobran o difieren del origen, incluidas "
+        "la clínica del episodio y la duración estimada en semanas.",
         _diferencia_de_conjuntos(
-            "SELECT id_embarazo, id_paciente, numero_gestas, numero_partos, "
-            "estado_embarazo, fecha_inicio, fecha_probable_parto, fecha_cierre, "
-            f"(fecha_probable_parto - fecha_inicio) / 7 FROM {O}.embarazo "
+            "SELECT id_embarazo, id_paciente, id_clinica, numero_gestas, "
+            "numero_partos, estado_embarazo, fecha_inicio, fecha_probable_parto, "
+            "fecha_cierre, (fecha_probable_parto - fecha_inicio) / 7 "
+            f"FROM {O}.embarazo "
             "WHERE (fecha_probable_parto - fecha_inicio) % 7 = 0",
-            "SELECT id_embarazo, id_paciente, numero_gestas, numero_partos, "
-            "estado_embarazo, fecha_inicio, fecha_probable_parto, fecha_cierre, "
-            f"duracion_est_semanas FROM {A}.dim_embarazo",
+            "SELECT id_embarazo, id_paciente, id_clinica, numero_gestas, "
+            "numero_partos, estado_embarazo, fecha_inicio, fecha_probable_parto, "
+            f"fecha_cierre, duracion_est_semanas FROM {A}.dim_embarazo",
         ),
     ),
     Chequeo(

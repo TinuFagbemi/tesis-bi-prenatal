@@ -34,6 +34,7 @@ from sqlalchemy.pool import NullPool
 VARIABLE_DE_ENTORNO = "SCRUM98_PUB_TEST_DATABASE_URL"
 ROL_ESPERADO = "fetalalert_powerbi"
 
+# La superficie seudonimizada de SCRUM-98. Ninguna cambia en SCRUM-99.
 VISTAS = (
     "v_embarazo",
     "v_lectura",
@@ -41,24 +42,61 @@ VISTAS = (
     "v_resumen_administrativo",
 )
 
-# Lo que una superficie publicada no puede contener, buscado por nombre de
-# columna en todas las vistas a la vez.
-COLUMNAS_PROHIBIDAS = (
+# La superficie clínica autorizada que SCRUM-99 añade para el tablero médico.
+VISTAS_MEDICAS = (
+    "v_entitlement_paciente_medico",
+    "v_paciente_medico",
+    "v_embarazo_medico",
+    "v_embarazo_factor_riesgo",
+    "v_tiempo_gestacional",
+    "v_semaforo",
+    "v_factor_riesgo",
+)
+
+# El contrato ya no es «exactamente cuatro vistas» sino «exactamente las vistas
+# aprobadas»: la lista crece cuando un ticket la amplía a propósito, y una vista
+# que aparezca sin estar aquí sigue rompiendo la prueba.
+VISTAS_APROBADAS = VISTAS + VISTAS_MEDICAS
+
+# La única superficie que puede llevar PII de una persona, y exactamente qué
+# columnas. Es una lista blanca: añadir una columna a la vista sin añadirla aquí
+# rompe la prueba, que es justo lo que se quiere de una superficie con cédulas.
+VISTA_CON_PII = "v_paciente_medico"
+PII_APROBADA_DEL_MEDICO = frozenset(
+    {
+        "seudonimo_paciente",
+        "paciente_display",
+        "nombre_completo",
+        "cedula",
+        "telefono_pac",
+        "email_pac",
+        "fecha_nac",
+    }
+)
+
+# Datos de una persona. Prohibidos en todas las superficies **salvo** en la
+# clínica autorizada, donde SCRUM-99 los aprueba con una razón funcional: el
+# nombre no identifica y el médico tiene que saber a quién atiende.
+PII_DE_PERSONA = (
     "cedula",
     "nombre",
     "nombre_completo",
+    "paciente_display",
     "apellido",
     "apellido_paterno",
     "apellido_materno",
     "email_pac",
+    "email_med",
     "telefono",
     "telefono_pac",
     "telefono_med",
     "fecha_nac",
     "direccion",
-    "observaciones",
-    "descripcion",
-    "distrito",
+)
+
+# Claves internas del modelo. Prohibidas en **todas** las superficies, sin
+# excepción: las relaciones de Power BI usan seudónimos y claves de negocio.
+IDENTIFICADORES_OPERACIONALES = (
     "id_paciente",
     "id_embarazo",
     "id_lectura",
@@ -68,6 +106,24 @@ COLUMNAS_PROHIBIDAS = (
     "id_semaforo",
     "id_tiempo_gest",
     "id_tiempo_gestacional",
+    "id_factor_riesgo",
+    "id_usuario",
+)
+
+# Texto libre y cuasi-identificadores de la superficie anónima. ``distrito`` sale
+# de esta lista para ``v_embarazo_medico``: allí es el distrito de la **clínica**,
+# no el domicilio de la paciente, y en una vista que ya publica la cédula no
+# añade riesgo. En las superficies seudonimizadas sigue prohibido.
+TEXTO_LIBRE = ("observaciones", "descripcion")
+CUASI_IDENTIFICADORES_DE_LA_SUPERFICIE_ANONIMA = ("distrito",)
+
+# Compatibilidad con la formulación de SCRUM-98: la unión de todo lo que aquella
+# superficie no podía llevar.
+COLUMNAS_PROHIBIDAS = (
+    *PII_DE_PERSONA,
+    *IDENTIFICADORES_OPERACIONALES,
+    *TEXTO_LIBRE,
+    *CUASI_IDENTIFICADORES_DE_LA_SUPERFICIE_ANONIMA,
 )
 
 MINIMO_DE_CELDA = 5
@@ -278,23 +334,8 @@ def test_ningun_objeto_publicado_concede_nada_a_public(observador):
 # ---------------------------------------------------------------------------
 
 
-def test_power_bi_solo_ve_las_cuatro_vistas_publicadas(powerbi):
-    visibles = {
-        fila["table_name"]
-        for fila in consultar(
-            powerbi,
-            "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema = 'publicacion'",
-        )
-    }
-
-    assert visibles == set(VISTAS)
-
-
-@pytest.mark.parametrize("vista", VISTAS)
-def test_ninguna_vista_publica_pii_ni_identificadores_operacionales(powerbi, vista):
-    """Ni cédulas, ni nombres, ni teléfonos, ni claves internas del modelo."""
-    columnas = {
+def columnas_de(powerbi, vista: str) -> set[str]:
+    return {
         fila["column_name"]
         for fila in consultar(
             powerbi,
@@ -304,10 +345,214 @@ def test_ninguna_vista_publica_pii_ni_identificadores_operacionales(powerbi, vis
         )
     }
 
+
+def test_power_bi_solo_ve_las_vistas_aprobadas(powerbi):
+    """El contrato es la lista de aprobadas, no un número.
+
+    SCRUM-98 fijaba «exactamente cuatro». SCRUM-99 amplía la superficie a
+    propósito, así que el número cambia y la propiedad no: Power BI ve las
+    vistas que un ticket aprobó explícitamente y ninguna más. Una vista nueva
+    que aparezca sin pasar por esta lista sigue rompiendo la prueba.
+    """
+    visibles = {
+        fila["table_name"]
+        for fila in consultar(
+            powerbi,
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'publicacion'",
+        )
+    }
+
+    assert visibles == set(VISTAS_APROBADAS)
+
+
+def test_ninguna_vista_fuera_de_la_lista_concede_nada_a_power_bi(observador):
+    """Y al revés: ningún objeto sin aprobar lleva un grant para la cuenta técnica.
+
+    La prueba anterior mira lo que Power BI *ve*, que es consecuencia de los
+    grants. Esta mira los grants directamente, desde el catálogo: si alguien
+    creara una vista y le concediera SELECT sin añadirla a la lista aprobada,
+    las dos pruebas lo dirían, y esta además diría cuál.
+    """
+    con_privilegio = {
+        fila["table_name"]
+        for fila in consultar(
+            observador,
+            """
+            SELECT table_name
+            FROM information_schema.role_table_grants
+            WHERE table_schema = 'publicacion' AND grantee = 'fetalalert_powerbi'
+            """,
+        )
+    }
+
+    assert con_privilegio == set(VISTAS_APROBADAS)
+
+
+@pytest.mark.parametrize("vista", VISTAS_APROBADAS)
+def test_ninguna_vista_publica_identificadores_operacionales(powerbi, vista):
+    """Las claves internas del modelo no salen por ninguna superficie.
+
+    Sin excepción, tampoco en la clínica: las relaciones de Power BI se hacen
+    con seudónimos y claves de negocio, así que publicar un ``id_paciente`` no
+    habilitaría nada y sí ataría el informe al operacional.
+    """
+    columnas = columnas_de(powerbi, vista)
+
     assert columnas, f"la vista {vista} no expone ninguna columna"
-    assert not columnas & set(COLUMNAS_PROHIBIDAS), sorted(
-        columnas & set(COLUMNAS_PROHIBIDAS)
+    prohibidas = columnas & set(IDENTIFICADORES_OPERACIONALES)
+    assert not prohibidas, sorted(prohibidas)
+
+
+@pytest.mark.parametrize(
+    "vista", [vista for vista in VISTAS_APROBADAS if vista != VISTA_CON_PII]
+)
+def test_solo_la_superficie_clinica_publica_pii_de_persona(powerbi, vista):
+    """Ni cédulas, ni nombres, ni teléfonos, ni correos, ni fechas de nacimiento.
+
+    SCRUM-99 aprueba esa PII **en una sola vista**, y esta prueba es la que
+    impide que se filtre a las demás: la superficie administrativa y las
+    seudonimizadas siguen exactamente igual de cerradas que en SCRUM-98.
+    """
+    columnas = columnas_de(powerbi, vista)
+
+    assert columnas, f"la vista {vista} no expone ninguna columna"
+    prohibidas = columnas & set(PII_DE_PERSONA)
+    assert not prohibidas, sorted(prohibidas)
+
+
+def test_la_superficie_clinica_publica_exactamente_la_pii_aprobada(powerbi):
+    """Lista blanca, no lista negra.
+
+    En una vista que lleva cédulas a propósito, comprobar «no tiene columnas
+    prohibidas» no sirve: lo que hay que fijar es que no tiene ninguna columna
+    que no se haya aprobado una por una. Añadir un campo a la vista sin pasar
+    por ``PII_APROBADA_DEL_MEDICO`` rompe aquí.
+    """
+    assert columnas_de(powerbi, VISTA_CON_PII) == set(PII_APROBADA_DEL_MEDICO)
+
+
+@pytest.mark.parametrize("vista", VISTAS)
+def test_las_superficies_de_scrum98_no_cambiaron_de_postura(powerbi, vista):
+    """Las cuatro de SCRUM-98 siguen sin nada de lo que no podían llevar.
+
+    Incluye ``distrito`` y el texto libre, que en SCRUM-99 dejan de estar
+    prohibidos *globalmente* --``v_embarazo_medico`` publica el distrito de la
+    clínica-- pero siguen prohibidos aquí. Que la superficie clínica se abra no
+    puede abrir de rebote la anónima.
+    """
+    columnas = columnas_de(powerbi, vista)
+
+    assert columnas, f"la vista {vista} no expone ninguna columna"
+    prohibidas = columnas & set(COLUMNAS_PROHIBIDAS)
+    assert not prohibidas, sorted(prohibidas)
+
+
+def test_la_vista_medica_de_embarazo_es_superset_de_la_anterior(powerbi):
+    """Compatibilidad del informe existente, fijada como contrato.
+
+    El tablero de SCRUM-73 ya está construido sobre ``v_embarazo``. Para que
+    migrarlo sea cambiar el origen de una tabla y no rehacer sus visuales,
+    ``v_embarazo_medico`` tiene que publicar **todas** sus columnas con el mismo
+    nombre. Si alguien quitara o renombrara una, el informe se rompería en
+    silencio al refrescar, y es esta prueba la que lo impide.
+    """
+    anteriores = columnas_de(powerbi, "v_embarazo")
+    medicas = columnas_de(powerbi, "v_embarazo_medico")
+
+    assert anteriores
+    faltantes = anteriores - medicas
+    assert not faltantes, sorted(faltantes)
+
+
+def test_las_columnas_heredadas_conservan_su_tipo(powerbi):
+    """Mismo nombre no basta: Power Query rompe igual si cambia el tipo.
+
+    Una medida que promedia ``edad_tramo_inicio`` o un eje que ordena por
+    ``mes_inicio`` dependen del tipo tanto como del nombre.
+    """
+    tipos = {
+        (fila["table_name"], fila["column_name"]): fila["data_type"]
+        for fila in consultar(
+            powerbi,
+            "SELECT table_name, column_name, data_type "
+            "FROM information_schema.columns WHERE table_schema = 'publicacion' "
+            "AND table_name IN ('v_embarazo', 'v_embarazo_medico')",
+        )
+    }
+
+    discrepancias = {
+        columna: (tipos[("v_embarazo", columna)], tipos[("v_embarazo_medico", columna)])
+        for (vista, columna) in tipos
+        if vista == "v_embarazo"
+        and tipos[("v_embarazo", columna)] != tipos.get(("v_embarazo_medico", columna))
+    }
+
+    assert not discrepancias, discrepancias
+
+
+def test_las_columnas_heredadas_dicen_lo_mismo_que_la_vista_anterior(powerbi):
+    """Y el mismo valor, no solo el mismo tipo.
+
+    ``mes_inicio``, ``cerrado`` y ``edad_tramo_inicio`` se recalculan en la vista
+    nueva en lugar de leerse de la anterior. Recalcular es lo correcto --la vista
+    nueva no debe depender de la vieja-- pero abre la puerta a que las dos
+    fórmulas se separen, y entonces el mismo visual daría números distintos según
+    de qué tabla colgara. Se comparan sobre los episodios que ambas publican.
+    """
+    discrepancias = escalar(
+        powerbi,
+        """
+        SELECT count(*)
+        FROM publicacion.v_embarazo a
+        JOIN publicacion.v_embarazo_medico b
+          ON b.seudonimo_embarazo = a.seudonimo_embarazo
+        WHERE (a.seudonimo_paciente, a.estado_embarazo, a.clasificacion_embarazo,
+               a.duracion_est_semanas, a.numero_gestas, a.numero_partos,
+               a.mes_inicio, a.mes_probable_parto, a.cerrado,
+               a.edad_tramo_inicio, a.provincia)
+          IS DISTINCT FROM
+              (b.seudonimo_paciente, b.estado_embarazo, b.clasificacion_embarazo,
+               b.duracion_est_semanas, b.numero_gestas, b.numero_partos,
+               b.mes_inicio, b.mes_probable_parto, b.cerrado,
+               b.edad_tramo_inicio, b.provincia)
+        """,
     )
+
+    assert discrepancias == 0
+
+
+def test_la_vista_medica_solo_publica_los_episodios_autorizados(powerbi):
+    """El superset lo es en columnas, no en filas.
+
+    ``v_embarazo`` publica el universo entero seudonimizado; la médica, solo los
+    episodios con seguimiento vigente. Conservar las columnas no puede haber
+    conservado también el alcance.
+    """
+    del_universo = escalar(powerbi, "SELECT count(*) FROM publicacion.v_embarazo")
+    autorizados = escalar(
+        powerbi, "SELECT count(*) FROM publicacion.v_embarazo_medico"
+    )
+    con_entitlement = escalar(
+        powerbi,
+        "SELECT count(DISTINCT seudonimo_embarazo) "
+        "FROM publicacion.v_entitlement_medico",
+    )
+
+    assert autorizados == con_entitlement
+    assert autorizados <= del_universo
+
+
+@pytest.mark.parametrize("vista", VISTAS_APROBADAS)
+def test_ninguna_superficie_publica_texto_libre(powerbi, vista):
+    """``observaciones`` del puente y las glosas de catálogo se quedan fuera.
+
+    El dataset simulado trae hoy un texto inocuo, y eso no es garantía de nada:
+    el contrato tiene que proteger también a los datasets que vengan después.
+    """
+    columnas = columnas_de(powerbi, vista)
+    prohibidas = columnas & set(TEXTO_LIBRE)
+    assert not prohibidas, sorted(prohibidas)
 
 
 def test_las_fechas_publicadas_estan_generalizadas(powerbi):
@@ -811,23 +1056,32 @@ def dos_episodios_de_una_paciente(observador, medicos):
             text(
                 """
                 INSERT INTO analitico.dim_paciente
-                    (id_paciente, id_clinica, cedula, nombre_completo, fecha_nac)
-                VALUES (:p, :c, :cedula, 'Perfil Hermanos', '1995-06-14')
+                    (id_paciente, id_clinica, cedula, nombre_completo, email_pac,
+                     fecha_nac)
+                VALUES (:p, :c, :cedula, 'Perfil Hermanos', :email, '1995-06-14')
                 """
             ),
-            {"p": id_paciente, "c": id_clinica, "cedula": CEDULA_DEL_ESCENARIO},
+            {
+                "p": id_paciente,
+                "c": id_clinica,
+                "cedula": CEDULA_DEL_ESCENARIO,
+                # SCRUM-99 anadio la columna y es NOT NULL, como en el origen.
+                "email": EMAIL_DEL_ESCENARIO,
+            },
         )
         for indice, id_embarazo in enumerate(embarazos):
             conexion.execute(
                 text(
                     """
                     INSERT INTO analitico.dim_embarazo
-                        (id_embarazo, id_paciente, numero_gestas, numero_partos,
-                         estado_embarazo, fecha_inicio, fecha_probable_parto,
-                         duracion_est_semanas)
-                    SELECT e.id_embarazo, e.id_paciente, e.numero_gestas,
-                           e.numero_partos, e.estado_embarazo, e.fecha_inicio,
-                           e.fecha_probable_parto, 40
+                        (id_embarazo, id_paciente, id_clinica, numero_gestas,
+                         numero_partos, estado_embarazo, fecha_inicio,
+                         fecha_probable_parto, duracion_est_semanas)
+                    -- ``id_clinica`` sale del episodio, como en el ETL desde
+                    -- SCRUM-99: es NOT NULL y no se toma de la paciente.
+                    SELECT e.id_embarazo, e.id_paciente, e.id_clinica,
+                           e.numero_gestas, e.numero_partos, e.estado_embarazo,
+                           e.fecha_inicio, e.fecha_probable_parto, 40
                     FROM operacional.embarazo e WHERE e.id_embarazo = :e
                     """
                 ),
@@ -942,20 +1196,46 @@ def test_el_hermano_no_esta_autorizado_para_nadie(
     assert caso["hermano"] not in autorizados
 
 
-def test_la_identidad_del_medico_solo_aparece_en_la_superficie_de_seguridad(powerbi):
-    """El UPN es un identificador directo: vive donde aplica el RLS y en ningún
-    otro sitio. Publicarlo como columna analítica lo pondría en un visual."""
-    con_upn = {
+def tablas_con_columna(powerbi, patron: str) -> set[str]:
+    return {
         fila["table_name"]
         for fila in consultar(
             powerbi,
             "SELECT DISTINCT table_name FROM information_schema.columns "
-            "WHERE table_schema = 'publicacion' "
-            "AND (column_name LIKE '%upn%' OR column_name LIKE '%email%')",
+            "WHERE table_schema = 'publicacion' AND column_name LIKE :p",
+            p=patron,
         )
     }
 
-    assert con_upn == {"v_entitlement_medico"}
+
+def test_la_identidad_del_medico_solo_aparece_en_las_superficies_de_seguridad(
+    powerbi,
+):
+    """El UPN es un identificador directo: vive donde aplica el RLS y en ningún
+    otro sitio. Publicarlo como columna analítica lo pondría en un visual.
+
+    Son dos superficies desde SCRUM-99 y no una, porque el rol de RLS filtra dos
+    puentes: el de embarazo y el de paciente. Las dos existen únicamente para
+    aplicar la seguridad, y la lista sigue siendo cerrada.
+    """
+    assert tablas_con_columna(powerbi, "%upn%") == {
+        "v_entitlement_medico",
+        "v_entitlement_paciente_medico",
+    }
+
+
+def test_el_unico_correo_publicado_es_el_de_contacto_de_la_paciente(powerbi):
+    """Y está en la vista clínica, que es la única autorizada para llevarlo.
+
+    Antes de SCRUM-99 ninguna superficie publicaba un correo, así que bastaba
+    con buscar la subcadena ``email`` y exigir cero resultados fuera del
+    entitlement. Ahora hay uno aprobado --el de contacto de la paciente-- y la
+    comprobación tiene que distinguirlo del que sigue prohibido: el de cualquier
+    profesional, que no tiene caso de uso en el tablero.
+    """
+    assert tablas_con_columna(powerbi, "%email%") == {"v_paciente_medico"}
+    assert tablas_con_columna(powerbi, "%email_med%") == set()
+    assert tablas_con_columna(powerbi, "%telefono_med%") == set()
 
 
 # ---------------------------------------------------------------------------

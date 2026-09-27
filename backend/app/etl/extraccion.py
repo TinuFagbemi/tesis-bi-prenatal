@@ -190,6 +190,7 @@ def extraer_dimensiones(conexion: Connection) -> OrigenDimensional:
                 paciente.c.id_paciente,
                 paciente.c.cedula,
                 *(paciente.c[parte] for parte in PARTES_DEL_NOMBRE),
+                paciente.c.email_pac,
                 paciente.c.fecha_nac,
             ).order_by(paciente.c.id_paciente),
         ),
