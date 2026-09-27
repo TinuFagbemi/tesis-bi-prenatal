@@ -132,7 +132,8 @@ jobs:
             --ignore=tests/test_rls_postgresql.py \
             --ignore=tests/test_http_como_api_postgresql.py \
             --ignore=tests/test_publicacion_postgresql.py \
-            --ignore=tests/test_provisionar_demo_postgresql.py
+            --ignore=tests/test_provisionar_demo_postgresql.py \
+            --ignore=tests/test_publicacion_medica_postgresql.py
 
       # Contrato del camino .env/shell -> docker-compose.yml -> entorno del
       # contenedor de la API. Las pruebas de Python reciben JWT_SECRET_KEY
@@ -981,6 +982,19 @@ jobs:
           SCRUM98_PUB_ETL_PASSWORD: ${{ env.ETL_PASSWORD }}
         run: python -m pytest -q -rs tests/test_publicacion_postgresql.py --junitxml=pytest-scrum98-pub.xml
 
+      # Publicacion clinica autorizada para el tablero medico. Detras de la
+      # anterior y por la misma razon -- necesita el ETL ejecutado --, y separada
+      # de ella a proposito: aquella fija que superficie puede existir, y esta
+      # que el alcance de cada medico sigue saliendo de seguimiento_clinico
+      # vigente ahora que la superficie lleva nombre, cedula, telefono y correo.
+      - name: Publicacion clinica para el tablero medico (SCRUM-99)
+        working-directory: backend
+        env:
+          SCRUM99_PUB_TEST_DATABASE_URL: postgresql+psycopg://fetalalert_powerbi:${{ env.POWERBI_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
+          SCRUM99_PUB_ADMIN_USER: ${{ env.POSTGRES_USER }}
+          SCRUM99_PUB_ADMIN_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
+        run: python -m pytest -q -rs tests/test_publicacion_medica_postgresql.py --junitxml=pytest-scrum99-pub.xml
+
       - name: Verificar que ninguna prueba de PostgreSQL quedó omitida
         working-directory: backend
         run: |
@@ -1005,6 +1019,7 @@ jobs:
               "pytest-scrum98-http.xml": "SCRUM98_HTTP_TEST_DATABASE_URL",
               "pytest-scrum98-pub.xml": "SCRUM98_PUB_TEST_DATABASE_URL",
               "pytest-scrum72-provision.xml": "SCRUM72_PROVISION_TEST_DATABASE_URL",
+              "pytest-scrum99-pub.xml": "SCRUM99_PUB_TEST_DATABASE_URL",
           }
 
           fallo = False

@@ -1039,16 +1039,19 @@ def test_el_ci_ejecuta_la_suite_postgresql_de_cuentas_y_la_vigila():
     assert "run: python -m pytest -q -rs tests/test_cuentas_postgresql.py --junitxml=pytest-scrum97.xml" in step
     assert "SCRUM97_TEST_DATABASE_URL: postgresql+psycopg://" in step
     assert '"pytest-scrum97.xml": "SCRUM97_TEST_DATABASE_URL"' in guardian
-    # El total crece con cada capa nueva: 9 hasta SCRUM-97, y 13 desde que
+    # El total crece con cada capa nueva: 9 hasta SCRUM-97, 13 desde que
     # SCRUM-98 anadio pytest-scrum98.xml (roles), pytest-scrum98-contexto.xml
     # (contexto y pool), pytest-scrum98-rls.xml (aislamiento por filas) y
     # pytest-scrum98-http.xml (recorridos HTTP como fetalalert_api), 14 con
-    # pytest-scrum98-pub.xml y 15 desde que SCRUM-72 anadio
-    # pytest-scrum72-provision.xml (aprovisionamiento de la demo sobre su base
-    # desechable). Sigue siendo un numero exacto y no un ">=" a proposito: lo
-    # que vigila es que nadie retire un reporte del guardian al anadir el suyo.
+    # pytest-scrum98-pub.xml (proteccion analitica), 15 con SCRUM-72
+    # mediante pytest-scrum72-provision.xml (aprovisionamiento de la demo
+    # sobre su base desechable) y 16 desde que SCRUM-99 anadio
+    # pytest-scrum99-pub.xml (publicacion clinica autorizada). Sigue siendo
+    # un numero exacto y no un ">=" a proposito: lo que vigila es que nadie
+    # retire un reporte del guardian al anadir el suyo.
     assert '"pytest-scrum72-provision.xml": "SCRUM72_PROVISION_TEST_DATABASE_URL"' in guardian
-    assert guardian.count('.xml": "SCRUM') == 15
+    assert '"pytest-scrum99-pub.xml": "SCRUM99_PUB_TEST_DATABASE_URL"' in guardian
+    assert guardian.count('.xml": "SCRUM') == 16
 
 
 def test_la_migracion_no_usa_marcadores_que_psycopg_o_sqlalchemy_interpreten(sql_upgrade):

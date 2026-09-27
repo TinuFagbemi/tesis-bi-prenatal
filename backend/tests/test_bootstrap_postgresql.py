@@ -1387,6 +1387,23 @@ def _cabeza_alembic() -> str:
     return cabeza
 
 
+def _la_revision_de_rls_esta_en_la_cadena() -> bool:
+    """Si la revision de RLS quedo aplicada al migrar hasta la cabeza.
+
+    Hasta SCRUM-98 la revision de RLS **era** la cabeza, y bastaba con comparar
+    las dos. Desde SCRUM-99 ya no lo es: migrar a ``head`` aplica una revision
+    mas. Lo que esta suite comprueba no cambia -- que la de RLS se aplica entera
+    y deja sus objetos --, asi que en vez de exigir que sea la ultima se exige
+    que este en la cadena que la cabeza arrastra.
+    """
+    script = ScriptDirectory.from_config(construir_config_alembic())
+    ancestros = {
+        revision.revision
+        for revision in script.iterate_revisions(_cabeza_alembic(), "base")
+    }
+    return REVISION_DE_RLS in ancestros
+
+
 def _migrar(url: str, destino: str) -> None:
     with pytest.MonkeyPatch.context() as parche:
         parche.setenv("ALEMBIC_DATABASE_URL", url)
@@ -1632,7 +1649,8 @@ def test_con_las_membresias_limpias_la_migracion_completa(base_para_migrar):
     _migrar(url, "head")
     estado = _objetos_de_la_revision(observador)
 
-    assert estado["revision"] == _cabeza_alembic() == REVISION_DE_RLS
+    assert estado["revision"] == _cabeza_alembic()
+    assert _la_revision_de_rls_esta_en_la_cadena()
     assert estado["schema_seguridad"] == 1
     assert estado["helpers"] == 9
     assert estado["politicas"] == 21

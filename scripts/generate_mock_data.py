@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import collections
 import csv
 import json
 import random
@@ -406,10 +407,10 @@ def generar_medicos(id_especialidad: int) -> list[dict[str, Any]]:
         {
             "id_medico": id_secuencial(i),
             "id_especialidad": id_especialidad,
-            "primer_nombre": f"Médico{i:02d}",
+            "primer_nombre": IDENTIDADES_DE_MEDICO[i - 1][0],
             "segundo_nombre": None,
-            "apellido_paterno": "Simulado",
-            "apellido_materno": f"{i:02d}",
+            "apellido_paterno": IDENTIDADES_DE_MEDICO[i - 1][1],
+            "apellido_materno": None,
             "email_med":
                 f"medico{i:02d}@example.com",
         }
@@ -521,28 +522,117 @@ def generar_telefonos_medico(
     return telefonos
 
 
+# ---------------------------------------------------------------------------
+# Identidades sinteticas de presentacion
+# ---------------------------------------------------------------------------
+#
+# Nombres, cedulas y telefonos completamente ficticios, definidos a mano para
+# que la muestra se lea como un sistema clinico y no como una tabla de prueba.
+# Ninguno procede de un expediente real ni se deriva de uno: son inventados
+# desde cero para la validacion funcional del prototipo.
+#
+# **Coherencia territorial.** El prefijo de la cedula acompana a la provincia
+# que el generador asigna al episodio de esa gestante. No es que la clinica
+# determine la cedula -- eso no es como funciona un documento de identidad --,
+# sino que una muestra donde una gestante atendida en Darien llevara un
+# documento de otra provincia introduciria una incoherencia interna gratuita en
+# las capturas del tablero. La direccion de la dependencia sigue siendo
+# ``embarazo.id_clinica -> clinica.provincia``; la cedula solo la acompana, y
+# ``validar_coherencia_territorial`` comprueba que no se separen.
+#
+# **La identidad de presentacion no es la de autenticacion.** El correo de cada
+# gestante sigue siendo ``pacienteNN@example.com`` y es el que su cuenta usa
+# para entrar: cambiarlo reescribiria el ciclo de cuentas, los tokens y el RLS.
+# Aqui solo cambia como se la ve, no como se la identifica.
+PREFIJO_POR_PROVINCIA = {
+    "Chiriquí": "4",
+    "Veraguas": "9",
+    "Darién": "5",
+}
+
+# (primer_nombre, apellido_paterno, apellido_materno, cedula), en el orden de
+# los indices 1..30 que el resto del generador ya usa. La posicion es la que
+# ata cada identidad a su entidad tecnica: la gestante numero cinco sigue
+# siendo la misma paciente de siempre, con el mismo id, la misma cuenta, el
+# mismo embarazo y las mismas lecturas.
+IDENTIDADES_DE_GESTANTE = (
+    # Chiriquí -- indices 01 a 10
+    ("Ana", "Carrizo", "López", "4-900-0001"),
+    ("María", "González", "Ríos", "4-900-0002"),
+    ("Lucía", "Herrera", "Batista", "4-900-0003"),
+    ("Daniela", "Ríos", "Sánchez", "4-900-0004"),
+    ("Sofía", "Mendoza", "Castillo", "4-900-0005"),
+    ("Camila", "Batista", "Moreno", "4-900-0006"),
+    ("Valentina", "Rodríguez", "Vega", "4-900-0007"),
+    ("Gabriela", "Castillo", "Pérez", "4-900-0008"),
+    ("Andrea", "Salazar", "Quintero", "4-900-0009"),
+    ("Natalia", "Morales", "Fuentes", "4-900-0010"),
+    # Veraguas -- indices 11 a 20
+    ("Isabel", "Sánchez", "Ortega", "9-900-0011"),
+    ("Elena", "Paredes", "Gómez", "9-900-0012"),
+    ("Carolina", "Vega", "Núñez", "9-900-0013"),
+    ("Mariana", "Espinosa", "Delgado", "9-900-0014"),
+    ("Paula", "Navarro", "Cedeño", "9-900-0015"),
+    ("Adriana", "Córdoba", "Martínez", "9-900-0016"),
+    ("Fernanda", "López", "Villarreal", "9-900-0017"),
+    ("Alejandra", "Quintero", "Acosta", "9-900-0018"),
+    ("Melissa", "Ortega", "Guerra", "9-900-0019"),
+    ("Patricia", "Núñez", "Jiménez", "9-900-0020"),
+    # Darién -- indices 21 a 30
+    ("Verónica", "Acosta", "Torres", "5-900-0021"),
+    ("Laura", "Cedeño", "Herrera", "5-900-0022"),
+    ("Michelle", "Guerra", "Salazar", "5-900-0023"),
+    ("Carla", "Villarreal", "Mendoza", "5-900-0024"),
+    ("Rosa", "Martínez", "Batista", "5-900-0025"),
+    ("Diana", "Fuentes", "Rodríguez", "5-900-0026"),
+    ("Mónica", "Delgado", "Paredes", "5-900-0027"),
+    ("Evelyn", "Torres", "Navarro", "5-900-0028"),
+    ("Katherine", "Jiménez", "Espinosa", "5-900-0029"),
+    ("Beatriz", "Gómez", "Córdoba", "5-900-0030"),
+)
+
+# (primer_nombre, apellido_paterno). ``apellido_materno`` se deja en None
+# porque el esquema lo admite y no hay motivo para inventar un tercer apellido.
+# El tratamiento profesional -- "Dr.", "Dra." -- es presentacion y no se guarda:
+# el modelo no tiene columna para el, y meterlo dentro de ``primer_nombre``
+# convertiria un titulo en parte del nombre.
+IDENTIDADES_DE_MEDICO = (
+    ("Valeria", "Castillo"),
+    ("Andrés", "Moreno"),
+    ("Gabriela", "Ríos"),
+    ("Ricardo", "Herrera"),
+    ("Daniel", "Vega"),
+)
+
+
 def generar_pacientes() -> list[dict[str, Any]]:
     pacientes = []
 
     for i in range(1, TOTAL_GESTANTES + 1):
+        # Las tres llamadas al generador aleatorio se conservan tal cual y en
+        # este orden: comparten el estado global con todo lo que viene despues
+        # -- sesiones, lecturas, semaforos --, y anadir o quitar una desplazaria
+        # la muestra entera.
         anio_nacimiento = random.randint(1990, 2005)
         mes = random.randint(1, 12)
         dia = random.randint(1, 28)
+
+        nombre, paterno, materno, cedula = IDENTIDADES_DE_GESTANTE[i - 1]
 
         pacientes.append(
             {
                 "id_paciente":
                     id_secuencial(i),
                 "cedula":
-                    f"SIM-PAC-{i:03d}",
+                    cedula,
                 "primer_nombre":
-                    f"Gestante{i:02d}",
+                    nombre,
                 "segundo_nombre":
                     None,
                 "apellido_paterno":
-                    "Simulada",
+                    paterno,
                 "apellido_materno":
-                    f"{i:02d}",
+                    materno,
                 "email_pac":
                     f"paciente{i:02d}@example.com",
                 "fecha_nac":
@@ -1772,6 +1862,49 @@ def finalizar_fecha_cierre_embarazos(
 # VALIDACIONES INTERNAS
 # ============================================================
 
+def validar_coherencia_territorial(
+    *,
+    pacientes,
+    embarazos,
+    clinicas,
+) -> None:
+    """El prefijo de cada cedula acompana a la provincia de su episodio.
+
+    Se resuelve siguiendo la relacion real ``paciente -> embarazo -> clinica ->
+    provincia`` y no la posicion en la lista. El generador reparte hoy en
+    bloques de diez, pero una prueba que asumiera ese reparto dejaria de
+    comprobar nada el dia que dejara de ser cierto: lo que importa es que la
+    cedula y la provincia no se separen, venga de donde venga la asignacion.
+
+    La direccion de la dependencia es importante y va en un solo sentido: la
+    clinica del episodio decide la provincia, y la cedula solo tiene que
+    acompanarla. Nunca al reves -- de la cedula no se deduce a que clinica va
+    una gestante.
+    """
+    provincia_por_clinica = {c["id_clinica"]: c["provincia"] for c in clinicas}
+    cedula_por_paciente = {p["id_paciente"]: p["cedula"] for p in pacientes}
+
+    discrepancias = []
+    for embarazo in embarazos:
+        provincia = provincia_por_clinica[embarazo["id_clinica"]]
+        cedula = cedula_por_paciente[embarazo["id_paciente"]]
+        esperado = PREFIJO_POR_PROVINCIA[provincia]
+        if not cedula.startswith(f"{esperado}-"):
+            discrepancias.append(
+                f"id_paciente={embarazo['id_paciente']} en {provincia} "
+                f"deberia empezar por {esperado}- y empieza por {cedula[:2]}"
+            )
+
+    assert not discrepancias, (
+        "Cedulas incoherentes con la provincia de su episodio: "
+        + "; ".join(discrepancias)
+    )
+
+    # Y el reparto: diez por provincia, sin prefijos ajenos a la muestra.
+    prefijos = collections.Counter(c.split("-", 1)[0] for c in cedula_por_paciente.values())
+    assert prefijos == {"4": 10, "9": 10, "5": 10}, prefijos
+
+
 def validar_dataset(
     *,
     clinicas,
@@ -1802,6 +1935,12 @@ def validar_dataset(
     # --------------------------------------------------------
     # Cantidades básicas
     # --------------------------------------------------------
+
+    validar_coherencia_territorial(
+        pacientes=pacientes,
+        embarazos=embarazos,
+        clinicas=clinicas,
+    )
 
     assert len(clinicas) == TOTAL_CLINICAS
     assert len(medicos) == TOTAL_MEDICOS

@@ -142,6 +142,9 @@ def transformar_dimensiones(
                     _contactos(telefonos_paciente[fila["id_paciente"]]),
                     entidad=entidad,
                 ),
+                # Copia directa, sin regla derivada: el origen es NOT NULL y hay
+                # exactamente uno por paciente.
+                "email_pac": fila["email_pac"],
                 "fecha_nac": fila["fecha_nac"],
             }
         )
@@ -150,6 +153,10 @@ def transformar_dimensiones(
         {
             "id_embarazo": fila["id_embarazo"],
             "id_paciente": fila["id_paciente"],
+            # La clinica del episodio. No pasa por ``clinica_contextual``: el
+            # origen tiene una y solo una por embarazo, asi que no hay nada que
+            # elegir ni ambiguedad que rechazar.
+            "id_clinica": fila["id_clinica"],
             "numero_gestas": fila["numero_gestas"],
             "numero_partos": fila["numero_partos"],
             "estado_embarazo": fila["estado_embarazo"],

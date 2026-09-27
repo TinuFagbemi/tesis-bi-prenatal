@@ -43,6 +43,7 @@ from sqlalchemy import (
     select,
     text,
 )
+from sqlalchemy.engine import make_url
 
 import app.models  # noqa: F401  -- registers every model on Base.metadata
 from app.db.base import SCHEMA_OPERACIONAL, Base
@@ -705,3 +706,183 @@ def test_la_base_temporal_no_conserva_filas_de_prueba(ciclo):
     engine.dispose()
 
     assert pendientes == dict.fromkeys(sorted(TABLAS_ESPERADAS), 0)
+
+
+# --------------------------------------------------------------------------
+# El ciclo de privilegios de SCRUM-99
+# --------------------------------------------------------------------------
+#
+# El ``ciclo`` de arriba baja hasta ``base``, donde el schema ``publicacion``
+# deja de existir entero y la pregunta por sus permisos no significa nada. Lo
+# que hace falta comprobar aparte es el escalón: bajar **una** revisión, quedarse
+# en SCRUM-98 y mirar qué privilegios sobreviven.
+#
+# **Por qué importa.** SCRUM-99 concede al migrador un ``SELECT`` persistente
+# sobre ``publicacion.v_entitlement_medico``, que es de otro rol, para que las
+# siete vistas nuevas puedan leerlo. Es el único privilegio duradero que la
+# revisión introduce, y un ``downgrade`` que no lo retire dejaría un permiso
+# huérfano: la base volvería a la forma de SCRUM-98 con un grant que SCRUM-98
+# nunca concedió. Esta prueba existe para que eso no pase inadvertido.
+
+REVISION_MEDICA = "9c1d7f2ab4e8"
+REVISION_ANTERIOR = "3b4a352bc39a"
+
+VISTAS_DE_SCRUM_98 = frozenset(
+    {"v_embarazo", "v_lectura", "v_entitlement_medico", "v_resumen_administrativo"}
+)
+VISTAS_DE_SCRUM_99 = frozenset(
+    {
+        "v_entitlement_paciente_medico",
+        "v_paciente_medico",
+        "v_embarazo_medico",
+        "v_embarazo_factor_riesgo",
+        "v_tiempo_gestacional",
+        "v_semaforo",
+        "v_factor_riesgo",
+    }
+)
+
+# Lo que se mide en cada punto del escalón.
+_SONDA = text(
+    """
+    SELECT
+      (SELECT has_table_privilege(:migrador,
+              'publicacion.v_entitlement_medico', 'SELECT'))     AS grant_migrador,
+      (SELECT has_schema_privilege('fetalalert_rls_owner',
+              'publicacion', 'USAGE'))                            AS usage_rls_owner,
+      (SELECT has_table_privilege('fetalalert_rls_owner',
+              'privado.seudonimo_paciente', 'SELECT'))            AS mapa_rls_owner
+    """
+)
+
+
+def _vistas_publicadas(conexion) -> set[str]:
+    """Las vistas que **existen**, no las que esta conexion puede ver.
+
+    ``information_schema.views`` filtra por privilegio, y aqui la conexion es la
+    del migrador: en cuanto el downgrade le retira el ``SELECT`` sobre
+    ``v_entitlement_medico`` --que es de otro rol y que el migrador no posee--
+    esa vista desaparece de ese catalogo aunque siga existiendo. Medir la
+    superficie con el catalogo filtrado confundiria «se revoco el permiso» con
+    «se borro el objeto», que es justo la distincion que estas pruebas tienen
+    que mantener separada. ``pg_class`` no filtra por privilegio.
+    """
+    return {
+        fila[0]
+        for fila in conexion.execute(
+            text(
+                "SELECT c.relname FROM pg_class c "
+                "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname = 'publicacion' AND c.relkind = 'v'"
+            )
+        )
+    }
+
+
+def _columna_existe(conexion, tabla: str, columna: str) -> bool:
+    return bool(
+        conexion.execute(
+            text(
+                "SELECT count(*) FROM information_schema.columns "
+                "WHERE table_schema = 'analitico' AND table_name = :t "
+                "AND column_name = :c"
+            ),
+            {"t": tabla, "c": columna},
+        ).scalar_one()
+    )
+
+
+def _sondear(conexion, migrador: str) -> dict:
+    fila = conexion.execute(_SONDA, {"migrador": migrador}).mappings().one()
+    return {
+        **dict(fila),
+        "vistas": _vistas_publicadas(conexion),
+        "email_pac": _columna_existe(conexion, "dim_paciente", "email_pac"),
+        "id_clinica": _columna_existe(conexion, "dim_embarazo", "id_clinica"),
+    }
+
+
+@dataclass(frozen=True)
+class Escalon:
+    """Los tres puntos del ciclo ``head -> head-1 -> head``."""
+
+    con_scrum_99: dict
+    con_scrum_98: dict
+    restaurado: dict
+
+
+@pytest.fixture(scope="session")
+def escalon(ciclo) -> Escalon:
+    """Baja una revisión y vuelve a subir, midiendo privilegios en cada punto.
+
+    Depende de ``ciclo`` para que corra **después** de él: aquel deja la base en
+    head, que es de donde este parte. Al terminar la deja igual.
+    """
+    url = os.environ[VARIABLE_DE_ENTORNO]
+    del_migrador = url_del_migrador(url)
+    migrador = make_url(del_migrador).username
+    config = construir_config_alembic()
+    engine = create_engine(del_migrador)
+
+    try:
+        with pytest.MonkeyPatch.context() as parche:
+            parche.setenv("ALEMBIC_DATABASE_URL", del_migrador)
+
+            with engine.connect() as conexion:
+                antes = _sondear(conexion, migrador)
+
+            command.downgrade(config, "-1")
+            with engine.connect() as conexion:
+                intermedio = _sondear(conexion, migrador)
+                intermedio["revision"] = _revision_estampada(engine)
+
+            command.upgrade(config, "head")
+            with engine.connect() as conexion:
+                despues = _sondear(conexion, migrador)
+    finally:
+        engine.dispose()
+
+    return Escalon(con_scrum_99=antes, con_scrum_98=intermedio, restaurado=despues)
+
+
+def test_el_downgrade_retira_el_select_que_scrum_99_concedio(escalon):
+    """El grant no puede sobrevivir a la revisión que lo creó.
+
+    Si el ``downgrade`` olvidara el ``REVOKE``, la base quedaría en SCRUM-98 con
+    un privilegio que SCRUM-98 nunca concedió, y nadie lo notaría hasta una
+    auditoría.
+    """
+    assert escalon.con_scrum_99["grant_migrador"] is True
+    assert escalon.con_scrum_98["grant_migrador"] is False
+    assert escalon.restaurado["grant_migrador"] is True
+
+
+def test_el_prestamo_de_usage_no_sobrevive_a_ningun_punto_del_ciclo(escalon):
+    """``USAGE`` sobre ``publicacion`` se presta y se devuelve dentro de la
+    transacción, así que no debe observarse nunca desde fuera."""
+    for punto in (escalon.con_scrum_99, escalon.con_scrum_98, escalon.restaurado):
+        assert punto["usage_rls_owner"] is False
+
+
+def test_el_mapa_de_pacientes_sigue_fuera_del_alcance_en_todo_el_ciclo(escalon):
+    for punto in (escalon.con_scrum_99, escalon.con_scrum_98, escalon.restaurado):
+        assert punto["mapa_rls_owner"] is False
+
+
+def test_el_downgrade_deja_exactamente_la_superficie_de_scrum_98(escalon):
+    assert escalon.con_scrum_98["revision"] == REVISION_ANTERIOR
+    assert escalon.con_scrum_98["vistas"] == set(VISTAS_DE_SCRUM_98)
+
+
+def test_el_upgrade_devuelve_las_siete_vistas_de_scrum_99(escalon):
+    esperadas = set(VISTAS_DE_SCRUM_98) | set(VISTAS_DE_SCRUM_99)
+
+    assert escalon.con_scrum_99["vistas"] == esperadas
+    assert escalon.restaurado["vistas"] == esperadas
+
+
+def test_las_dos_columnas_nuevas_desaparecen_y_vuelven(escalon):
+    for columna in ("email_pac", "id_clinica"):
+        assert escalon.con_scrum_99[columna] is True, columna
+        assert escalon.con_scrum_98[columna] is False, columna
+        assert escalon.restaurado[columna] is True, columna

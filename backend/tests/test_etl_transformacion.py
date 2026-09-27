@@ -31,6 +31,8 @@ INICIO = date(2025, 1, 6)
 ID_POR_CODIGO = {OK: 100, WARNING: 101, ERROR: 102}
 NOMBRE_FICTICIO = ("Lucía", None, "Ficticia", "Simulada")
 CEDULA_FICTICIA = "0-000-0001"
+# El correo clínico de contacto, que no es la credencial de ninguna cuenta.
+EMAIL_FICTICIO = "lucia.ficticia@ejemplo.test"
 TELEFONO_FICTICIO = "6000-1111"
 
 AFILIACIONES = [
@@ -81,6 +83,7 @@ def _origen(**cambios) -> OrigenDimensional:
             {"id_paciente": 100, "cedula": CEDULA_FICTICIA,
              "primer_nombre": NOMBRE_FICTICIO[0], "segundo_nombre": NOMBRE_FICTICIO[1],
              "apellido_paterno": NOMBRE_FICTICIO[2], "apellido_materno": NOMBRE_FICTICIO[3],
+             "email_pac": EMAIL_FICTICIO,
              "fecha_nac": date(1995, 5, 5)},
         ],
         telefonos_paciente=[
@@ -120,11 +123,54 @@ def test_dimensiones_derivadas():
     assert dimensiones.pacientes == [
         {"id_paciente": 100, "id_clinica": 100, "cedula": CEDULA_FICTICIA,
          "nombre_completo": "Lucía Ficticia Simulada",
-         "telefono_pac": TELEFONO_FICTICIO, "fecha_nac": date(1995, 5, 5)}
+         "telefono_pac": TELEFONO_FICTICIO, "email_pac": EMAIL_FICTICIO,
+         "fecha_nac": date(1995, 5, 5)}
     ]
     [embarazo] = dimensiones.embarazos
     assert embarazo["duracion_est_semanas"] == 40
     assert embarazo["clasificacion_embarazo"] is None
+    # La clínica del episodio se copia tal cual, sin pasar por
+    # ``clinica_contextual``: el origen tiene una y solo una por embarazo.
+    assert embarazo["id_clinica"] == 100
+
+
+def test_la_extraccion_toma_el_correo_de_contacto_y_no_la_credencial():
+    """De qué columna sale ``email_pac``, comprobado sobre la consulta.
+
+    La suite de PostgreSQL no puede demostrarlo comparando valores: en el
+    conjunto canónico ``paciente.email_pac`` y ``usuario.email`` son idénticos
+    para las 30 pacientes con cuenta, así que cualquier comparación por valor
+    pasaría con las dos columnas. Aquí se mira la consulta que el ETL emite, que
+    no depende de los datos.
+
+    Son dos cosas distintas y confundirlas publicaría una por otra: el correo de
+    contacto describe a la paciente y existe siempre; la credencial pertenece a
+    una cuenta que puede no existir --una gestante sin acceso al sistema sigue
+    teniendo correo de contacto-- y es material de autenticación.
+    """
+    from sqlalchemy import select
+
+    from app.models.clinico import Paciente
+
+    consulta = str(
+        select(Paciente.__table__.c.email_pac).compile(
+            compile_kwargs={"literal_binds": True}
+        )
+    )
+
+    assert "paciente.email_pac" in consulta
+
+    # Y lo que de verdad importa: la extracción real nombra esa tabla y esa
+    # columna, y no toca ``usuario`` en la proyección de pacientes.
+    import inspect
+
+    from app.etl import extraccion
+
+    fuente = inspect.getsource(extraccion.extraer_dimensiones)
+    bloque_pacientes = fuente.split("pacientes=", 1)[1].split("telefonos_paciente=", 1)[0]
+
+    assert "paciente.c.email_pac" in bloque_pacientes
+    assert "usuario" not in bloque_pacientes
 
 
 def test_el_bridge_conserva_exactamente_los_atributos_aprobados():

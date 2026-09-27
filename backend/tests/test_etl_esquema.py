@@ -32,6 +32,21 @@ from tests.test_models import PG_MAX_IDENTIFIER_LENGTH, TABLAS_ESPERADAS
 
 REVISION_ANALITICA = "60facdbacf51"
 REVISION_SCRUM_63 = "87d8ed46686b"
+REVISION_MEDICA = "9c1d7f2ab4e8"
+
+# Lo que el modelo estrella **no** tenia al crearse y SCRUM-99 anadio en su
+# propia revision, porque la de SCRUM-98 ya estaba en main y no se reescribe.
+#
+# Las pruebas que comparan la revision analitica contra la metadata restan estas
+# columnas del lado de la metadata: aquella revision no las creo y exigirle que
+# las tenga seria exigirle que se hubiera escrito en el futuro. Lo que las fija
+# es ``test_la_revision_medica_anade_exactamente_las_columnas_aprobadas``, de
+# modo que entre las dos pruebas la metadata sigue cubierta entera.
+COLUMNAS_POSTERIORES = {
+    "dim_paciente": {"email_pac"},
+    "dim_embarazo": {"id_clinica"},
+}
+INDICES_POSTERIORES = {"ix_dim_embarazo_id_clinica"}
 
 # Logical names of the Draw.io v6 -> physical snake_case names.
 TABLAS_DEL_MODELO = {
@@ -96,6 +111,7 @@ COLUMNAS_ESPERADAS = {
         "cedula": ("VARCHAR(20)", False),
         "nombre_completo": ("VARCHAR(243)", False),
         "telefono_pac": ("VARCHAR(120)", True),
+        "email_pac": ("VARCHAR(120)", False),
         "fecha_nac": ("DATE", False),
     },
     "dim_clinica": {
@@ -121,6 +137,7 @@ COLUMNAS_ESPERADAS = {
     "dim_embarazo": {
         "id_embarazo": ("INTEGER", False),
         "id_paciente": ("INTEGER", False),
+        "id_clinica": ("INTEGER", False),
         "numero_gestas": ("INTEGER", False),
         "numero_partos": ("INTEGER", False),
         "estado_embarazo": ("VARCHAR(20)", False),
@@ -161,6 +178,7 @@ LLAVES_FORANEAS_ESPERADAS = {
         "id_factor_riesgo",
     ),
     ("dim_embarazo", "id_paciente"): ("dim_paciente", "id_paciente"),
+    ("dim_embarazo", "id_clinica"): ("dim_clinica", "id_clinica"),
     ("dim_paciente", "id_clinica"): ("dim_clinica", "id_clinica"),
     ("dim_medico", "id_clinica"): ("dim_clinica", "id_clinica"),
 }
@@ -196,6 +214,7 @@ INDICES_ESPERADOS = {
     ("fact_lectura_biometrica", "id_semaforo"),
     ("bridge_embarazo_factor_riesgo", "id_factor_riesgo"),
     ("dim_embarazo", "id_paciente"),
+    ("dim_embarazo", "id_clinica"),
     ("dim_paciente", "id_clinica"),
     ("dim_medico", "id_clinica"),
 }
@@ -360,7 +379,7 @@ CREATE_INDEX = re.compile(
 DROP_TABLE = re.compile(rf"DROP TABLE {SCHEMA_ANALITICO}\.(?P<tabla>\w+)")
 
 
-def _renderizar_revision(direccion: str) -> str:
+def _renderizar_revision(direccion: str, revision: str = REVISION_ANALITICA) -> str:
     script = ScriptDirectory.from_config(construir_config_alembic())
     salida = io.StringIO()
     contexto = MigrationContext.configure(
@@ -372,7 +391,7 @@ def _renderizar_revision(direccion: str) -> str:
         },
     )
     with Operations.context(contexto):
-        getattr(script.get_revision(REVISION_ANALITICA).module, direccion)()
+        getattr(script.get_revision(revision).module, direccion)()
     return salida.getvalue()
 
 
@@ -412,6 +431,28 @@ def test_la_revision_no_toca_el_esquema_operacional(sql_upgrade, sql_downgrade):
     assert SCHEMA_OPERACIONAL not in sql_downgrade
 
 
+def _sin_las_columnas_posteriores(clausulas: set[str], nombre_tabla: str) -> set[str]:
+    """Las cláusulas de la metadata que la revisión analítica sí escribió.
+
+    Una columna anadida despues aparece en la metadata de dos formas: como su
+    propia clausula, que empieza por el nombre de la columna, y --si lleva llave
+    foranea-- dentro de la del ``CONSTRAINT``, donde aparece entre parentesis.
+    Se reconocen las dos, y ninguna otra: comparar por subcadena suelta borraria
+    de mas en cuanto un nombre fuera prefijo de otro.
+    """
+    posteriores = COLUMNAS_POSTERIORES.get(nombre_tabla, set())
+    if not posteriores:
+        return clausulas
+
+    def es_posterior(clausula: str) -> bool:
+        primera_palabra = clausula.split(" ", 1)[0]
+        return primera_palabra in posteriores or any(
+            f"({columna})" in clausula for columna in posteriores
+        )
+
+    return {clausula for clausula in clausulas if not es_posterior(clausula)}
+
+
 @pytest.mark.parametrize("nombre_tabla", sorted(COLUMNAS_ESPERADAS))
 def test_cada_tabla_de_la_revision_equivale_a_la_metadata(nombre_tabla, sql_upgrade):
     de_la_migracion = {
@@ -423,14 +464,66 @@ def test_cada_tabla_de_la_revision_equivale_a_la_metadata(nombre_tabla, sql_upgr
         c["tabla"]: _dividir_en_clausulas(c["cuerpo"]) for c in CREATE_TABLE.finditer(ddl)
     }[nombre_tabla]
 
-    assert de_la_migracion == de_la_metadata
+    assert de_la_migracion == _sin_las_columnas_posteriores(
+        de_la_metadata, nombre_tabla
+    )
 
 
 def test_los_indices_de_la_revision_son_los_de_la_metadata(sql_upgrade):
     de_la_migracion = {c["indice"] for c in CREATE_INDEX.finditer(sql_upgrade)}
-    de_la_metadata = {indice.name for tabla in TABLAS_ANALITICAS for indice in tabla.indexes}
+    de_la_metadata = {
+        indice.name for tabla in TABLAS_ANALITICAS for indice in tabla.indexes
+    }
 
-    assert de_la_migracion == de_la_metadata
+    assert de_la_migracion == de_la_metadata - INDICES_POSTERIORES
+
+
+def test_la_revision_medica_anade_exactamente_las_columnas_aprobadas():
+    """La otra mitad del contrato: lo que la revisión analítica no creó.
+
+    Las pruebas de arriba restan ``email_pac`` e ``id_clinica`` del lado de la
+    metadata. Esta comprueba que la revisión que sí las crea las declara con el
+    tipo y la nulabilidad del modelo, y que no crea ninguna columna más: sin
+    ella, restarlas allí sería un agujero en el contrato en vez de un reparto.
+    """
+    sql = _renderizar_revision("upgrade", REVISION_MEDICA)
+
+    anadidas = set(
+        re.findall(rf"ALTER TABLE {SCHEMA_ANALITICO}\.\w+ ADD COLUMN (\w+)", sql)
+    )
+    esperadas = {
+        columna for columnas in COLUMNAS_POSTERIORES.values() for columna in columnas
+    }
+    assert anadidas == esperadas
+
+    # Tipo y nulabilidad, como el modelo los declara. La columna se añade
+    # nullable y un ``SET NOT NULL`` posterior la endurece, que es el único
+    # orden que funciona sobre una base con filas.
+    for nombre_tabla, columnas in COLUMNAS_POSTERIORES.items():
+        for columna in columnas:
+            tipo, nullable = COLUMNAS_ESPERADAS[nombre_tabla][columna]
+            assert f"add column {columna} {tipo}".lower() in sql.lower()
+            if not nullable:
+                assert (
+                    f"ALTER TABLE {SCHEMA_ANALITICO}.{nombre_tabla} "
+                    f"ALTER COLUMN {columna} SET NOT NULL" in sql
+                )
+
+
+def test_la_revision_medica_deshace_sus_dos_columnas():
+    """Downgrade simétrico: lo que añadió, y solo eso, se va."""
+    sql = _renderizar_revision("downgrade", REVISION_MEDICA)
+
+    eliminadas = set(
+        re.findall(rf"ALTER TABLE {SCHEMA_ANALITICO}\.\w+ DROP COLUMN (\w+)", sql)
+    )
+    esperadas = {
+        columna for columnas in COLUMNAS_POSTERIORES.values() for columna in columnas
+    }
+
+    assert eliminadas == esperadas
+    for indice in INDICES_POSTERIORES:
+        assert f"DROP INDEX {SCHEMA_ANALITICO}.{indice}" in sql
 
 
 def test_el_downgrade_elimina_las_nueve_tablas_en_orden_inverso(sql_upgrade, sql_downgrade):
