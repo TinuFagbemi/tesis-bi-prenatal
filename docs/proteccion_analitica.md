@@ -22,6 +22,27 @@ seguimiento prenatal a una persona.
 Todos los datos del proyecto son **simulados y completamente ficticios**. No hay
 ni habrá datos de pacientes reales.
 
+Los nombres, cédulas y teléfonos de la muestra son **sintéticos desde origen**:
+se inventaron para la validación funcional del prototipo y no se derivan de
+ningún expediente. Conviene decirlo así y no llamarlo «anonimizado», que
+describiría un proceso distinto —partir de datos reales y quitarles la
+identidad— y aquí no hay tal punto de partida.
+
+Para que la muestra se lea coherente, los identificadores ficticios emplean un
+prefijo consistente con la provincia asignada al episodio simulado. Es
+coherencia interna de la simulación y nada más: **no** se está afirmando que la
+clínica determine el documento de identidad de una persona. La dependencia va en
+un solo sentido —el episodio decide la provincia, y la cédula la acompaña— y una
+validación del generador comprueba que no se separen.
+
+Los correos de las cuentas, en cambio, conservan identificadores deterministas
+del tipo `pacienteNN@example.com` y `medicoNN@example.com`: son el contrato
+reproducible de autenticación y autorización, entran en `usuario.email` y en
+`USERPRINCIPALNAME()`, y cambiarlos reescribiría el ciclo de cuentas, los tokens
+y el RLS. Que una gestante se llame «Sofía Mendoza Castillo» y entre con
+`paciente05@example.com` no es una inconsistencia: es la separación entre
+identidad de presentación e identidad de autenticación.
+
 ---
 
 ## 1. Tres actores que no son el mismo

@@ -130,8 +130,8 @@ MINIMO_DE_CELDA = 5
 
 # Marca del escenario que esta suite fabrica. Va en la cedula y en el correo del
 # perfil ficticio, que son las dos columnas por las que la limpieza lo reconoce.
-# El numero no colisiona con el dataset canonico, cuyas cedulas siguen el patron
-# ``SIM-PAC-0NN``.
+# La marca no colisiona con el dataset canonico, cuyas cedulas sinteticas siguen
+# el patron territorial ``4-900-00NN`` / ``9-900-00NN`` / ``5-900-00NN``.
 MARCA_DEL_ESCENARIO = "SCRUM98PUB"
 CEDULA_DEL_ESCENARIO = f"SIM-PAC-{MARCA_DEL_ESCENARIO}"
 EMAIL_DEL_ESCENARIO = f"perfil.{MARCA_DEL_ESCENARIO.lower()}@example.com"
