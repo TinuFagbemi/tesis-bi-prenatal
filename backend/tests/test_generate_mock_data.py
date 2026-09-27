@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import collections
 import hashlib
 import importlib.util
 import json
+import re
 import sys
 from collections import Counter
 from datetime import date, datetime
@@ -975,3 +977,232 @@ def test_la_credencial_simulada_esta_declarada_como_ficticia():
     assert isinstance(gm.PASSWORD_SIMULADA, str)
     assert gm.PASSWORD_SIMULADA
     assert "Simulado" in gm.PASSWORD_SIMULADA
+
+
+# ---------------------------------------------------------------------------
+# Identidades sintéticas de presentación
+# ---------------------------------------------------------------------------
+#
+# La muestra dejó de llamarse «Gestante05 Simulada 05» para parecer lo que
+# simula: un sistema clínico. El cambio es **solo de presentación**, y estas
+# pruebas existen para fijar esa frontera por los dos lados.
+#
+# Por un lado, que la identidad visible sea la aprobada y territorialmente
+# coherente. Por otro --y es lo que de verdad importa-- que la identidad de
+# autenticación no se haya movido: correo, cuenta, vínculo y contraseña siguen
+# siendo los mismos, porque son el contrato reproducible sobre el que se apoyan
+# el login, los tokens, el RLS y `USERPRINCIPALNAME()`.
+
+
+def test_las_treinta_gestantes_tienen_identidad_determinista():
+    """Nombre y cédula salen de la tabla aprobada, no de un patrón numérico."""
+    pacientes = gm.generar_pacientes()
+
+    assert len(pacientes) == gm.TOTAL_GESTANTES
+    assert len(gm.IDENTIDADES_DE_GESTANTE) == gm.TOTAL_GESTANTES
+
+    for indice, paciente in enumerate(pacientes, start=1):
+        nombre, paterno, materno, cedula = gm.IDENTIDADES_DE_GESTANTE[indice - 1]
+        assert paciente["primer_nombre"] == nombre
+        assert paciente["apellido_paterno"] == paterno
+        assert paciente["apellido_materno"] == materno
+        assert paciente["cedula"] == cedula
+        assert paciente["segundo_nombre"] is None
+
+
+def test_ninguna_gestante_conserva_el_nombre_de_marcador(dataset):
+    """El patrón viejo no puede sobrevivir en ninguna fila.
+
+    Se busca por forma y no por valor concreto: si alguien reintrodujera el
+    generador numérico para una sola gestante, aquí se vería.
+    """
+    marcador = re.compile(r"Gestante\d{2}|^Simulada$|^SIM-PAC-\d{3}$")
+
+    for paciente in dataset["pacientes"]:
+        for campo in ("primer_nombre", "apellido_paterno", "apellido_materno", "cedula"):
+            valor = paciente[campo]
+            assert valor is None or not marcador.search(valor), (campo, valor)
+
+
+def test_las_cedulas_son_distintas_y_no_nulas(dataset):
+    cedulas = [p["cedula"] for p in dataset["pacientes"]]
+
+    assert all(cedulas)
+    assert len(set(cedulas)) == gm.TOTAL_GESTANTES
+
+
+def test_los_nombres_completos_son_distintos_y_no_nulos(dataset):
+    """Treinta identidades, y ninguna repetida: el tablero tiene que poder
+    distinguirlas aunque el nombre no sea la llave."""
+    nombres = [
+        " ".join(
+            parte
+            for parte in (
+                p["primer_nombre"],
+                p["segundo_nombre"],
+                p["apellido_paterno"],
+                p["apellido_materno"],
+            )
+            if parte
+        )
+        for p in dataset["pacientes"]
+    ]
+
+    assert all(nombres)
+    assert len(set(nombres)) == gm.TOTAL_GESTANTES
+
+
+def test_el_reparto_de_prefijos_es_diez_por_provincia(dataset):
+    prefijos = collections.Counter(
+        p["cedula"].split("-", 1)[0] for p in dataset["pacientes"]
+    )
+
+    assert prefijos == {"4": 10, "9": 10, "5": 10}
+
+
+def test_ninguna_gestante_de_la_muestra_lleva_prefijo_ocho(dataset):
+    """Ninguna de las tres clínicas simuladas está en la provincia de Panamá.
+
+    El prefijo 8 sería coherente con un documento emitido allí, y por eso
+    desentonaría en esta muestra: las tres ubicaciones son Chiriquí, Veraguas y
+    Darién.
+    """
+    con_ocho = [
+        p["cedula"] for p in dataset["pacientes"] if p["cedula"].startswith("8-")
+    ]
+
+    assert con_ocho == []
+
+
+def test_el_prefijo_de_cedula_concilia_con_la_provincia_del_episodio(dataset):
+    """La comprobación recorre la relación real, no la posición en la lista.
+
+    ``paciente -> embarazo -> clínica -> provincia``. El generador reparte hoy
+    en bloques de diez, pero una prueba que diera por buena esa posición dejaría
+    de comprobar nada el día que el reparto cambiara.
+    """
+    provincia_por_clinica = {c["id_clinica"]: c["provincia"] for c in dataset["clinicas"]}
+    cedula_por_paciente = {p["id_paciente"]: p["cedula"] for p in dataset["pacientes"]}
+
+    observado = collections.Counter()
+    for embarazo in dataset["embarazos"]:
+        provincia = provincia_por_clinica[embarazo["id_clinica"]]
+        cedula = cedula_por_paciente[embarazo["id_paciente"]]
+        esperado = gm.PREFIJO_POR_PROVINCIA[provincia]
+        assert cedula.startswith(f"{esperado}-"), (provincia, cedula)
+        observado[provincia] += 1
+
+    assert observado == {"Chiriquí": 10, "Veraguas": 10, "Darién": 10}
+
+
+def test_la_cedula_no_decide_la_clinica(dataset):
+    """La dependencia va en un solo sentido, y conviene dejarlo fijado.
+
+    Que la cédula acompañe a la provincia es coherencia interna de la muestra.
+    Lo que no puede pasar es lo contrario: que el generador mire la cédula para
+    decidir dónde se atiende a la gestante. Se comprueba por la vía negativa,
+    que es la única disponible sobre el artefacto: la clínica del episodio se
+    explica enteramente por el reparto del generador, sin consultar la cédula.
+    """
+    ids_clinica = sorted({c["id_clinica"] for c in dataset["clinicas"]})
+    por_clinica = gm.TOTAL_EMBARAZOS // gm.TOTAL_CLINICAS
+
+    for indice, embarazo in enumerate(
+        sorted(dataset["embarazos"], key=lambda e: e["id_paciente"]), start=1
+    ):
+        esperada = ids_clinica[(indice - 1) // por_clinica]
+        assert embarazo["id_clinica"] == esperada
+
+
+def test_los_cinco_medicos_tienen_nombre_de_presentacion(dataset):
+    """Sin tratamiento profesional dentro del nombre.
+
+    «Dr.» y «Dra.» son presentación: el modelo no tiene columna para el
+    tratamiento, y meterlo en ``primer_nombre`` convertiría un título en parte
+    del nombre de la persona.
+    """
+    assert len(gm.IDENTIDADES_DE_MEDICO) == gm.TOTAL_MEDICOS
+
+    for indice, medico in enumerate(dataset["medicos"], start=1):
+        nombre, paterno = gm.IDENTIDADES_DE_MEDICO[indice - 1]
+        assert medico["primer_nombre"] == nombre
+        assert medico["apellido_paterno"] == paterno
+        assert medico["segundo_nombre"] is None
+        assert medico["apellido_materno"] is None
+        assert not medico["primer_nombre"].startswith(("Dr.", "Dra."))
+
+
+def test_el_quinto_medico_conserva_su_upn_con_la_nueva_identidad(dataset):
+    """El caso que motivó revisar los nombres, fijado explícitamente.
+
+    ``medico05`` pasa a presentarse como un profesional masculino, y su UPN no
+    se mueve: es el identificador sobre el que se apoyan el RLS del dataset,
+    ``v_entitlement_medico`` y las evidencias de SCRUM-99.
+    """
+    [quinto] = [m for m in dataset["medicos"] if m["email_med"] == "medico05@example.com"]
+
+    assert (quinto["primer_nombre"], quinto["apellido_paterno"]) == ("Daniel", "Vega")
+    assert quinto["email_med"] == "medico05@example.com"
+
+
+# ---------------------------------------------------------------------------
+# La identidad de autenticación no se movió
+# ---------------------------------------------------------------------------
+
+
+def test_los_correos_de_las_gestantes_siguen_siendo_deterministas(dataset):
+    """``pacienteNN@example.com`` **es** la credencial, y por eso no cambia.
+
+    Sería tentador darle a cada gestante un correo nominal ahora que tiene
+    nombre, y sería un error: este valor entra en ``usuario.email``, que es por
+    donde se autentica, y reescribirlo reharía el ciclo de cuentas entero.
+    """
+    esperados = [f"paciente{i:02d}@example.com" for i in range(1, gm.TOTAL_GESTANTES + 1)]
+
+    assert [p["email_pac"] for p in dataset["pacientes"]] == esperados
+
+
+def test_los_upn_de_los_medicos_siguen_siendo_deterministas(dataset):
+    esperados = [f"medico{i:02d}@example.com" for i in range(1, gm.TOTAL_MEDICOS + 1)]
+
+    assert [m["email_med"] for m in dataset["medicos"]] == esperados
+
+
+def test_cada_cuenta_reutiliza_el_correo_de_su_titular(dataset):
+    """El puente entre identidad de presentación y de autenticación.
+
+    Si alguien cambiara ``email_pac`` pensando que es un atributo cosmético,
+    aquí se vería: la cuenta dejaría de coincidir con su titular.
+    """
+    por_id = {u["id_usuario"]: u["email"] for u in dataset["usuarios"]}
+    correo_paciente = {p["id_paciente"]: p["email_pac"] for p in dataset["pacientes"]}
+    correo_medico = {m["id_medico"]: m["email_med"] for m in dataset["medicos"]}
+
+    for vinculo in dataset["usuario_paciente"]:
+        assert por_id[vinculo["id_usuario"]] == correo_paciente[vinculo["id_paciente"]]
+    for vinculo in dataset["usuario_medico"]:
+        assert por_id[vinculo["id_usuario"]] == correo_medico[vinculo["id_medico"]]
+
+
+def test_la_contrasena_simulada_no_cambio():
+    """Cambiar un nombre no puede reprovisionar cuentas."""
+    assert gm.PASSWORD_SIMULADA == "FetalAlert-Dataset-Simulado-2026"
+
+
+def test_los_telefonos_principales_siguen_siendo_treinta(dataset):
+    """El valor ya era el aprobado y no se tocó; lo que se fija es la regla.
+
+    Un contacto principal de tipo CELULAR por gestante: es de donde el ETL saca
+    ``telefono_pac`` como escalar, y dos principales lo harían abortar.
+    """
+    principales = [
+        t
+        for t in dataset["telefonos_paciente"]
+        if t["principal"] and t["tipo_contacto"] == "CELULAR"
+    ]
+
+    assert len(principales) == gm.TOTAL_GESTANTES
+    assert len({t["id_paciente"] for t in principales}) == gm.TOTAL_GESTANTES
+    assert sorted(t["valor_contacto"] for t in principales) == [
+        f"6000-{i:04d}" for i in range(1, gm.TOTAL_GESTANTES + 1)
+    ]

@@ -219,6 +219,12 @@ class DimPaciente(BaseAnalitica):
     telefono_pac: Mapped[str | None] = mapped_column(
         String(LONGITUD_CONTACTO), nullable=True
     )
+    # El correo clinico de contacto de la paciente, copiado tal cual de
+    # ``operacional.paciente.email_pac``. No es ``usuario.email``: aquel es una
+    # credencial de acceso y puede no existir -- una gestante sin cuenta sigue
+    # teniendo correo de contacto --, asi que confundirlos publicaria una cosa
+    # por otra. NOT NULL como en el origen (SCRUM-99).
+    email_pac: Mapped[str] = mapped_column(String(120), nullable=False)
     fecha_nac: Mapped[date] = mapped_column(Date, nullable=False)
 
 
@@ -250,6 +256,18 @@ class DimEmbarazo(BaseAnalitica):
     )
     id_paciente: Mapped[int] = mapped_column(
         ForeignKey("dim_paciente.id_paciente", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    # La clinica **del episodio**, copiada de ``operacional.embarazo.id_clinica``.
+    #
+    # ``dim_paciente.id_clinica`` no sirve para esto y sigue siendo contexto: sale
+    # de ``clinica_contextual`` sobre *todos* los embarazos de la paciente, de
+    # modo que una paciente atendida en dos clinicas distintas lo tiene NULL --
+    # justo el caso en que el dato haria falta. Aqui es NOT NULL porque en el
+    # origen lo es y hay exactamente uno por episodio (SCRUM-99).
+    id_clinica: Mapped[int] = mapped_column(
+        ForeignKey("dim_clinica.id_clinica", ondelete="RESTRICT"),
         nullable=False,
         index=True,
     )
