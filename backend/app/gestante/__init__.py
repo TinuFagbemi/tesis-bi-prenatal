@@ -28,10 +28,13 @@ Once modulos, cada uno con un trabajo:
     El paquete de una sesion simulada: referencias resueltas del
     aprovisionamiento y semaforo derivado con SIM-1.0, nunca escogido.
 :mod:`app.gestante.movimientos`
-    Captura y sincroniza esas sesiones por cuenta, delegando todo en
+    Captura y entrega esas sesiones por cuenta, delegando todo en
     ``app.edge`` -- un archivo SQLite propio por paciente, nunca compartido.
+:mod:`app.gestante.envio_automatico`
+    El emisor en segundo plano: entrega lo pendiente de cada cuenta cuando hay
+    conexion y token, sin que nadie pulse nada.
 :mod:`app.gestante.rutas`
-    Las trece rutas que ve el navegador.
+    Las rutas que ve el navegador.
 :mod:`app.gestante.aplicacion`
     El ensamblado FastAPI.
 
@@ -44,8 +47,9 @@ credenciales: la contrasena no se persiste en ninguna forma, y el token del
 servidor central vive unicamente en memoria del proceso.
 
 **Lo que el registro de movimientos simulados hace, y lo que no.** Captura un
-paquete localmente --eso funciona sin red, que es el requisito-- y lo entrega
-despues con una sola ronda real contra la API central. Los tres
+paquete localmente --eso funciona sin red, que es el requisito-- y el envio
+automatico lo entrega despues contra la API central, sin que la paciente
+intervenga. La interfaz web no ofrece ni la captura ni el envio. Los tres
 identificadores que el paquete necesita no se inventan ni se escriben a mano:
 salen del aprovisionamiento del dispositivo, que los leyo de la base real. El
 semaforo tampoco se escoge: se deriva con SIM-1.0, la misma regla con la que
@@ -95,11 +99,13 @@ from app.gestante.config import (
 )
 from app.gestante.estado_local import EstadoLocal
 from app.gestante.estado_local import leer as leer_estado_local
+from app.gestante.envio_automatico import EmisorAutomatico
 from app.gestante.movimientos import (
+    EnvioDeLaCuenta,
+    enviar_pendientes_de_la_cuenta,
     leer_estado_de_la_cuenta,
     registrar_sesion_simulada,
     ruta_para_la_cuenta,
-    sincronizar_cuenta,
 )
 from app.gestante.provision import Provision, ProvisionInvalida
 from app.gestante.rutas import AlmacenDeTokens, ContextoAdaptador, crear_router
@@ -121,6 +127,8 @@ __all__ = [
     "ClienteCentralHTTP",
     "ConfiguracionGestanteInvalida",
     "ContextoAdaptador",
+    "EmisorAutomatico",
+    "EnvioDeLaCuenta",
     "Episodios",
     "ErrorDeAlmacenamientoLocal",
     "EstadoLocal",
@@ -151,6 +159,7 @@ __all__ = [
     "crear_router",
     "digest",
     "en_curso",
+    "enviar_pendientes_de_la_cuenta",
     "generar_identificador",
     "inicializar",
     "leer_estado_de_la_cuenta",
@@ -161,7 +170,6 @@ __all__ = [
     "renovar",
     "ruta_para_la_cuenta",
     "sesion_de_la_lectura",
-    "sincronizar_cuenta",
     "tablas_presentes",
     "transaccion",
     "ultima_lectura",

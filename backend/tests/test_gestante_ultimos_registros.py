@@ -43,10 +43,10 @@ from tests.test_gestante_clinico import (
     portal,
     sesion,
 )
+from app.gestante import envio_automatico
 from tests.test_gestante_movimientos import (
-    ENTREGA_ACEPTADA,
     ID_EMBARAZO,
-    _constructor_que_responde,
+    ApiFalsa,
     cliente_con_provision,
 )
 from tests.test_gestante_rutas import (
@@ -518,6 +518,8 @@ def test_sin_token_en_memoria_se_pregunta_solo_por_la_salud(tmp_path):
         "api_central": "no_disponible",
         "autenticacion_central": "reautenticacion_requerida",
         "sesion_local_expira_en": cuerpo["sesion_local_expira_en"],
+        # Lectura local: esta cuenta nunca entregó nada.
+        "ultimo_envio_confirmado": None,
     }
 
 
@@ -678,11 +680,12 @@ def test_con_el_token_vencido_los_registros_se_guardan_y_nada_se_da_por_enviado(
         f"/adaptador/embarazos/{ID_EMBARAZO}/sesiones-simuladas",
         json={"tipo_sesion": "MOVIMIENTOS_FETALES"},
     )
-    envio = cliente.post("/adaptador/movimientos/sincronizar").json()
+    # Sin token no hay con que enviar: el envio automatico no hace nada.
+    hechos = envio_automatico.ciclo(cliente.app.state.contexto)
     cola = cliente.get("/adaptador/movimientos/estado").json()
 
     assert registro.status_code == 201
-    assert envio == {"disponible": False, "motivo": "reautenticacion_requerida"}
+    assert hechos == {}
     assert cola["pendientes"] == 1
     assert cola["enviados"] == 0
     assert cola["ultimo_envio_confirmado"] is None
@@ -690,7 +693,7 @@ def test_con_el_token_vencido_los_registros_se_guardan_y_nada_se_da_por_enviado(
 
 def test_el_ultimo_envio_confirmado_sale_de_la_outbox(tmp_path):
     cliente, _, reloj, _ = cliente_con_provision(
-        tmp_path, constructor_cliente_edge=_constructor_que_responde(*ENTREGA_ACEPTADA)
+        tmp_path, constructor_cliente_edge=ApiFalsa().constructor
     )
     cliente.post(
         f"/adaptador/embarazos/{ID_EMBARAZO}/sesiones-simuladas",
@@ -698,7 +701,7 @@ def test_el_ultimo_envio_confirmado_sale_de_la_outbox(tmp_path):
     )
     assert cliente.get("/adaptador/movimientos/estado").json()["ultimo_envio_confirmado"] is None
 
-    cliente.post("/adaptador/movimientos/sincronizar")
+    envio_automatico.ciclo(cliente.app.state.contexto)
 
     ultimo = cliente.get("/adaptador/movimientos/estado").json()["ultimo_envio_confirmado"]
     assert ultimo is not None

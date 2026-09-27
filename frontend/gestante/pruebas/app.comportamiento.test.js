@@ -11,7 +11,8 @@
    - Una respuesta tardía de una selección ya superada no pisa la vigente.
    - Una última lectura con solo movimientos deja FC y SpO2 como «—».
    - El historial muestra las lecturas del dataset que sí tienen FC y SpO2.
-   - Los mensajes de envío dicen lo que el adaptador confirmó, y nada más.
+   - Inicio solo consulta: no ofrece registrar ni enviar, y no hay un
+     indicador de conexión permanente; solo se avisa cuando algo falta.
    - Cerrar sesión pide confirmación; Cancelar no cierra nada.
 
    Los valores de los episodios 100 y 130 y de las lecturas 110, 111 y 679 se
@@ -425,22 +426,13 @@ function estadoConexion(api, autenticacion) {
 }
 const CONECTADA = estadoConexion('disponible', 'vigente');
 
-function estadoEnvios(cambios) {
-  return [200, Object.assign({
-    inicializado: true, pendientes: 0, enviados: 0, fallidos_reintentables: 0,
-    fallidos_en_revision: 0, total: 0, detalle: null
-  }, cambios || {})];
-}
-
 function rutasBase(cambios) {
   return Object.assign({
     'GET /adaptador/sesion': [200, { autenticada: true, rol: 'PACIENTE' }],
-    'GET /adaptador/conectividad': [200, { api_central: 'disponible' }],
     'GET /adaptador/estado-conexion': CONECTADA,
     'GET /adaptador/embarazos': embarazos(),
     'GET /adaptador/embarazos/130/monitoreo': MONITOREO_130,
     'GET /adaptador/embarazos/100/monitoreo': MONITOREO_100,
-    'GET /adaptador/movimientos/estado': estadoEnvios({ inicializado: false }),
     'POST /adaptador/cerrar-sesion': [200, { autenticada: false }]
   }, cambios || {});
 }
@@ -482,10 +474,7 @@ test('Semana actual y semana de la lectura son cosas distintas', async () => {
   assert.equal($('mov-semana').textContent, 'Semana 27 en esa lectura');
   // Sin fecha probable de parto en el dato: no se inventa ni se marca histórico.
   assert.equal($('embarazo-fpp').textContent, 'No disponible');
-  assert.equal($('embarazo-historico').hidden, true);
-  // Dispositivo aprovisionado para este embarazo: el botón está disponible.
-  assert.equal($('btn-registrar-movimientos').disabled, false);
-  assert.equal($('nota-movimientos').textContent, 'Se guardará primero en este dispositivo.');
+  assert.equal($('embarazo-historico'), undefined);
 });
 
 // Cuenta paciente30@example.com, embarazo 129 (data/generated): su última FC
@@ -556,14 +545,15 @@ test('paciente30: FC/SpO2 y movimientos de lecturas distintas, cada uno con su f
   // El desfase del escenario de demostración no se convierte en un aviso.
   assert.equal($('nota-embarazo').hidden, true);
   // La fecha probable de parto registrada (1/7/2026) ya pasó: se muestra
-  // como registro histórico, sin cambiar su estado.
+  // sin aviso de registro histórico y sin cambiar su estado.
   assert.equal($('embarazo-fpp').textContent, '1 jul 2026');
-  assert.equal($('embarazo-historico').hidden, false);
+  assert.equal($('embarazo-historico'), undefined);
+  assert.doesNotMatch(HTML + JS, /Registro histórico: la fecha probable de parto ya pasó\./);
+  assert.equal(EMBARAZO_129.estado_embarazo, 'ACTIVO');
+  assert.equal(EMBARAZO_129.fecha_inicio, '2025-09-24');
+  assert.equal(EMBARAZO_129.fecha_probable_parto, '2026-07-01');
+  assert.equal($('embarazo-inicio').textContent, '24 sept 2025');
   assert.equal($('embarazo-estado').textContent, 'En curso');
-  // El dispositivo no sirve a este embarazo: el botón no se ofrece activo.
-  assert.equal($('btn-registrar-movimientos').disabled, true);
-  assert.equal($('nota-movimientos').textContent,
-    'Este dispositivo no está configurado para registrar sesiones de este embarazo.');
 });
 
 test('El alcance del semáforo está escrito: es de la lectura completa', () => {
@@ -668,10 +658,8 @@ test('Historial lista las lecturas canónicas con FC y SpO2 aunque la última so
 // Independencia entre Inicio e Historial
 // ---------------------------------------------------------------------------
 
-test('Cambiar el embarazo en Historial no repinta Inicio ni desvía el registro', async () => {
-  const { $, adaptador } = await arrancar(rutasBase({
-    'POST /adaptador/embarazos/130/sesiones-simuladas': [201, { registrado: true, estado: 'local' }]
-  }));
+test('Cambiar el embarazo en Historial no repinta Inicio', async () => {
+  const { $ } = await arrancar(rutasBase());
 
   elegirEnHistorial($, 100);
   await asentar();
@@ -680,14 +668,6 @@ test('Cambiar el embarazo en Historial no repinta Inicio ni desvía el registro'
   assert.equal($('mov-value').textContent, '12');
   assert.equal($('hr-value').textContent, '—');
   assert.equal($('embarazo-estado').textContent, 'En curso');
-
-  // El registro va al embarazo de Inicio, no al elegido en Historial.
-  $('btn-registrar-movimientos').click();
-  await asentar();
-  assert.equal(adaptador.contar('POST', '/adaptador/embarazos/130/sesiones-simuladas'), 1);
-  assert.equal(adaptador.contar('POST', '/adaptador/embarazos/100/sesiones-simuladas'), 0);
-  assert.equal($('nota-movimientos').textContent,
-    'Registro guardado en este dispositivo, pendiente de envío.');
 });
 
 test('Un refresco conserva la selección de Historial', async () => {
@@ -716,7 +696,7 @@ test('El enlace de Inicio abre Historial en el embarazo anterior', async () => {
   assert.equal($('mov-value').textContent, '12');
 });
 
-test('Con ambigüedad, Inicio no llama «actual» a ninguno ni habilita el registro', async () => {
+test('Con ambigüedad, Inicio no llama «actual» a ninguno ni muestra lecturas', async () => {
   const { $, adaptador } = await arrancar(rutasBase({
     'GET /adaptador/embarazos': embarazos({ actual: null, anteriores: [], ambiguo: true })
   }));
@@ -724,7 +704,6 @@ test('Con ambigüedad, Inicio no llama «actual» a ninguno ni habilita el regis
   assert.equal($('embarazo-estado').textContent, 'Sin determinar');
   assert.equal($('hr-value').textContent, '—');
   assert.equal($('mov-value').textContent, '—');
-  assert.equal($('btn-registrar-movimientos').disabled, true);
   // Solo Historial pidió monitoreo, y de un único episodio.
   assert.equal(adaptador.contar('GET', '/adaptador/embarazos/130/monitoreo'), 1);
 });
@@ -733,25 +712,18 @@ test('Con ambigüedad, Inicio no llama «actual» a ninguno ni habilita el regis
 // Sin conexión
 // ---------------------------------------------------------------------------
 
-test('Sin conexión se conserva el contexto conocido y se puede seguir registrando', async () => {
-  const { $, adaptador } = await arrancar(rutasBase({
-    'POST /adaptador/embarazos/130/sesiones-simuladas': [201, { registrado: true, estado: 'local' }]
-  }));
-  assert.equal($('btn-registrar-movimientos').disabled, false);
+test('Sin conexión se conserva el contexto conocido y se dice', async () => {
+  const { $, adaptador } = await arrancar(rutasBase());
 
   // La API central cae: el adaptador responde 200 con disponible: false.
   adaptador.rutas['GET /adaptador/embarazos'] = [200, { disponible: false, motivo: 'sin_conexion' }];
   $('main-menu').querySelectorAll('a[data-vista]')[0].click();
   await asentar();
 
-  assert.match($('nota-embarazo').textContent, /^Sin conexión con el servidor/);
+  assert.equal($('nota-embarazo').textContent,
+    'Sin conexión con el servidor. Se muestra la última información consultada.');
   assert.equal($('embarazo-estado').textContent, 'En curso');
   assert.equal($('mov-value').textContent, '12', 'la última lectura, con su fecha, sigue a la vista');
-  assert.equal($('btn-registrar-movimientos').disabled, false);
-
-  $('btn-registrar-movimientos').click();
-  await asentar();
-  assert.equal(adaptador.contar('POST', '/adaptador/embarazos/130/sesiones-simuladas'), 1);
 });
 
 test('Sin conexión y sin contexto previo no se inventa un embarazo en curso', async () => {
@@ -760,7 +732,6 @@ test('Sin conexión y sin contexto previo no se inventa un embarazo en curso', a
   }));
 
   assert.equal($('embarazo-estado').textContent, 'No disponible');
-  assert.equal($('btn-registrar-movimientos').disabled, true);
 });
 
 // ---------------------------------------------------------------------------
@@ -805,59 +776,31 @@ test('Una respuesta que llega después de cerrar sesión no repinta nada', async
 });
 
 // ---------------------------------------------------------------------------
-// Mensajes de envío
+// Inicio solo consulta
 // ---------------------------------------------------------------------------
 
-async function estadoMostrado(cambios) {
-  const { $ } = await arrancar(rutasBase({
-    'GET /adaptador/movimientos/estado': estadoEnvios(cambios)
-  }));
-  return {
-    texto: $('envio-estado').textContent,
-    accion: $('btn-sincronizar-movimientos').hidden ? null : $('btn-sincronizar-movimientos').textContent
-  };
-}
+test('Inicio no ofrece registrar ni enviar movimientos, ni muestra un indicador de conexión', async () => {
+  const { $, adaptador, tic } = await arrancar(rutasBase());
+  await tic();
 
-test('Envío: pendiente, fallido reintentable, en revisión, enviado y sin registros', async () => {
-  let r = await estadoMostrado({ pendientes: 1 });
-  assert.equal(r.texto, 'Registro guardado, pendiente de envío.');
-  assert.equal(r.accion, 'Enviar ahora');
-
-  r = await estadoMostrado({ fallidos_reintentables: 1 });
-  assert.equal(r.texto, 'No se pudo enviar un registro; continúa guardado en este dispositivo.');
-  assert.equal(r.accion, 'Reintentar');
-
-  r = await estadoMostrado({ fallidos_en_revision: 2 });
-  assert.match(r.texto, /^2 registros no se pudieron enviar/);
-  assert.equal(r.accion, null, 'lo que está en revisión no se reintenta desde aquí');
-
-  r = await estadoMostrado({ enviados: 3 });
-  assert.equal(r.texto, 'Tus registros fueron enviados.');
-  assert.equal(r.accion, null);
-
-  r = await estadoMostrado({ inicializado: false });
-  assert.equal(r.texto, 'Todavía no has registrado sesiones de movimientos.');
-  assert.equal(r.accion, null);
+  for (const id of ['btn-registrar-movimientos', 'nota-movimientos', 'btn-sincronizar-movimientos',
+    'envio-estado', 'envio-resultado', 'envio-ultimo', 'connection-status']) {
+    assert.equal($(id), undefined, id);
+  }
+  assert.doesNotMatch(HTML, /Sesión de movimientos|Enviar ahora|Registrar sesión/);
+  // Ni una petición que escriba, ni las consultas de la cola o de la conectividad.
+  assert.ok(adaptador.llamadas.every((l) => l.metodo === 'GET'),
+    JSON.stringify(adaptador.llamadas.filter((l) => l.metodo !== 'GET')));
+  assert.equal(adaptador.contar('GET', '/adaptador/movimientos/estado'), 0);
+  assert.equal(adaptador.contar('GET', '/adaptador/conectividad'), 0);
 });
 
-test('Envío: el resultado de una ronda dice exactamente lo que confirmó la API', async () => {
-  const ronda = { seleccionados: 1, entregados: 0, reintentables: 1, rechazados: 0,
-    agotados: 0, ya_entregados: 0, detenida_por_transporte: true, detenida_por_credencial: false };
-  const { $ } = await arrancar(rutasBase({
-    'GET /adaptador/movimientos/estado': estadoEnvios({ pendientes: 1 }),
-    'POST /adaptador/movimientos/sincronizar': () => [200, ronda]
-  }));
-
-  $('btn-sincronizar-movimientos').click();
-  await asentar();
-  assert.equal($('envio-resultado').textContent,
-    'No se pudo enviar; el registro continúa guardado en este dispositivo.');
-  assert.doesNotMatch($('envio-resultado').textContent, /enviado\./);
-
-  Object.assign(ronda, { entregados: 1, reintentables: 0, detenida_por_transporte: false });
-  $('btn-sincronizar-movimientos').click();
-  await asentar();
-  assert.equal($('envio-resultado').textContent, 'Registro enviado.');
+test('El pie ofrece el contacto técnico y los derechos reservados; ya no firma la tesis', () => {
+  const pie = HTML.split('<footer')[1];
+  assert.match(pie, /Comunícate con el administrador del sistema/);
+  assert.match(pie, /href="tel:\+50769210003">\+507 6921-0003</);
+  assert.match(pie, /Todos los derechos reservados\./);
+  assert.doesNotMatch(HTML, /Trabajo de tesis de/);
 });
 
 // ---------------------------------------------------------------------------
@@ -915,19 +858,23 @@ test('Con el token vencido el servidor sigue disponible: no se pinta «Sin conex
     'GET /adaptador/estado-conexion': estadoConexion('disponible', 'reautenticacion_requerida')
   }));
 
-  assert.equal($('connection-status').textContent, 'Vuelve a iniciar sesión');
-  assert.doesNotMatch($('connection-status').textContent, /Sin conexión/);
+  assert.doesNotMatch($('nota-embarazo').textContent, /Sin conexión/);
   assert.equal($('aviso-sesion-central').hidden, false);
   assert.equal($('btn-mostrar-reautenticar').hidden, false);
   assert.equal($('vista-inicio').hidden, false, 'la sesión local sigue abierta');
 });
 
-test('Con la API caída el indicador dice «Sin conexión con el servidor» y no pide credenciales', async () => {
-  const { $ } = await arrancar(rutasBase({
-    'GET /adaptador/estado-conexion': estadoConexion('no_disponible', 'no_comprobada')
-  }));
+test('Si la API cae con la página abierta, se avisa y se conserva lo mostrado; no pide credenciales', async () => {
+  const { $, adaptador, tic } = await arrancar(rutasBase());
+  assert.equal($('nota-embarazo').hidden, true, 'con conexión no hay aviso');
 
-  assert.equal($('connection-status').textContent, 'Sin conexión con el servidor');
+  adaptador.rutas['GET /adaptador/estado-conexion'] = estadoConexion('no_disponible', 'no_comprobada');
+  await tic();
+
+  assert.equal($('nota-embarazo').hidden, false);
+  assert.equal($('nota-embarazo').textContent,
+    'Sin conexión con el servidor. Se muestra la última información consultada.');
+  assert.equal($('mov-value').textContent, '12');
   assert.equal($('aviso-sesion-central').hidden, true);
 });
 
@@ -936,17 +883,15 @@ test('Un 403 es «acceso no autorizado»: no se confunde con un token vencido ni
     'GET /adaptador/estado-conexion': estadoConexion('disponible', 'acceso_denegado')
   }));
 
-  assert.equal($('connection-status').textContent, 'Acceso no autorizado');
   assert.equal($('aviso-sesion-central').hidden, false);
   assert.equal($('btn-mostrar-reautenticar').hidden, true);
 });
 
-test('Reautenticar recupera la sesión central, recarga lo clínico y conserva los registros pendientes', async () => {
+test('Reautenticar recupera la sesión central y recarga lo clínico', async () => {
   let vigente = false;
   const { $, adaptador } = await arrancar(rutasBase({
     'GET /adaptador/estado-conexion': () =>
       estadoConexion('disponible', vigente ? 'vigente' : 'reautenticacion_requerida'),
-    'GET /adaptador/movimientos/estado': estadoEnvios({ pendientes: 1 }),
     'POST /adaptador/reautenticar': () => { vigente = true; return CONECTADA; }
   }));
   const clinicasAntes = adaptador.contar('GET', '/adaptador/embarazos');
@@ -961,9 +906,7 @@ test('Reautenticar recupera la sesión central, recarga lo clínico y conserva l
   assert.equal(adaptador.contar('POST', '/adaptador/reautenticar'), 1);
   assert.equal($('reauth-password').value, '', 'la contraseña no se conserva');
   assert.equal($('aviso-sesion-central').hidden, true);
-  assert.equal($('connection-status').textContent, 'Conectada al servidor');
   assert.equal(adaptador.contar('GET', '/adaptador/embarazos'), clinicasAntes + 1, 'se recarga una vez');
-  assert.equal($('envio-estado').textContent, 'Registro guardado, pendiente de envío.');
   assert.equal(adaptador.contar('POST', '/adaptador/cerrar-sesion'), 0);
   assert.ok(adaptador.llamadas.every((l) => l.metodo !== 'DELETE'));
 });
@@ -986,7 +929,7 @@ test('Reautenticar con credenciales que no sirven avisa y no cierra la sesión l
   assert.equal(adaptador.contar('POST', '/adaptador/cerrar-sesion'), 0);
 });
 
-test('El refresco periódico comprueba conexión y envíos, pero no repite lecturas clínicas', async () => {
+test('El refresco periódico comprueba la conexión, pero no repite lecturas clínicas', async () => {
   const { adaptador, tic } = await arrancar(rutasBase());
   const clinicas = adaptador.contar('GET', '/adaptador/embarazos');
   const monitoreos = adaptador.contar('GET', '/adaptador/embarazos/130/monitoreo');
@@ -1007,16 +950,17 @@ test('Cuando la API vuelve, lo clínico se recarga una sola vez', async () => {
     'GET /adaptador/estado-conexion': () =>
       estadoConexion(api, api === 'disponible' ? 'vigente' : 'no_comprobada')
   }));
-  assert.equal($('connection-status').textContent, 'Sin conexión con el servidor');
   const clinicas = adaptador.contar('GET', '/adaptador/embarazos');
 
   await tic();
   assert.equal(adaptador.contar('GET', '/adaptador/embarazos'), clinicas, 'sigue caída: nada');
 
+  assert.match($('nota-embarazo').textContent, /^Sin conexión con el servidor/);
+
   api = 'disponible';
   await tic();
-  assert.equal($('connection-status').textContent, 'Conectada al servidor');
   assert.equal(adaptador.contar('GET', '/adaptador/embarazos'), clinicas + 1);
+  assert.equal($('nota-embarazo').hidden, true, 'la recarga reemplaza el aviso');
 
   await tic();
   assert.equal(adaptador.contar('GET', '/adaptador/embarazos'), clinicas + 1, 'sin bucle de recargas');
@@ -1034,7 +978,7 @@ test('Comprobaciones simultáneas comparten una sola petición', async () => {
   assert.equal(adaptador.contar('GET', '/adaptador/estado-conexion'), antes + 1);
   adaptador.diferidas.forEach((d) => d.soltar());
   await asentar();
-  assert.equal($('connection-status').textContent, 'Conectada al servidor');
+  assert.equal($('aviso-sesion-central').hidden, true);
 });
 
 test('Volver a la pestaña con datos de más de un minuto los vuelve a pedir; con datos recientes, no', async () => {
@@ -1057,7 +1001,7 @@ test('Tras cerrar sesión no queda ningún temporizador ni se repinta con una co
   assert.equal(intervalos.size, 1);
 
   adaptador.diferirSi((clave) => clave === 'GET /adaptador/estado-conexion');
-  $('btn-actualizar-datos').click();
+  $('main-menu').querySelectorAll('a[data-vista]')[0].click();
   $('btn-cerrar-sesion').click();
   $('btn-confirmar-cierre').click();
   await asentar();
@@ -1068,7 +1012,6 @@ test('Tras cerrar sesión no queda ningún temporizador ni se repinta con una co
   adaptador.diferidas.forEach((d) => d.soltar());
   await asentar();
   assert.equal($('aviso-sesion-central').hidden, true);
-  assert.equal($('connection-status').textContent, 'Servidor disponible');
 });
 
 test('Iniciar sesión otra vez no duplica el temporizador', async () => {
@@ -1087,35 +1030,12 @@ test('Iniciar sesión otra vez no duplica el temporizador', async () => {
   assert.equal(intervalos.size, 1);
 });
 
-test('Sin token el envío se detiene, se avisa y el indicador lo refleja; nada se da por enviado', async () => {
-  let requerida = false;
-  const ronda = { seleccionados: 1, entregados: 0, reintentables: 0, rechazados: 0,
-    agotados: 0, ya_entregados: 0, detenida_por_transporte: false, detenida_por_credencial: true };
-  const { $ } = await arrancar(rutasBase({
-    'GET /adaptador/estado-conexion': () =>
-      estadoConexion('disponible', requerida ? 'reautenticacion_requerida' : 'vigente'),
-    'GET /adaptador/movimientos/estado': estadoEnvios({ pendientes: 1 }),
-    'POST /adaptador/movimientos/sincronizar': () => { requerida = true; return [200, ronda]; }
-  }));
+test('Inicio ya no muestra la hora de consulta ni el botón «Actualizar información»', async () => {
+  const { $ } = await arrancar(rutasBase());
 
-  $('btn-sincronizar-movimientos').click();
-  await asentar();
-  assert.equal($('envio-resultado').textContent,
-    'Para enviar hace falta volver a iniciar sesión; tus registros siguen guardados.');
-  assert.equal($('connection-status').textContent, 'Vuelve a iniciar sesión');
-  assert.equal($('envio-ultimo').hidden, true, 'un servidor disponible no es un envío confirmado');
-});
-
-test('El último envío confirmado sale de la cola, no de la conexión', async () => {
-  const { $ } = await arrancar(rutasBase({
-    'GET /adaptador/movimientos/estado': estadoEnvios({
-      enviados: 1, ultimo_envio_confirmado: '2026-09-24T07:07:23.784784+00:00'
-    })
-  }));
-
-  assert.equal($('envio-ultimo').textContent,
-    'Último envío confirmado por el servidor: 24 sept 2026, 02:07.');
-  assert.match($('datos-actualizados').textContent, /^Información consultada al servidor el 25 sept 2026, 10:00\./);
+  assert.equal($('datos-actualizados'), undefined);
+  assert.equal($('btn-actualizar-datos'), undefined);
+  assert.doesNotMatch(HTML + JS, /Información consultada al servidor|Actualizar información/);
 });
 
 test('Si la petición local se corta (equipo suspendido), no se afirma «Sin conexión»; al reanudar se comprueba y recarga una vez', async () => {
@@ -1128,14 +1048,12 @@ test('Si la petición local se corta (equipo suspendido), no se afirma «Sin con
   delete adaptador.rutas['GET /adaptador/estado-conexion'];
   documento.disparar('visibilitychange');
   await asentar();
-  assert.equal($('connection-status').textContent, 'No se pudo comprobar la conexión');
-  assert.doesNotMatch($('connection-status').textContent, /Sin conexión/);
+  assert.doesNotMatch($('nota-embarazo').textContent, /Sin conexión/);
   assert.equal($('vista-inicio').hidden, false);
 
   adaptador.rutas['GET /adaptador/estado-conexion'] = vigente;
   documento.disparar('resume');
   await asentar();
-  assert.equal($('connection-status').textContent, 'Conectada al servidor');
   assert.equal(adaptador.contar('GET', '/adaptador/embarazos'), clinicas + 1);
 });
 
@@ -1151,4 +1069,149 @@ test('Volver a Inicio no borra la semana del último registro mientras llega el 
   adaptador.diferidas.forEach((d) => d.soltar());
   await asentar();
   assert.equal($('embarazo-semana').textContent, '39 (21 jun 2026)');
+});
+
+// ---------------------------------------------------------------------------
+// Entrega confirmada por el envío automático: una sola recarga clínica
+// ---------------------------------------------------------------------------
+//
+// `ultimo_envio_confirmado` llega con cada comprobación de estado (lectura
+// local del portal). La primera es la línea base; solo un cambio posterior
+// recarga lo clínico, y una sola vez. Se cuenta con las peticiones a
+// /adaptador/embarazos, que es lo que hace cargarClinico().
+
+function estadoConEnvio(valor) {
+  return [200, Object.assign({}, CONECTADA[1], { ultimo_envio_confirmado: valor })];
+}
+
+const RUTA_ESTADO = 'GET /adaptador/estado-conexion';
+const clinicas = (adaptador) => adaptador.contar('GET', '/adaptador/embarazos');
+
+test('Envío confirmado: el valor inicial es la línea base y no recarga nada', async () => {
+  const { adaptador, tic } = await arrancar(rutasBase({ [RUTA_ESTADO]: estadoConEnvio('2026-09-25T08:00:00+00:00') }));
+  assert.equal(clinicas(adaptador), 1, 'solo la carga de la entrada');
+
+  await tic();
+  await tic();
+  assert.equal(clinicas(adaptador), 1, 'mismo valor: nada');
+});
+
+test('Envío confirmado: un valor nuevo recarga lo clínico exactamente una vez', async () => {
+  let valor = '2026-09-25T08:00:00+00:00';
+  const { $, adaptador, tic } = await arrancar(rutasBase({ [RUTA_ESTADO]: () => estadoConEnvio(valor) }));
+  await tic();
+  assert.equal(clinicas(adaptador), 1);
+
+  valor = '2026-09-25T08:15:00+00:00';
+  await tic();
+  assert.equal(clinicas(adaptador), 2, 'una recarga por la entrega nueva');
+  assert.equal($('mov-value').textContent, '12');
+
+  await tic();
+  await tic();
+  assert.equal(clinicas(adaptador), 2, 'el mismo valor nuevo no vuelve a recargar');
+});
+
+test('Envío confirmado: de ninguno a uno también es una entrega nueva', async () => {
+  let valor = null;
+  const { adaptador, tic } = await arrancar(rutasBase({ [RUTA_ESTADO]: () => estadoConEnvio(valor) }));
+  await tic();
+  valor = '2026-09-25T08:15:00+00:00';
+  await tic();
+  assert.equal(clinicas(adaptador), 2);
+});
+
+test('Envío confirmado: al cerrar sesión se olvida la línea base; otra cuenta empieza la suya', async () => {
+  const { $, adaptador, tic } = await arrancar(rutasBase({
+    [RUTA_ESTADO]: estadoConEnvio('2026-09-25T08:15:00+00:00'),
+    'POST /adaptador/iniciar-sesion': [200, { autenticada: true }]
+  }));
+  $('btn-cerrar-sesion').click();
+  $('btn-confirmar-cierre').click();
+  await asentar();
+
+  // Entra otra paciente, con su propio último envío.
+  Object.assign(adaptador.rutas, rutasPaciente30({
+    [RUTA_ESTADO]: estadoConEnvio('2026-09-24T10:00:00+00:00'),
+    'POST /adaptador/iniciar-sesion': [200, { autenticada: true }]
+  }));
+  const antes = clinicas(adaptador);
+  $('login-email').value = 'paciente30@example.com';
+  $('login-password').value = 'clave-de-prueba';
+  $('form-login').disparar('submit');
+  await asentar();
+  assert.equal(clinicas(adaptador), antes + 1, 'solo la carga de la entrada de B');
+
+  // Si hubiera heredado la línea base de A, este valor distinto recargaría.
+  await tic();
+  await tic();
+  assert.equal(clinicas(adaptador), antes + 1);
+  assert.equal($('mov-value').textContent, '7');
+});
+
+test('Envío confirmado: una respuesta tardía de la cuenta A no toca a B', async () => {
+  const { $, adaptador, tic } = await arrancar(rutasBase({
+    [RUTA_ESTADO]: estadoConEnvio('2026-09-25T08:00:00+00:00'),
+    'POST /adaptador/iniciar-sesion': [200, { autenticada: true }]
+  }));
+
+  // A: una entrega nueva cuya respuesta queda retenida.
+  adaptador.rutas[RUTA_ESTADO] = estadoConEnvio('2026-09-25T09:30:00+00:00');
+  adaptador.diferirSi((clave) => clave === RUTA_ESTADO);
+  await tic();
+  assert.equal(adaptador.diferidas.length, 1);
+  adaptador.diferirSi(() => false);
+
+  // A cierra sesión y entra B.
+  $('btn-cerrar-sesion').click();
+  $('btn-confirmar-cierre').click();
+  await asentar();
+  Object.assign(adaptador.rutas, rutasPaciente30({
+    [RUTA_ESTADO]: estadoConEnvio('2026-09-24T10:00:00+00:00'),
+    'POST /adaptador/iniciar-sesion': [200, { autenticada: true }]
+  }));
+  $('login-email').value = 'paciente30@example.com';
+  $('login-password').value = 'clave-de-prueba';
+  $('form-login').disparar('submit');
+  await asentar();
+  const deB = clinicas(adaptador);
+  const monitoreos130 = adaptador.contar('GET', '/adaptador/embarazos/130/monitoreo');
+
+  // Llega tarde la respuesta de A.
+  adaptador.diferidas[0].soltar();
+  await asentar();
+  assert.equal(clinicas(adaptador), deB, 'ninguna recarga por un evento de A');
+  assert.equal(adaptador.contar('GET', '/adaptador/embarazos/130/monitoreo'), monitoreos130);
+  assert.equal($('mov-value').textContent, '7', 'B sigue a la vista');
+
+  // Y la línea base de B no cambió: su propio valor no recarga.
+  await tic();
+  assert.equal(clinicas(adaptador), deB);
+});
+
+test('Envío confirmado: si la comprobación falla no se borra nada ni se inventa una entrega', async () => {
+  let valor = '2026-09-25T08:00:00+00:00';
+  const { $, adaptador, tic } = await arrancar(rutasBase({ [RUTA_ESTADO]: () => estadoConEnvio(valor) }));
+  const vigente = adaptador.rutas[RUTA_ESTADO];
+
+  // La aplicación local no contesta.
+  delete adaptador.rutas[RUTA_ESTADO];
+  await tic();
+  await tic();
+  assert.equal(clinicas(adaptador), 1, 'sin recarga falsa');
+  assert.equal($('mov-value').textContent, '12', 'lo mostrado se conserva');
+  assert.equal($('embarazo-estado').textContent, 'En curso');
+
+  // Vuelve con el mismo valor. Hay UNA recarga, pero es la de siempre al
+  // recuperar la comunicación (ver la prueba del equipo suspendido), no una
+  // entrega: el valor es el mismo y la línea base se conservó.
+  adaptador.rutas[RUTA_ESTADO] = vigente;
+  await tic();
+  assert.equal(clinicas(adaptador), 2, 'solo la recarga por la recuperación');
+  await tic();
+  assert.equal(clinicas(adaptador), 2, 'mismo valor tras la recuperación: nada');
+  // Y una entrega nueva se sigue detectando contra esa línea base.
+  valor = '2026-09-25T08:15:00+00:00';
+  await tic();
+  assert.equal(clinicas(adaptador), 3);
 });

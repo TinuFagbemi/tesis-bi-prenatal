@@ -1,13 +1,21 @@
-"""Registro y sincronizacion de sesiones de movimiento simuladas (SCRUM-72).
+"""Captura y envio automatico de sesiones de movimiento simuladas (SCRUM-72).
 
 **Este modulo no reimplementa nada de `app.edge`.** Abre una conexion con
 :func:`app.edge.conectar`, prepara el esquema con :func:`app.edge.inicializar`
 y delega toda la logica de dominio a las funciones que ese paquete ya publica y
 que SCRUM-64/65 ya probaron: :func:`app.edge.capturar` para guardar un paquete
-sin red, :func:`app.edge.ejecutar_pasada` para intentar entregarlo, y
-:func:`app.edge.resumen` --por medio de ``app.gestante.estado_local.leer``--
-para contar el resultado. Ninguna regla de idempotencia, de reintento o de
-validacion se vuelve a escribir aqui.
+sin red, :func:`app.edge.censar` y :meth:`app.edge.ClienteEdge.verificar_credencial`
+para decidir si merece la pena intentar, :func:`app.edge.ejecutar_pasada` para
+entregarlo, y :func:`app.edge.resumen` --por medio de
+``app.gestante.estado_local.leer``-- para contar el resultado. Ninguna regla de
+idempotencia, de reintento o de validacion se vuelve a escribir aqui.
+
+**Nadie pulsa «capturar» ni «enviar».** La captura la produce el dispositivo
+--en este MVP, ``scripts/dispositivo_gestante.py``, que llama a
+:func:`registrar_sesion_simulada` con la cuenta y el embarazo del
+aprovisionamiento--, y la entrega la dispara
+:mod:`app.gestante.envio_automatico` en segundo plano, cuenta por cuenta, con
+:func:`enviar_pendientes_de_la_cuenta`. El navegador no participa.
 
 **Un archivo SQLite por cuenta, nunca uno compartido.** El nodo edge clasico
 --el que ``scripts/edge_node.py`` opera-- modela el dispositivo de una clinica
@@ -20,8 +28,8 @@ la cola de la otra, y la manera de garantizarlo sin tocar el esquema de
 ``id_usuario`` -- el mismo identificador que ya distingue una sesion local de
 otra en ``app.gestante.sesion``.
 
-**El token central nunca llega a SQLite.** :func:`sincronizar_cuenta` recibe el
-token que ``app.gestante.rutas`` ya conserva en memoria, arma con el un
+**El token central nunca llega a SQLite.** :func:`enviar_pendientes_de_la_cuenta`
+recibe el token que ``app.gestante.rutas`` ya conserva en memoria, arma con el un
 ``httpx.Client`` de vida corta -- igual que ``scripts/edge_node.py`` hace con
 ``EDGE_API_TOKEN`` -- y lo cierra al terminar. Ninguna fila de
 ``captura_local``, ``outbox`` ni ``intento_sincronizacion`` tiene una columna
@@ -35,7 +43,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable
 from contextlib import closing
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -45,13 +53,18 @@ from app.edge import (
     ClienteEdge,
     PoliticaDeReintentos,
     ResumenPasada,
+    ahora_utc,
     capturar,
+    censar,
     conectar,
     ejecutar_pasada,
     inicializar,
     preparar_directorio,
+    reconciliar_abandonados,
+    resolver_herencia,
 )
 from app.edge.captura import CapturaRegistrada
+from app.edge.cliente import CODIGOS_DE_CREDENCIAL
 from app.gestante import estado_local
 from app.gestante.config import GestanteSettings
 from app.gestante.provision import Provision
@@ -164,32 +177,102 @@ def _construir_cliente_edge_http(
     )
 
 
-def sincronizar_cuenta(
+@dataclass(frozen=True)
+class EnvioDeLaCuenta:
+    """Lo que hizo un intento automatico sobre la cola de una cuenta.
+
+    ``pasada`` solo existe si se llego a ejecutar una ronda. Los otros dos
+    desenlaces no reclaman ningun evento, y por eso no gastan intentos:
+
+    * ``sin_pendientes``: no habia nada elegible ahora; no se toco la red;
+    * ``sin_credencial_util``: la verificacion previa no paso --sin red, API
+      caida, token vencido--; la cola queda exactamente como estaba.
+    """
+
+    sin_pendientes: bool = False
+    sin_credencial_util: bool = False
+    credencial_rechazada: bool = False
+    pasada: ResumenPasada | None = None
+    # Intentos abandonados --reclamados por un proceso que murio antes de
+    # registrar su resultado-- que este ciclo sello al vencer su lease.
+    intentos_reconciliados: int = 0
+
+
+def enviar_pendientes_de_la_cuenta(
     settings: GestanteSettings,
     *,
     id_usuario: int,
     token: str,
     constructor_cliente_http: Callable[[GestanteSettings, str], httpx.Client]
     | None = None,
-) -> ResumenPasada:
-    """Una sola ronda de envio -- el mismo mecanismo que ``edge_node.py enviar``
-    -- sobre el archivo de esta cuenta, usando el token que ya esta en memoria.
+    reloj: Callable[[], datetime] = ahora_utc,
+) -> EnvioDeLaCuenta:
+    """Una ronda automatica sobre el archivo de esta cuenta, si tiene sentido.
 
-    ``constructor_cliente_http`` existe solo para que una prueba pueda
-    sustituir el transporte real por un ``httpx.MockTransport``, igual que
-    ``ContextoAdaptador.cliente_central`` se sustituye para no necesitar la API
-    de verdad. En produccion nunca se pasa: se usa el cliente HTTP real.
+    Cuatro pasos, todos de ``app.edge``:
+
+    0. **Reparacion local**, sin red ni credencial, igual que hace el
+       sincronizador de SCRUM-65 al principio de cada iteracion:
+       :func:`app.edge.reconciliar_abandonados` sella los intentos cuyo lease
+       vencio sin resultado --un portal que se apago en mitad de un envio-- y
+       los devuelve al reintento programado (o al agotamiento, si era el
+       ultimo), y :func:`app.edge.resolver_herencia` cierra los eventos
+       heredados de SCRUM-64 que ya agotaron el limite. Sin esto, un intento
+       abierto dejaria el evento fuera de los elegibles para siempre.
+    1. **Censo** de la cola, sin red. Si no hay nada elegible ahora --vacia,
+       todo entregado, un intento todavia en su lease, o un reintento
+       programado para mas tarde--, se termina aqui. Un archivo que no existe
+       no se crea.
+    2. **Verificacion previa** de la credencial contra ``/yo``, la misma que usa
+       ``edge_node.py``. Existe por la misma razon: reclamar un evento gasta un
+       intento antes de enviar, asi que sin red o con un token vencido cada
+       ciclo del emisor consumiria el presupuesto de paquetes que no tienen
+       nada malo. Si no pasa, no se reclama nada.
+    3. **Una ronda** con ``respetar_programacion=True``, igual que el
+       sincronizador de SCRUM-65: la espera incremental que dejo un fallo se
+       respeta, y la clave y los bytes guardados en la captura se reenvian sin
+       cambios, asi que un reintento nunca crea una segunda sesion remota.
+
+    ``constructor_cliente_http`` y ``reloj`` existen para las pruebas; en
+    produccion se usan el cliente HTTP real y el reloj real.
     """
-    constructor = constructor_cliente_http or _construir_cliente_edge_http
     ruta = ruta_para_la_cuenta(settings, id_usuario)
-    preparar_directorio(ruta)
+    if not ruta.exists():
+        return EnvioDeLaCuenta(sin_pendientes=True)
 
-    with constructor(settings, token) as http:
-        cliente = ClienteEdge(http)
-        with conectar(ruta, espera_de_bloqueo_ms=settings.busy_timeout_ms) as conexion:
-            inicializar(conexion)
-            return ejecutar_pasada(
+    politica = PoliticaDeReintentos(http_timeout=settings.http_timeout)
+    constructor = constructor_cliente_http or _construir_cliente_edge_http
+
+    with conectar(ruta, espera_de_bloqueo_ms=settings.busy_timeout_ms) as conexion:
+        inicializar(conexion)
+        ahora = reloj()
+        reconciliados = reconciliar_abandonados(conexion, politica=politica, momento=ahora)
+        resolver_herencia(conexion, politica=politica, momento=ahora)
+        censo = censar(conexion, max_attempts=politica.max_attempts, momento=reloj())
+        if censo.elegibles_ahora == 0:
+            return EnvioDeLaCuenta(sin_pendientes=True, intentos_reconciliados=reconciliados)
+
+        with constructor(settings, token) as http:
+            cliente = ClienteEdge(http)
+            verificacion = cliente.verificar_credencial()
+            if not verificacion.valido:
+                return EnvioDeLaCuenta(
+                    sin_credencial_util=True,
+                    credencial_rechazada=verificacion.codigo_http
+                    in CODIGOS_DE_CREDENCIAL,
+                    intentos_reconciliados=reconciliados,
+                )
+
+            pasada = ejecutar_pasada(
                 conexion,
                 cliente,
-                politica=PoliticaDeReintentos(http_timeout=settings.http_timeout),
+                politica=politica,
+                reloj=reloj,
+                respetar_programacion=True,
             )
+
+    return EnvioDeLaCuenta(
+        pasada=pasada,
+        credencial_rechazada=pasada.detenida_por_credencial,
+        intentos_reconciliados=reconciliados,
+    )

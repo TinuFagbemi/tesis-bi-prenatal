@@ -1,11 +1,14 @@
 """Las rutas del adaptador local de la interfaz de la gestante (SCRUM-72).
 
-Dieciseis rutas: cuatro sirven los archivos de la interfaz, siete atienden sesion,
+Quince rutas: cuatro sirven los archivos de la interfaz, siete atienden sesion,
 conexion y estado local, dos exponen la lectura clinica minima de SCRUM-98 --embarazos
 de la cuenta y el monitoreo de un episodio-- traducida desde
-``app.gestante.central`` y ``app.gestante.clinico``, y tres registran y
-sincronizan sesiones de movimiento simuladas por medio de
-``app.gestante.movimientos``, que a su vez delega en ``app.edge``. No hay mas:
+``app.gestante.central`` y ``app.gestante.clinico``, una captura en el
+dispositivo una sesion de movimiento simulada y otra cuenta, en solo lectura, la
+cola local de la cuenta, ambas por medio de ``app.gestante.movimientos``, que a
+su vez delega en ``app.edge``. Ninguna ruta envia la cola: eso lo hace
+``app.gestante.envio_automatico`` en segundo plano, y la interfaz web no llama a
+la captura --es la entrada del dispositivo simulado--. No hay mas:
 ninguna ruta reenvia un cuerpo ni una ruta arbitraria de la API central, y
 ninguna calcula un semaforo o un estado clinico por su cuenta.
 
@@ -21,8 +24,9 @@ asi la interfaz sigue en pie cuando el servidor central no responde; y asi
 de modo que este ticket no toca la aplicacion central.
 
 **La sesion humana y la credencial del nodo no se mezclan.** El token que se
-obtiene al iniciar sesion es de la persona, vive en memoria de este proceso y no
-se usa para sincronizar. ``EDGE_API_TOKEN`` es del nodo edge, lo lee
+obtiene al iniciar sesion es de la persona y vive en memoria de este proceso; el
+envio automatico lo usa para entregar la cola local de **esa misma cuenta** y
+de ninguna otra. ``EDGE_API_TOKEN`` es del nodo edge, lo lee
 ``scripts/edge_node.py`` y este modulo no lo lee, no lo reenvia y no lo conoce.
 
 Todas las cuentas y los datos son ficticios y simulados.
@@ -31,6 +35,7 @@ Todas las cuentas y los datos son ficticios y simulados.
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -189,19 +194,58 @@ class AlmacenDeTokens:
     Se indexa por el digest del identificador de sesion, no por el
     identificador: ni siquiera esta estructura conserva el valor que viaja en la
     cookie.
+
+    **Compartido entre hilos.** Lo usan a la vez las peticiones del portal
+    (inicio de sesion, reautenticacion, cierre) y el hilo del envio automatico.
+    Un ``threading.Lock`` protege cada operacion, de modo que «olvidar este
+    token solo si sigue siendo el rechazado» es una sola operacion atomica y
+    no puede borrar el token nuevo de una reautenticacion que llego en medio.
+    Ninguna operacion llama a otra con el cerrojo tomado, asi que basta un
+    ``Lock`` no reentrante.
     """
 
     def __init__(self) -> None:
         self._por_sesion: dict[str, str] = {}
+        self._cerrojo = threading.Lock()
 
     def guardar(self, identificador: str, token: str) -> None:
-        self._por_sesion[sesion_local.digest(identificador)] = token
+        clave = sesion_local.digest(identificador)
+        with self._cerrojo:
+            self._por_sesion[clave] = token
 
     def obtener(self, identificador: str) -> str | None:
-        return self._por_sesion.get(sesion_local.digest(identificador))
+        clave = sesion_local.digest(identificador)
+        with self._cerrojo:
+            return self._por_sesion.get(clave)
 
     def olvidar(self, identificador: str) -> None:
-        self._por_sesion.pop(sesion_local.digest(identificador), None)
+        clave = sesion_local.digest(identificador)
+        with self._cerrojo:
+            self._por_sesion.pop(clave, None)
+
+    def activos(self) -> list[tuple[str, str]]:
+        """Copia de los pares (digest, token) para el envio automatico.
+
+        Una copia tomada con el cerrojo, no una vista: el emisor la recorre en
+        otro hilo mientras las rutas guardan y olvidan tokens.
+        """
+        with self._cerrojo:
+            return list(self._por_sesion.items())
+
+    def olvidar_por_digest(self, hash_sesion: str, token: str) -> bool:
+        """Olvida ese token solo si sigue siendo el de esa sesion. Atomico.
+
+        El emisor lo llama cuando la API rechazo la credencial con la que
+        trabajaba. Si entretanto la paciente se volvio a autenticar, el token
+        guardado ya es otro y no se toca. Comparar y borrar ocurren con el
+        cerrojo tomado, sin que ninguna otra operacion pueda intercalarse.
+        Devuelve si borro algo.
+        """
+        with self._cerrojo:
+            if self._por_sesion.get(hash_sesion) != token:
+                return False
+            del self._por_sesion[hash_sesion]
+            return True
 
 
 @dataclass
@@ -211,8 +255,8 @@ class ContextoAdaptador:
     ``reloj`` se inyecta para que una prueba pueda recorrer la ventana de
     sesion sin esperarla, igual que ``app.edge.sincronizacion`` inyecta el suyo.
     ``cliente_central`` se inyecta para que las pruebas no necesiten ni la API
-    ni PostgreSQL. ``constructor_cliente_edge`` es la misma idea aplicada a la
-    sincronizacion de movimientos: por omision construye un ``httpx.Client``
+    ni PostgreSQL. ``constructor_cliente_edge`` es la misma idea aplicada al
+    envio automatico de la cola local: por omision construye un ``httpx.Client``
     real contra ``settings.api_base_url``, y una prueba puede sustituirlo por
     uno con ``httpx.MockTransport`` sin tocar la red.
     """
@@ -553,6 +597,13 @@ def crear_router(contexto: ContextoAdaptador) -> APIRouter:
           válida y no puede hacer esto; reautenticarse no lo cambia) o
           ``no_comprobada`` (no se pudo preguntar).
 
+        Además, ``ultimo_envio_confirmado``: cuándo aceptó el servidor por última
+        vez una captura de **esta** cuenta, leído del SQLite local de su cola
+        (``enviado_en`` de la outbox), o ``None``. Es una lectura local, sin red.
+        La interfaz la compara con la anterior para recargar lo clínico una sola
+        vez cuando el envío automático entrega algo nuevo, sin sondear los datos
+        clínicos.
+
         **No renueva nada.** Ni la ventana local ni el token: consultar el
         estado cada pocos segundos no puede alargar una sesión. Tampoco escribe
         auditoría en el servidor: ``/yo`` solo resuelve la identidad.
@@ -567,6 +618,9 @@ def crear_router(contexto: ContextoAdaptador) -> APIRouter:
                     "api_central": api,
                     "autenticacion_central": autenticacion,
                     "sesion_local_expira_en": sesion.expira_en.isoformat(),
+                    "ultimo_envio_confirmado": movimientos.ultimo_envio_confirmado(
+                        settings, sesion.id_usuario
+                    ),
                 }
             )
 
@@ -870,29 +924,11 @@ def crear_router(contexto: ContextoAdaptador) -> APIRouter:
         ):
             semana_actual = semana_gestacional(actual.fecha_inicio, hoy)
 
-        # Si este dispositivo puede registrar sesiones para el embarazo en
-        # curso de ESTA cuenta: la misma comprobacion que hace el registro
-        # (``Provision.sirve_a``), adelantada para que la interfaz no ofrezca un
-        # boton que el adaptador va a rechazar. Sin aprovisionamiento valido,
-        # o sin un unico embarazo en curso, es ``False``.
-        registro_en_este_dispositivo = False
-        if actual is not None and not episodios.ambiguo:
-            try:
-                aprovisionamiento = provision.cargar(settings.provision_path)
-            except provision.ProvisionInvalida:
-                aprovisionamiento = None
-            registro_en_este_dispositivo = aprovisionamiento is not None and (
-                aprovisionamiento.sirve_a(sesion.id_usuario, actual.id_embarazo)
-            )
-
         return json(
             {
                 "disponible": True,
                 "datos": {
                     "hoy": hoy.date().isoformat(),
-                    # Si el boton de registrar movimientos sirve para el
-                    # embarazo en curso en este dispositivo.
-                    "registro_en_este_dispositivo": registro_en_este_dispositivo,
                     # Semana del embarazo en curso **hoy**, o ``None`` si no hay
                     # episodio en curso o su fecha probable de parto ya pasó.
                     # No es la semana de ninguna lectura: esa viaja con cada
@@ -1095,45 +1131,6 @@ def crear_router(contexto: ContextoAdaptador) -> APIRouter:
                 "capturado_en": ahora.isoformat(),
             },
             HTTPStatus.CREATED,
-        )
-
-    @router.post("/adaptador/movimientos/sincronizar")
-    def sincronizar_movimientos(peticion: Request) -> JSONResponse:
-        """Una sola ronda de envío de la cola de esta cuenta, ahora mismo.
-
-        Reutiliza ``app.edge.ejecutar_pasada`` con el token que ya está en
-        memoria de esta sesión. Nunca inventa un resultado: lo que responde es
-        exactamente lo que la API central contestó en esta ronda.
-        """
-        identificador, sesion = sesion_vigente(peticion)
-        if sesion is None:
-            return error(MENSAJE_SIN_SESION, HTTPStatus.UNAUTHORIZED)
-
-        token = contexto.tokens.obtener(identificador)
-        if token is None:
-            return no_disponible(MOTIVO_REAUTENTICACION)
-
-        pasada = movimientos.sincronizar_cuenta(
-            settings,
-            id_usuario=sesion.id_usuario,
-            token=token,
-            constructor_cliente_http=contexto.constructor_cliente_edge,
-        )
-
-        if pasada.detenida_por_credencial:
-            contexto.tokens.olvidar(identificador)
-
-        return json(
-            {
-                "seleccionados": pasada.seleccionados,
-                "entregados": pasada.entregados,
-                "reintentables": pasada.reintentables,
-                "rechazados": pasada.rechazados,
-                "agotados": pasada.agotados,
-                "ya_entregados": pasada.ya_entregados,
-                "detenida_por_transporte": pasada.detenida_por_transporte,
-                "detenida_por_credencial": pasada.detenida_por_credencial,
-            }
         )
 
     @router.get("/adaptador/movimientos/estado")

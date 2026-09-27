@@ -147,25 +147,6 @@ summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--clr-purpl
 }
 .btn-cuenta:hover,.btn-cuenta:focus{background:rgba(255,255,255,.2);border-color:#fff;}
 
-/* ----- Estado de la comunicacion con el servidor -----
-   El punto de color siempre va con su texto. */
-.connection-status{
-  display:inline-flex;align-items:center;gap:.5rem;
-  padding:.4rem .9rem;border-radius:9999px;font-weight:600;font-size:.82rem;
-  max-width:18rem;text-align:left;line-height:1.25;
-  box-shadow:0 4px 12px rgba(0,0,0,.12);
-}
-.connection-status::before{
-  content:'';width:.6rem;height:.6rem;border-radius:50%;flex-shrink:0;
-  background:currentColor;opacity:.85;
-}
-.status-connecting{background:#fef3c7;color:#78350f;animation:pulse 2s infinite;}
-.status-connected{background:#d1fae5;color:#064e3b;}
-.status-disconnected{background:#fee2e2;color:#7f1d1d;}
-.status-idle{background:#fef9c3;color:#713f12;}
-
-@keyframes pulse{0%,100%{opacity:1;}50%{opacity:.7;}}
-
 /* =========================================================
    SECCIONES
    ========================================================= */
@@ -264,18 +245,6 @@ summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--clr-purpl
 }
 .btn-enlace:hover,.btn-enlace:focus{color:#9333ea;}
 
-.btn-iniciar-conteo{
-  min-height:48px;padding:.7rem 1.6rem;
-  font-size:1rem;font-weight:700;font-family:inherit;color:#fff;
-  border:none;border-radius:9999px;cursor:pointer;
-  background:var(--clr-count-start);
-  box-shadow:0 4px 12px rgba(219,112,147,.35);
-  transition:transform .2s,box-shadow .2s,background .2s;
-}
-.btn-iniciar-conteo:hover:not(:disabled),
-.btn-iniciar-conteo:focus:not(:disabled){background:#c56082;transform:translateY(-1px);}
-.btn-iniciar-conteo:disabled{background:var(--clr-count-stop);opacity:.6;cursor:not-allowed;box-shadow:none;transform:none;}
-
 .mensaje-error{
   margin-top:1rem;padding:.8rem 1rem;border-radius:10px;
   background:#FFE4E6;color:#9f1239;border:1px solid #fecdd3;
@@ -316,11 +285,6 @@ summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--clr-purpl
 .embarazo-datos{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.6rem .4rem;}
 .data-row{display:flex;flex-direction:column;gap:.15rem;padding:.2rem .7rem;border-left:2px solid var(--clr-borde);}
 .data-row:nth-child(odd){border-left:none;padding-left:0;}
-.embarazo-historico{
-  margin-top:.7rem;padding:.35rem .8rem;border-radius:10px;
-  background:#f1f5f9;border-left:4px solid var(--clr-header-grad-5);
-  color:var(--clr-header-grad-3);font-size:.92rem;font-weight:600;
-}
 .data-row .label{font-size:.82rem;font-weight:600;color:var(--clr-text-sub);}
 .data-row .value{font-size:1.05rem;font-weight:700;color:var(--clr-header-grad-1);}
 .embarazo-anteriores{
@@ -393,8 +357,11 @@ summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--clr-purpl
 .bloque-graficas{margin-bottom:1.5rem;}
 .campo-periodo{flex-direction:row;align-items:center;gap:.6rem;}
 .campo-periodo select{min-height:40px;padding:.35rem .7rem;}
-.graficas{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1rem;align-items:start;}
+/* Frecuencia cardiaca y saturacion lado a lado; movimientos debajo, a todo
+   el ancho (graficas.js le da un lienzo mas ancho para que no crezca en alto). */
+.graficas{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem;align-items:start;}
 .grafica{padding:1rem 1rem .8rem;min-width:0;}
+.grafica-ancha{grid-column:1 / -1;}
 .grafica-cabecera{display:flex;align-items:center;gap:.7rem;margin-bottom:.3rem;}
 .grafica-cabecera .icono-circulo{width:2.4rem;height:2.4rem;}
 .grafica-cabecera h4{font-size:1rem;color:var(--clr-header-grad-1);}
@@ -410,20 +377,14 @@ summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--clr-purpl
 .grafica-eje{fill:#52607a;font-size:10.5px;font-family:inherit;}
 .grafica-unidad{fill:#52607a;font-size:10.5px;font-weight:600;font-family:inherit;}
 .grafica-valor{fill:var(--clr-header-grad-1);font-size:11px;font-weight:700;font-family:inherit;pointer-events:none;}
-.grafica-linea{fill:none;stroke-width:2.8;stroke-linejoin:round;stroke-linecap:round;}
-.grafica-area{stroke:none;pointer-events:none;}
 .grafica-marca{stroke:#fff;stroke-width:2;}
 .grafica-zona{fill:transparent;cursor:pointer;}
 .grafica-punto{outline:none;cursor:pointer;}
 .grafica-punto.activa .grafica-marca{r:6.5;stroke-width:2.5;}
 .grafica-punto.activa .grafica-barra{stroke:#1e1b4b;stroke-width:2;}
 .grafica-punto:focus-visible .grafica-zona{stroke:var(--clr-purple-1);stroke-width:2;}
-.grafica-rosa .grafica-linea{stroke:var(--clr-count-start);}
 .grafica-rosa .grafica-marca{fill:var(--clr-count-start);}
-.grafica-rosa .grafica-tono{stop-color:var(--clr-count-start);}
-.grafica-morada .grafica-linea{stroke:#6d5ce8;}
 .grafica-morada .grafica-marca{fill:#6d5ce8;}
-.grafica-morada .grafica-tono{stop-color:#6d5ce8;}
 .grafica-lila .grafica-tono{stop-color:#b48cf6;}
 .grafica-aviso{
   position:absolute;z-index:2;pointer-events:none;max-width:78%;
@@ -438,24 +399,46 @@ summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--clr-purpl
 }
 .tabla-compacta th,.tabla-compacta td{padding:.35rem .5rem;font-size:.82rem;}
 
-/* ----- Registro y envio ----- */
-.bloque-registro{padding:1.3rem 1.4rem;margin-bottom:1.2rem;}
-.registro-acciones{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin-top:1rem;align-items:start;}
-.registro-paso{display:flex;flex-direction:column;align-items:flex-start;gap:.5rem;}
-.texto-ayuda-conteo{font-size:.92rem;color:var(--clr-text-sub);}
-.envio{
-  display:flex;flex-direction:column;align-items:flex-start;gap:.6rem;
-  padding-left:1.2rem;border-left:1px solid var(--clr-borde);
+/* Dispersión de FC y SpO2: eje de valores fijo y sesiones desplazables. Solo
+   la zona de la gráfica se desplaza en horizontal, nunca la página. */
+.grafica-navegacion{display:flex;justify-content:flex-end;align-items:center;gap:.45rem;margin:-.1rem 0 .35rem;}
+.grafica-navegacion-nota{margin-right:auto;font-size:.8rem;color:var(--clr-text-sub);}
+.grafica-flecha{
+  flex:0 0 36px;width:36px;height:36px;border-radius:50%;border:2px solid #a78bfa;
+  background:#f5f3ff;color:#5b21b6;font-family:inherit;font-size:1.45rem;font-weight:800;
+  line-height:1;cursor:pointer;box-shadow:0 2px 6px rgba(109,40,217,.18);
+  display:inline-flex;align-items:center;justify-content:center;padding:0 0 .15rem;
 }
-.envio-estado{color:var(--clr-text-main);font-size:1rem;font-weight:600;line-height:1.5;}
-.envio-estado:empty{display:none;}
-.envio-resultado{
-  padding:.5rem .8rem;border-radius:8px;
-  background:var(--clr-bg-grad-1);border-left:4px solid var(--clr-purple-3);
-  color:var(--clr-text-sub);font-size:.92rem;line-height:1.5;
+.grafica-flecha:hover:not(:disabled){background:#ede9fe;border-color:#7c3aed;}
+.grafica-flecha:disabled{background:#fff;border-color:#d4d4d8;color:#a1a1aa;box-shadow:none;cursor:default;}
+.grafica-lienzo-dispersion{display:flex;align-items:flex-start;}
+.grafica-eje-fijo{flex:0 0 auto;display:block;overflow:visible;}
+/* La barra siempre visible (`scroll`, no `auto`): con pocas sesiones queda
+   la pista vacía, y así se ve que la gráfica se desplaza cuando hay más. */
+.grafica-desplazable{
+  flex:1 1 auto;min-width:0;overflow-x:scroll;overflow-y:hidden;
+  overscroll-behavior-x:contain;padding-bottom:4px;border-radius:6px;
+  scrollbar-color:#a78bfa #ede9fe;
 }
-.pie-datos{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:.2rem 1rem;text-align:center;}
-.pie-datos .texto-apoyo{font-size:.88rem;}
+.grafica-desplazable::-webkit-scrollbar{height:10px;}
+.grafica-desplazable::-webkit-scrollbar-track{background:#ede9fe;border-radius:8px;}
+.grafica-desplazable::-webkit-scrollbar-thumb{background:#a78bfa;border-radius:8px;}
+.grafica-desplazable::-webkit-scrollbar-thumb:hover{background:#7c3aed;}
+/* Barra propia, solo cuando la nativa no ocupa espacio (móviles): alineada con
+   la zona desplazable, a la derecha del eje fijo de 48 px. */
+.grafica-riel{
+  position:relative;height:10px;margin:4px 0 0 48px;border-radius:8px;
+  background:#ede9fe;cursor:pointer;touch-action:none;
+}
+.grafica-riel-guia{position:absolute;top:0;bottom:0;min-width:24px;border-radius:8px;background:#a78bfa;}
+.grafica-contenido{position:relative;margin:0 auto;}
+.grafica-contenido .grafica-aviso{max-width:none;width:180px;}
+.grafica-svg-dispersion{display:block;overflow:visible;}
+.grafica-franja{fill:#f8f7fd;}
+.grafica-franja.impar{fill:#f1eefb;}
+.grafica-franja.activa{fill:#ebe4fe;stroke:#c4b5fd;stroke-width:1;}
+.grafica-hora{font-size:9.5px;}
+
 
 /* =========================================================
    MI HISTORIAL
@@ -514,7 +497,10 @@ summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--clr-purpl
 .recorte-pie{font-size:.78rem;color:var(--clr-text-sub);text-align:center;}
 .recorte-pildora{padding:.25rem .7rem;border-radius:9999px;font-size:.78rem;font-weight:700;}
 .recorte-pildora.aviso{background:#fef9c3;color:#713f12;}
-.recorte-pildora.sin-red{background:#fee2e2;color:#7f1d1d;}
+.recorte-aviso{
+  max-width:230px;padding:.4rem .7rem;border-radius:8px;background:#fff;
+  border-left:4px solid var(--clr-purple-3);font-size:.78rem;color:var(--clr-text-sub);
+}
 .recorte-grafica{width:100%;max-width:200px;}
 .recorte-grafica line{stroke:#c7cbe0;stroke-width:1.2;}
 .recorte-grafica polyline{fill:none;stroke:var(--clr-count-start);stroke-width:2;}
@@ -530,7 +516,10 @@ summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--clr-purpl
 .hero-about{padding:2rem;text-align:center;margin-bottom:1.2rem;}
 .hero-about h2{font-size:2.3rem;margin-bottom:.6rem;color:var(--clr-header-grad-1);}
 .hero-about p{font-size:1.1rem;color:var(--clr-text-sub);max-width:640px;margin:0 auto;}
-.values-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1rem;}
+/* Filas centradas: con cinco tarjetas, las dos de la segunda fila quedan en
+   el centro, alternadas con las de arriba. */
+.values-grid{--columnas:3;--separacion:1.6rem;display:flex;flex-wrap:wrap;justify-content:center;gap:var(--separacion);}
+.values-grid > .value-card{flex:0 0 calc((100% - (var(--columnas) - 1) * var(--separacion)) / var(--columnas));min-width:0;}
 .value-card{
   background:#fff;border-radius:var(--radio);padding:1.2rem 1.3rem;
   border:1px solid var(--clr-borde);box-shadow:var(--sombra);text-align:left;
@@ -538,7 +527,6 @@ summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--clr-purpl
 }
 .value-card h4{font-size:1.15rem;color:var(--clr-header-grad-1);}
 .value-card p{color:var(--clr-text-sub);font-size:.97rem;line-height:1.55;}
-.autoria{margin-top:1.3rem;color:var(--clr-text-sub);}
 
 /* =========================================================
    PIE DE PAGINA
@@ -549,7 +537,11 @@ summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--clr-purpl
               var(--clr-header-grad-3) 100%);
   color:#cbd5e1;text-align:center;padding:1.1rem 2rem;font-size:.92rem;
   border-top:2px solid rgba(219,112,147,.2);
+  display:flex;flex-direction:column;gap:.35rem;
 }
+.footer-soporte{color:#e2e8f0;}
+.footer a{color:#fff;font-weight:700;text-decoration:underline;text-underline-offset:3px;white-space:nowrap;}
+.footer a:hover,.footer a:focus{color:#fbcfe8;}
 
 /* =========================================================
    MOVIMIENTO REDUCIDO
@@ -576,9 +568,9 @@ summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--clr-purpl
 
 @media(max-width:1024px){
   .header-text h1{font-size:3.8rem;}
-  .cards,.graficas{grid-template-columns:1fr;}
+  .cards{grid-template-columns:1fr;}
   .metrica{align-items:center;}
-  .values-grid{grid-template-columns:repeat(2,minmax(0,1fr));}
+  .values-grid{--columnas:2;}
 }
 
 @media(max-width:768px){
@@ -590,9 +582,8 @@ summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--clr-purpl
   .saludo .titulo-vista{font-size:2.23rem;}
   .embarazo-datos{grid-template-columns:1fr;}
   .data-row{flex-direction:row;justify-content:space-between;border-left:none;padding:.25rem 0;border-bottom:1px solid var(--clr-borde);}
-  .registro-acciones{grid-template-columns:1fr;}
-  .envio{padding-left:0;border-left:none;border-top:1px solid var(--clr-borde);padding-top:1rem;}
-  .manual-pasos,.values-grid{grid-template-columns:1fr;}
+  .manual-pasos,.graficas{grid-template-columns:1fr;}
+  .values-grid{--columnas:1;--separacion:1.2rem;}
   .result-card{padding:1.4rem 1.1rem;}
   .bloque-titulo-fila{flex-direction:column;align-items:stretch;}
 
@@ -612,7 +603,6 @@ summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--clr-purpl
 @media screen and (max-width:414px){
   .cabecera{grid-template-columns:1fr;}
   .cabecera-estado{flex-direction:row;flex-wrap:wrap;align-items:center;justify-content:space-between;}
-  .connection-status{max-width:100%;}
   .main-menu{display:grid;grid-template-columns:1fr 1fr;gap:.5rem;}
   .main-menu a{padding:.45rem .6rem;font-size:.88rem;text-align:center;}
   .value span:first-child{font-size:2.27rem;}
@@ -625,7 +615,7 @@ summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--clr-purpl
 @media screen and (max-width:360px){
   .main-menu a{font-size:.84rem;padding:.4rem .4rem;}
   .icono-circulo{width:2.5rem;height:2.5rem;}
-  .bloque-lectura,.historial-tarjeta,.bloque-registro{padding:1rem;}
+  .bloque-lectura,.historial-tarjeta{padding:1rem;}
 }
 
 @media screen and (max-width:320px){

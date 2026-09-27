@@ -1,4 +1,4 @@
-"""Sesiones de movimiento simuladas: aprovisionamiento, captura y sincronizacion.
+"""Sesiones de movimiento simuladas: aprovisionamiento, captura y envio automatico.
 
 Cuatro capas, como en el resto de la interfaz de la gestante:
 
@@ -10,8 +10,9 @@ Cuatro capas, como en el resto de la interfaz de la gestante:
   ``SesionMonitoreoEntrada``;
 * :mod:`app.gestante.movimientos` abre SQLite de verdad, en ``tmp_path``, y
   ejercita :mod:`app.edge` sin ningun doble;
-* las rutas se prueban por HTTP, con el cliente central sustituido y el
-  transporte de sincronizacion en ``httpx.MockTransport``.
+* las rutas se prueban por HTTP, con el cliente central sustituido, y el
+  envio automatico llamando a su ciclo con el transporte en
+  ``httpx.MockTransport``, una API que puede caerse y volver.
 
 **El caso que da sentido al diseno** esta en
 ``test_registrar_funciona_con_la_api_central_caida``: la captura tiene que
@@ -27,6 +28,9 @@ Todas las cuentas y los datos son ficticios y simulados.
 from __future__ import annotations
 
 import json
+import sqlite3
+import threading
+from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -35,7 +39,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.etl.reglas import clasificar_lectura
-from app.gestante import movimientos, provision
+from app.edge.cliente import CABECERA_IDEMPOTENCIA, RUTA_IDENTIDAD
+from app.gestante import envio_automatico, movimientos, provision
 from app.gestante.central import EstadoRespuesta, RespuestaClinica
 from app.gestante.provision import Provision, ProvisionInvalida, SemanaGestacional
 from app.gestante.simulacion import (
@@ -492,39 +497,6 @@ def test_otra_cuenta_no_puede_usar_el_aprovisionamiento_de_esta(tmp_path):
     assert respuesta.status_code == 404
 
 
-def _registro_en_este_dispositivo(cliente) -> bool:
-    respuesta = cliente.get("/adaptador/embarazos")
-    assert respuesta.status_code == 200
-    datos = respuesta.json()["datos"]
-    assert datos["actual"]["id_embarazo"] == ID_EMBARAZO
-    return datos["registro_en_este_dispositivo"]
-
-
-def test_la_lista_dice_si_este_dispositivo_registra_para_el_embarazo_en_curso(tmp_path):
-    """La interfaz ofrece el boton solo si el registro no se va a rechazar."""
-    cliente, _, _, _ = cliente_con_provision(tmp_path)
-
-    assert _registro_en_este_dispositivo(cliente) is True
-
-
-def test_otra_cuenta_ve_que_este_dispositivo_no_registra_para_ella(tmp_path):
-    escribir_provision(tmp_path, id_usuario=ID_USUARIO_DE_PRUEBA + 1)
-    cliente, _, _, _ = construir_cliente(
-        tmp_path,
-        central=central_que_reconoce_el_embarazo(),
-        provision_path=tmp_path / "provision.json",
-    )
-    iniciar_sesion(cliente)
-
-    assert _registro_en_este_dispositivo(cliente) is False
-
-
-def test_sin_aprovisionamiento_la_lista_dice_que_no_se_puede_registrar(tmp_path):
-    cliente = portal(tmp_path, central_que_reconoce_el_embarazo())
-
-    assert _registro_en_este_dispositivo(cliente) is False
-
-
 def test_registrar_un_embarazo_propio_queda_local_y_pendiente(tmp_path):
     central = ClienteClinicoDoble(
         respuesta_embarazos=RespuestaClinica(
@@ -635,140 +607,279 @@ def test_el_navegador_nunca_recibe_los_identificadores_tecnicos(tmp_path):
 
 
 # ===========================================================================
-# LA RUTA DE SINCRONIZACION (mecanismo real de app.edge, transporte con doble)
+# EL ENVIO AUTOMATICO (mecanismo real de app.edge, transporte con doble)
 # ===========================================================================
+#
+# Nadie pulsa «enviar»: ``envio_automatico.ciclo`` es lo que el hilo del portal
+# ejecuta cada pocos segundos. Aqui se llama directamente, sin hilo ni esperas,
+# y la API es un ``httpx.MockTransport`` que puede caerse y volver.
 
-
-def _constructor_que_responde(codigo: int, cuerpo: dict | None = None, cabeceras=None):
-    def manejador(peticion: httpx.Request) -> httpx.Response:
-        assert peticion.url.path == RUTA_SESIONES_MONITOREO
-        assert peticion.headers.get("authorization", "").startswith("Bearer ")
-        return httpx.Response(codigo, json=cuerpo or {}, headers=cabeceras or {})
-
-    def constructor(settings, token):
-        return httpx.Client(
-            base_url=settings.api_base_url,
-            transport=httpx.MockTransport(manejador),
-            headers={"Authorization": f"Bearer {token}"},
-        )
-
-    return constructor
-
+IDENTIDAD_PACIENTE = {"id_usuario": ID_USUARIO_DE_PRUEBA, "rol": "PACIENTE"}
 
 ENTREGA_ACEPTADA = (
     201,
     {"id_sesion": 555, "lecturas_creadas": 1, "ids_lectura": [999]},
     {"Idempotency-Replayed": "false"},
 )
+ENTREGA_REPRODUCIDA = (
+    201,
+    {"id_sesion": 555, "lecturas_creadas": 1, "ids_lectura": [999]},
+    {"Idempotency-Replayed": "true"},
+)
 
 
-def test_sincronizar_sin_nada_pendiente_no_llama_a_la_red(tmp_path):
-    def constructor(settings, token):
-        def manejador(peticion: httpx.Request) -> httpx.Response:  # pragma: no cover
-            raise AssertionError("no deberia llamarse: la cola esta vacia")
+class ApiFalsa:
+    """La API central vista por el emisor: ``/yo`` e ingesta. Puede caerse.
 
-        return httpx.Client(
-            base_url=settings.api_base_url, transport=httpx.MockTransport(manejador)
-        )
+    ``respuestas`` se consumen en orden, una por envio; la ultima se repite.
+    Un elemento que sea una excepcion de httpx se lanza, como haria la red.
+    """
 
-    cliente, _, _, _ = cliente_con_provision(
-        tmp_path, constructor_cliente_edge=constructor
-    )
+    def __init__(self, *respuestas, identidad=(200, IDENTIDAD_PACIENTE)):
+        self.caida = False
+        self.identidad = identidad
+        self.respuestas = list(respuestas) or [ENTREGA_ACEPTADA]
+        self.envios: list[tuple[str, bytes]] = []
+        self.consultas_identidad = 0
 
-    respuesta = cliente.post("/adaptador/movimientos/sincronizar")
+    def manejador(self, peticion: httpx.Request) -> httpx.Response:
+        if self.caida:
+            raise httpx.ConnectError("sin red", request=peticion)
+        assert peticion.headers.get("authorization", "").startswith("Bearer ")
+        if peticion.url.path == RUTA_IDENTIDAD:
+            self.consultas_identidad += 1
+            codigo, cuerpo = self.identidad
+            return httpx.Response(codigo, json=cuerpo)
+        assert peticion.url.path == RUTA_SESIONES_MONITOREO
+        self.envios.append((peticion.headers[CABECERA_IDEMPOTENCIA], peticion.content))
+        respuesta = self.respuestas.pop(0) if len(self.respuestas) > 1 else self.respuestas[0]
+        if isinstance(respuesta, Exception):
+            raise type(respuesta)(str(respuesta), request=peticion)
+        codigo, cuerpo, cabeceras = respuesta
+        return httpx.Response(codigo, json=cuerpo, headers=cabeceras)
 
-    assert respuesta.status_code == 200
-    assert respuesta.json()["seleccionados"] == 0
-
-
-def test_sincronizar_entrega_correctamente_marca_enviado(tmp_path):
-    cliente, _, _, _ = cliente_con_provision(
-        tmp_path, constructor_cliente_edge=_constructor_que_responde(*ENTREGA_ACEPTADA)
-    )
-    cliente.post(
-        f"/adaptador/embarazos/{ID_EMBARAZO}/sesiones-simuladas",
-        json={"tipo_sesion": "SIGNOS_MATERNOS"},
-    )
-
-    cuerpo = cliente.post("/adaptador/movimientos/sincronizar").json()
-
-    assert cuerpo["seleccionados"] == 1
-    assert cuerpo["entregados"] == 1
-    assert cuerpo["rechazados"] == 0
-
-    estado = cliente.get("/adaptador/movimientos/estado").json()
-    assert estado["pendientes"] == 0
-    assert estado["enviados"] == 1
-
-
-def test_recuperar_sincronizacion_no_reenvia_lo_ya_confirmado(tmp_path):
-    """``ENVIADO`` es terminal para la elegibilidad de app.edge, asi que una
-    segunda ronda -- un doble clic, un reinicio -- no toca la red."""
-    llamadas = []
-
-    def manejador(peticion: httpx.Request) -> httpx.Response:
-        llamadas.append(peticion)
-        return httpx.Response(
-            201,
-            json={"id_sesion": 555, "lecturas_creadas": 1, "ids_lectura": [999]},
-            headers={"Idempotency-Replayed": "false"},
-        )
-
-    def constructor(settings, token):
+    def constructor(self, settings, token):
         return httpx.Client(
             base_url=settings.api_base_url,
-            transport=httpx.MockTransport(manejador),
+            transport=httpx.MockTransport(self.manejador),
             headers={"Authorization": f"Bearer {token}"},
         )
 
-    cliente, _, _, _ = cliente_con_provision(
-        tmp_path, constructor_cliente_edge=constructor
+
+def _portal_con_api(tmp_path, api: ApiFalsa, **ajustes):
+    cliente, central, reloj, settings = cliente_con_provision(
+        tmp_path, constructor_cliente_edge=api.constructor, **ajustes
     )
-    cliente.post(
+    return cliente, central, reloj, settings
+
+
+def _capturar(cliente):
+    """La captura del dispositivo simulado: la interfaz web no la ofrece."""
+    respuesta = cliente.post(
         f"/adaptador/embarazos/{ID_EMBARAZO}/sesiones-simuladas",
-        json={"tipo_sesion": "SIGNOS_MATERNOS"},
+        json={"tipo_sesion": "MOVIMIENTOS_FETALES"},
     )
-
-    primera = cliente.post("/adaptador/movimientos/sincronizar").json()
-    segunda = cliente.post("/adaptador/movimientos/sincronizar").json()
-
-    assert primera["entregados"] == 1
-    assert len(llamadas) == 1
-
-    assert segunda["seleccionados"] == 0
-    assert segunda["entregados"] == 0
-    assert len(llamadas) == 1
-
-    estado = cliente.get("/adaptador/movimientos/estado").json()
-    assert estado["enviados"] == 1
-    assert estado["total"] == 1
+    assert respuesta.status_code == 201
+    return respuesta.json()["clave"]
 
 
-def test_sincronizar_un_rechazo_real_no_finge_exito(tmp_path):
-    cliente, _, _, _ = cliente_con_provision(
+def _ciclo(cliente):
+    return envio_automatico.ciclo(cliente.app.state.contexto)
+
+
+def _cola(settings, id_usuario=ID_USUARIO_DE_PRUEBA):
+    return movimientos.leer_estado_de_la_cuenta(settings, id_usuario)
+
+
+def _intentos(settings, id_usuario=ID_USUARIO_DE_PRUEBA) -> list[int]:
+    ruta = movimientos.ruta_para_la_cuenta(settings, id_usuario)
+    with closing(sqlite3.connect(ruta)) as conexion:
+        return [fila[0] for fila in conexion.execute("SELECT intentos FROM outbox")]
+
+
+def test_no_existe_una_ruta_para_enviar_a_mano(tmp_path):
+    """El navegador no es responsable del envio: la ruta manual ya no existe."""
+    cliente, _, _, _ = cliente_con_provision(tmp_path)
+
+    respuesta = cliente.post("/adaptador/movimientos/sincronizar")
+
+    assert respuesta.status_code in (404, 405)
+
+
+def test_la_lista_de_embarazos_ya_no_habla_de_registrar(tmp_path):
+    cliente, _, _, _ = cliente_con_provision(tmp_path)
+
+    datos = cliente.get("/adaptador/embarazos").json()["datos"]
+
+    assert "registro_en_este_dispositivo" not in datos
+
+
+def test_sin_nada_pendiente_el_ciclo_no_toca_la_red(tmp_path):
+    api = ApiFalsa()
+    cliente, _, _, _ = _portal_con_api(tmp_path, api)
+
+    assert _ciclo(cliente)[ID_USUARIO_DE_PRUEBA].sin_pendientes is True
+    assert api.consultas_identidad == 0 and api.envios == []
+
+
+def test_sin_red_lo_pendiente_se_conserva_y_no_gasta_intentos(tmp_path):
+    """Varios ciclos con la API caida: la verificacion previa falla y no se
+    reclama nada, asi que el presupuesto de intentos queda intacto."""
+    api = ApiFalsa()
+    api.caida = True
+    cliente, _, _, settings = _portal_con_api(tmp_path, api)
+    _capturar(cliente)
+
+    for _ in range(10):
+        envio = _ciclo(cliente)[ID_USUARIO_DE_PRUEBA]
+        assert envio.sin_credencial_util is True and envio.pasada is None
+
+    assert _cola(settings).pendientes == 1
+    assert _intentos(settings) == [0]
+    assert api.envios == []
+
+
+def test_al_volver_la_red_lo_pendiente_se_envia_solo(tmp_path):
+    """offline -> PENDIENTE -> vuelve la red -> siguiente ciclo -> ENVIADO."""
+    api = ApiFalsa(ENTREGA_ACEPTADA)
+    api.caida = True
+    cliente, _, _, settings = _portal_con_api(tmp_path, api)
+    _capturar(cliente)
+    _ciclo(cliente)
+    assert _cola(settings).pendientes == 1
+
+    api.caida = False
+    envio = _ciclo(cliente)[ID_USUARIO_DE_PRUEBA]
+
+    assert envio.pasada is not None and envio.pasada.entregados == 1
+    cola = _cola(settings)
+    assert (cola.pendientes, cola.enviados) == (0, 1)
+    assert len(api.envios) == 1
+
+
+def test_lo_enviado_no_se_vuelve_a_enviar(tmp_path):
+    """``ENVIADO`` es terminal en app.edge: otro ciclo no toca la red."""
+    api = ApiFalsa(ENTREGA_ACEPTADA)
+    cliente, _, _, settings = _portal_con_api(tmp_path, api)
+    _capturar(cliente)
+
+    _ciclo(cliente)
+    consultas = api.consultas_identidad
+    _ciclo(cliente)
+    _ciclo(cliente)
+
+    assert len(api.envios) == 1
+    assert api.consultas_identidad == consultas
+    assert (_cola(settings).enviados, _cola(settings).total) == (1, 1)
+
+
+def test_un_reintento_reenvia_la_misma_clave_y_los_mismos_bytes(tmp_path):
+    """La respuesta de la primera entrega se pierde. El reintento automatico,
+    tras la espera programada, lleva la misma ``Idempotency-Key`` y el mismo
+    cuerpo, y el servidor lo reconoce como replay: una sola sesion remota."""
+    api = ApiFalsa(httpx.ReadTimeout("sin respuesta"), ENTREGA_REPRODUCIDA)
+    cliente, _, reloj, settings = _portal_con_api(tmp_path, api)
+    clave = _capturar(cliente)
+
+    primero = _ciclo(cliente)[ID_USUARIO_DE_PRUEBA]
+    assert primero.pasada.reintentables == 1
+    assert _cola(settings).fallidos_reintentables == 1
+
+    # Antes de la espera programada, el ciclo no reintenta.
+    assert _ciclo(cliente)[ID_USUARIO_DE_PRUEBA].sin_pendientes is True
+    assert len(api.envios) == 1
+
+    reloj.avanzar(seconds=5)
+    segundo = _ciclo(cliente)[ID_USUARIO_DE_PRUEBA]
+
+    assert segundo.pasada.entregados == 1
+    assert len(api.envios) == 2
+    assert api.envios[0] == api.envios[1]
+    assert api.envios[0][0] == clave
+    assert (_cola(settings).enviados, _cola(settings).total) == (1, 1)
+
+
+def test_un_rechazo_real_no_finge_exito(tmp_path):
+    api = ApiFalsa((404, {"detail": "no existe"}, {}))
+    cliente, _, _, settings = _portal_con_api(tmp_path, api)
+    _capturar(cliente)
+
+    envio = _ciclo(cliente)[ID_USUARIO_DE_PRUEBA]
+
+    assert envio.pasada.entregados == 0 and envio.pasada.rechazados == 1
+    cola = _cola(settings)
+    assert (cola.pendientes, cola.fallidos_en_revision, cola.enviados) == (0, 1, 0)
+
+
+def test_una_credencial_rechazada_se_olvida_y_no_gasta_intentos(tmp_path):
+    api = ApiFalsa(identidad=(401, {"detail": "token vencido"}))
+    cliente, _, _, settings = _portal_con_api(tmp_path, api)
+    _capturar(cliente)
+
+    envio = _ciclo(cliente)[ID_USUARIO_DE_PRUEBA]
+
+    assert envio.credencial_rechazada is True
+    assert _intentos(settings) == [0]
+    assert cliente.app.state.contexto.tokens.activos() == []
+    # Sin token, el siguiente ciclo ni siquiera pregunta.
+    assert _ciclo(cliente) == {}
+    assert api.consultas_identidad == 1
+
+
+def test_lo_pendiente_sobrevive_a_un_reinicio_y_sale_al_volver_a_entrar(tmp_path):
+    """El token nunca se persiste: tras reiniciar el portal no hay con que
+    enviar, y lo pendiente espera en disco hasta que la paciente entra."""
+    api = ApiFalsa(ENTREGA_ACEPTADA)
+    api.caida = True
+    cliente, _, _, settings = _portal_con_api(tmp_path, api)
+    _capturar(cliente)
+    _ciclo(cliente)
+
+    # Reinicio: una aplicacion nueva sobre los mismos archivos, sin tokens.
+    api.caida = False
+    reiniciado, _, _, _ = construir_cliente(
         tmp_path,
-        constructor_cliente_edge=_constructor_que_responde(404, {"detail": "no existe"}),
+        central=central_que_reconoce_el_embarazo(),
+        provision_path=tmp_path / "provision.json",
+        constructor_cliente_edge=api.constructor,
     )
-    cliente.post(
-        f"/adaptador/embarazos/{ID_EMBARAZO}/sesiones-simuladas",
-        json={"tipo_sesion": "SIGNOS_MATERNOS"},
-    )
+    assert _ciclo(reiniciado) == {}
+    assert _cola(settings).pendientes == 1
 
-    cuerpo = cliente.post("/adaptador/movimientos/sincronizar").json()
+    iniciar_sesion(reiniciado)
+    envio = _ciclo(reiniciado)[ID_USUARIO_DE_PRUEBA]
 
-    assert cuerpo["entregados"] == 0
-    assert cuerpo["rechazados"] == 1
-
-    estado = cliente.get("/adaptador/movimientos/estado").json()
-    assert estado["pendientes"] == 0
-    assert estado["fallidos_en_revision"] == 1
-    assert estado["enviados"] == 0
+    assert envio.pasada.entregados == 1
+    assert _cola(settings).enviados == 1
 
 
-def test_sincronizar_sin_sesion_local_responde_401(tmp_path):
-    cliente, _, _, _ = construir_cliente(tmp_path, central=ClienteClinicoDoble())
+def test_el_token_de_una_cuenta_no_envia_la_cola_de_otra(tmp_path):
+    api = ApiFalsa(ENTREGA_ACEPTADA)
+    cliente_a, central, _, settings = _portal_con_api(tmp_path, api)
+    _capturar(cliente_a)
+    cliente_a.post("/adaptador/cerrar-sesion")
 
-    assert cliente.post("/adaptador/movimientos/sincronizar").status_code == 401
+    # Otra cuenta abre sesion en el mismo portal.
+    central.id_usuario = ID_USUARIO_DE_PRUEBA + 1
+    cliente_b = TestClient(cliente_a.app)
+    iniciar_sesion(cliente_b)
+
+    hechos = _ciclo(cliente_b)
+
+    assert ID_USUARIO_DE_PRUEBA not in hechos
+    assert hechos[ID_USUARIO_DE_PRUEBA + 1].sin_pendientes is True
+    assert api.envios == []
+    assert _cola(settings).pendientes == 1
+    assert not movimientos.ruta_para_la_cuenta(settings, ID_USUARIO_DE_PRUEBA + 1).exists()
+
+
+def test_el_emisor_arranca_y_se_detiene_con_el_portal(tmp_path):
+    """Con un intervalo configurado, el hilo vive mientras vive la aplicacion."""
+    cliente, _, _, _ = construir_cliente(tmp_path, envio_automatico_segundos=60)
+
+    with cliente:
+        assert any(h.name == "envio-automatico" for h in threading.enumerate())
+    assert not any(h.name == "envio-automatico" for h in threading.enumerate())
 
 
 def test_estado_de_movimientos_sin_sesion_local_responde_401(tmp_path):

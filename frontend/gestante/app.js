@@ -32,10 +32,11 @@
 
    4. Inicio e Historial son dos contextos distintos. Inicio muestra siempre
       el embarazo en curso; Historial tiene su propia seleccion. Cambiar el
-      embarazo en Historial no repinta Inicio ni cambia el destino del
-      registro de movimientos. Cada contexto lleva su propio turno: una
-      respuesta que llega tarde, de una peticion ya superada, se descarta en
-      lugar de pisar lo que se esta mirando.
+      embarazo en Historial no repinta Inicio. Cada contexto lleva su propio
+      turno: una respuesta que llega tarde, de una peticion ya superada, se
+      descarta en lugar de pisar lo que se esta mirando.
+
+   Esta pantalla solo consulta: no registra sesiones ni envia nada.
 
    Todo lo que se muestra procede de un sistema academico con datos
    simulados.
@@ -54,7 +55,6 @@
     sesion: '/adaptador/sesion',
     iniciarSesion: '/adaptador/iniciar-sesion',
     cerrarSesion: '/adaptador/cerrar-sesion',
-    conectividad: '/adaptador/conectividad',
     estadoConexion: '/adaptador/estado-conexion',
     reautenticar: '/adaptador/reautenticar',
     embarazos: '/adaptador/embarazos',
@@ -62,18 +62,8 @@
       // El identificador procede siempre de la lista de episodios que devolvio
       // el adaptador. Esta funcion no lo fabrica ni lo adivina.
       return '/adaptador/embarazos/' + encodeURIComponent(idEmbarazo) + '/monitoreo';
-    },
-    sesionesSimuladas: function (idEmbarazo) {
-      return '/adaptador/embarazos/' + encodeURIComponent(idEmbarazo) + '/sesiones-simuladas';
-    },
-    movimientosEstado: '/adaptador/movimientos/estado',
-    movimientosSincronizar: '/adaptador/movimientos/sincronizar'
+    }
   };
-
-  // El unico tipo de sesion simulada que esta pantalla ofrece. La eleccion es
-  // fija: no hay un selector que la paciente pueda manipular para pedir otra
-  // cosa.
-  const TIPO_SESION_SIMULADA = 'MOVIMIENTOS_FETALES';
 
   // Como se interpreta una respuesta del adaptador. La clasificacion vive en un
   // solo sitio --`clasificar()`-- y las vistas leen el resultado; repetir
@@ -95,13 +85,12 @@
     SIN_CONEXION: 'sin_conexion'
   };
 
-  // Cada cuanto se comprueba el estado de la conexion y de los envios, en
-  // milisegundos. **No recarga lo clinico**: cada lectura clinica queda
-  // registrada en la auditoria del servidor (SCRUM-98), y repetirla cada
-  // veinte segundos llenaba esa traza sin que la paciente hiciera nada. Lo
-  // clinico se pide al entrar, al volver a Inicio, al cambiar de embarazo, al
-  // volver a la pestaña con datos viejos, al recuperar la conexion o la
-  // autenticacion, tras un envio confirmado y con «Actualizar».
+  // Cada cuanto se comprueba el estado de la conexion, en milisegundos. **No
+  // recarga lo clinico**: cada lectura clinica queda registrada en la
+  // auditoria del servidor (SCRUM-98), y repetirla cada veinte segundos
+  // llenaba esa traza sin que la paciente hiciera nada. Lo clinico se pide al
+  // entrar, al volver a Inicio, al cambiar de embarazo, al volver a la
+  // pestaña con datos viejos y al recuperar la conexion o la autenticacion.
   const INTERVALO_REFRESCO_MS = 20000;
 
   // Al volver a la pestaña, lo clinico se vuelve a pedir si lo mostrado tiene
@@ -144,17 +133,31 @@
     month: 'short',
     year: '2-digit'
   });
+  // Hora de una sesión, bajo su fecha: distingue dos sesiones del mismo día.
+  const FORMATO_HORA = new Intl.DateTimeFormat(IDIOMA, {
+    timeZone: ZONA_HORARIA,
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23'
+  });
 
   // Las tres gráficas: mismas variables que las tarjetas. El color es de
-  // marca, no clínico; la forma (línea o barras) sigue el tipo de dato.
+  // marca, no clínico; la forma sigue el tipo de dato. Frecuencia cardíaca y
+  // saturación se toman en sesiones de varias lecturas seguidas: una
+  // dispersión con un punto por lectura, agrupada por sesión. Los
+  // movimientos, una barra por registro, ocupan toda la fila.
   const GRAFICAS = [
     { clave: 'frecuencia_cardiaca', titulo: 'Frecuencia cardíaca materna', unidad: 'BPM',
-      tipo: 'linea', clase: 'grafica-rosa', icono: 'i-corazon', circulo: 'rosa' },
+      tipo: 'dispersion', clase: 'grafica-rosa', icono: 'i-corazon', circulo: 'rosa' },
     { clave: 'saturacion_oxigeno', titulo: 'Saturación de oxígeno', unidad: '%',
-      tipo: 'linea', clase: 'grafica-morada', icono: 'i-pulmones', circulo: 'morado' },
+      tipo: 'dispersion', clase: 'grafica-morada', icono: 'i-pulmones', circulo: 'morado' },
     { clave: 'movimientos_fetales', titulo: 'Movimientos fetales', unidad: 'movimientos',
-      tipo: 'barras', clase: 'grafica-lila', icono: 'i-huellas', circulo: 'lila' }
+      tipo: 'barras', clase: 'grafica-lila', icono: 'i-huellas', circulo: 'lila', ancha: true }
   ];
+
+  // Con la gráfica de movimientos a todo el ancho de la fila (mismo corte que
+  // styles.css), su lienzo es más ancho; en una sola columna, el normal.
+  const MEDIA_GRAFICA_ANCHA = '(min-width: 769px)';
 
   // Estado de la comunicación con el servidor, tal como lo comprueba
   // `/adaptador/estado-conexion`. Son dos preguntas distintas y se responden
@@ -191,7 +194,7 @@
   const AVISOS = {};
   AVISOS[MOTIVO.REAUTENTICACION] =
     'Tu sesión con el servidor terminó. Pulsa «Volver a iniciar sesión» para ' +
-    'consultar tu información; tus registros guardados se conservan.';
+    'consultar tu información.';
   AVISOS[MOTIVO.SIN_CONEXION] =
     'Sin conexión con el servidor. Tu información clínica se mostrará cuando ' +
     'vuelva la conexión.';
@@ -228,20 +231,12 @@
     SUSPENDIDO: 'Suspendido'
   };
 
-  const TEXTO_SIN_EMBARAZO_EN_CURSO =
-    'Necesitas un embarazo en curso para registrar movimientos.';
-  const TEXTO_LISTO_PARA_REGISTRAR =
-    'Se guardará primero en este dispositivo.';
-  const TEXTO_DISPOSITIVO_NO_CONFIGURADO =
-    'Este dispositivo no está configurado para registrar sesiones de este embarazo.';
   const TEXTO_CARGANDO_LECTURAS = 'Cargando lecturas…';
-  const TEXTO_BOTON_REGISTRAR = 'Registrar sesión de movimientos';
   const TEXTO_SIN_CONEXION_CONTEXTO_CONSERVADO =
-    'Sin conexión con el servidor. Se muestra la última información consultada; ' +
-    'lo que registres se guarda en este dispositivo.';
+    'Sin conexión con el servidor. Se muestra la última información consultada.';
   const TEXTO_REAUTENTICACION_CONTEXTO_CONSERVADO =
     'Se muestra la última información consultada. Para actualizarla, vuelve a ' +
-    'iniciar sesión; lo que registres se guarda en este dispositivo.';
+    'iniciar sesión.';
 
   // =======================================================================
   // Referencias al DOM
@@ -250,7 +245,6 @@
   const ui = {
     menu: document.getElementById('main-menu'),
     areaCuenta: document.getElementById('area-cuenta'),
-    conexion: document.getElementById('connection-status'),
     botonCerrarSesion: document.getElementById('btn-cerrar-sesion'),
     dialogoCierre: document.getElementById('dialogo-cerrar-sesion'),
     botonCancelarCierre: document.getElementById('btn-cancelar-cierre'),
@@ -267,7 +261,6 @@
     embarazoEstado: document.getElementById('embarazo-estado'),
     embarazoInicio: document.getElementById('embarazo-inicio'),
     embarazoFpp: document.getElementById('embarazo-fpp'),
-    embarazoHistorico: document.getElementById('embarazo-historico'),
     embarazoSemana: document.getElementById('embarazo-semana'),
     embarazoSemanaEtiqueta: document.getElementById('embarazo-semana-etiqueta'),
     embarazoAnteriores: document.getElementById('embarazo-anteriores'),
@@ -282,8 +275,6 @@
     },
     ultimaLectura: document.getElementById('last-update'),
     ultimaLecturaMide: document.getElementById('ultima-lectura-mide'),
-    datosActualizados: document.getElementById('datos-actualizados'),
-    botonActualizarDatos: document.getElementById('btn-actualizar-datos'),
 
     semaforo: document.getElementById('semaforo'),
     semaforoMensaje: document.getElementById('semaforo-mensaje'),
@@ -297,13 +288,6 @@
     botonReautenticar: document.getElementById('btn-reautenticar'),
     botonCancelarReautenticar: document.getElementById('btn-cancelar-reautenticar'),
     mensajeReautenticar: document.getElementById('reauth-mensaje'),
-    envioUltimo: document.getElementById('envio-ultimo'),
-
-    botonRegistrarMovimiento: document.getElementById('btn-registrar-movimientos'),
-    notaMovimientos: document.getElementById('nota-movimientos'),
-    envioEstado: document.getElementById('envio-estado'),
-    envioResultado: document.getElementById('envio-resultado'),
-    botonSincronizarMovimientos: document.getElementById('btn-sincronizar-movimientos'),
 
     selectorEmbarazo: document.getElementById('selector-embarazo'),
     historialLista: document.getElementById('historial-lista'),
@@ -335,9 +319,16 @@
   // pestaña y un aviso de reautenticación no abren tres peticiones a la vez.
   let comprobacionEnCurso = null;
 
+  // `ultimo_envio_confirmado` de esta sesión tal como se vio la última vez, o
+  // `undefined` mientras no hay línea base. Llega con cada comprobación de
+  // estado (lectura local, sin red) y solo sirve para una cosa: si cambia, el
+  // envío automático acaba de entregar una captura nueva y lo clínico se
+  // recarga una vez. Se vacía al cerrar sesión: nunca se compara el valor de
+  // una cuenta con el de otra.
+  let envioConfirmadoVisto = undefined;
+
   // Cuándo se recibió por última vez información clínica del servidor
-  // (milisegundos), o null. Es «última actualización de los datos», que no
-  // tiene nada que ver con el último envío confirmado.
+  // (milisegundos), o null. Es «última actualización de los datos».
   let datosConsultadosEn = null;
 
   // Series ya recibidas, para volver a dibujar al cambiar el período sin
@@ -356,7 +347,7 @@
   let episodios = null;
 
   // Contexto de Inicio: el embarazo en curso, o ninguno si no existe o es
-  // ambiguo. Es tambien el destino del registro de movimientos.
+  // ambiguo.
   let idInicio = null;
 
   // Contexto de Historial: la seleccion propia de esa vista.
@@ -364,7 +355,7 @@
 
   // Turnos. Cada peticion anota el turno vigente de su contexto y, al volver,
   // solo se pinta si sigue siendo el vigente. Cerrar sesion avanza todos.
-  const turnos = { clinico: 0, inicio: 0, historial: 0, envios: 0, conexion: 0 };
+  const turnos = { clinico: 0, inicio: 0, historial: 0, conexion: 0 };
 
   function avanzarTurno(contexto) {
     turnos[contexto] += 1;
@@ -456,16 +447,6 @@
     return ESTADOS_DE_EMBARAZO[estado] || texto(estado, NO_DISPONIBLE);
   }
 
-  /** Un conteo del adaptador, o nada si no llego como numero. */
-  function conteo(valor) {
-    return typeof valor === 'number' ? valor : 0;
-  }
-
-  /** La frase en singular o en plural; `{n}` se sustituye por la cantidad. */
-  function segun(cantidad, singular, plural) {
-    return (cantidad === 1 ? singular : plural).replace('{n}', String(cantidad));
-  }
-
   /**
    * Pinta el semaforo con el nivel recibido. No lo calcula.
    *
@@ -477,51 +458,6 @@
     const clase = CLASES_DE_SEMAFORO[nivel];
     ui.semaforo.className = clase ? 'alert ' + clase : 'alert waiting';
     ui.semaforoMensaje.textContent = texto(mensaje, SIN_CLASIFICACION);
-  }
-
-  /**
-   * Texto y estilo del indicador para un estado **comprobado**.
-   *
-   * Habla del servidor central, nunca de un dispositivo: en este MVP no hay
-   * hardware que conectar. `estado` es `null` mientras no se sabe, un booleano
-   * en la pantalla de inicio de sesión (solo se puede preguntar si el servidor
-   * contesta) o la respuesta de `/adaptador/estado-conexion` con sesión.
-   *
-   * Un servidor que contesta pero rechaza el token **no** es «sin conexión»:
-   * la red funciona y lo que falta es volver a autenticarse.
-   */
-  function describirConectividad(estado) {
-    if (estado === null || estado === undefined) {
-      return { texto: 'Comprobando conexión…', clase: 'status-connecting' };
-    }
-    if (estado === true) {
-      return { texto: 'Servidor disponible', clase: 'status-connected' };
-    }
-    if (estado === false) {
-      return { texto: 'Sin conexión con el servidor', clase: 'status-disconnected' };
-    }
-    if (estado.api_central === API_CENTRAL.NO_DISPONIBLE) {
-      return { texto: 'Sin conexión con el servidor', clase: 'status-disconnected' };
-    }
-    if (estado.api_central === API_CENTRAL.CON_ERRORES) {
-      return { texto: 'Error del servidor', clase: 'status-disconnected' };
-    }
-    if (estado.autenticacion_central === AUTENTICACION.VIGENTE) {
-      return { texto: 'Conectada al servidor', clase: 'status-connected' };
-    }
-    if (estado.autenticacion_central === AUTENTICACION.REQUERIDA) {
-      return { texto: 'Vuelve a iniciar sesión', clase: 'status-idle' };
-    }
-    if (estado.autenticacion_central === AUTENTICACION.DENEGADA) {
-      return { texto: 'Acceso no autorizado', clase: 'status-disconnected' };
-    }
-    return { texto: 'No se pudo comprobar la conexión', clase: 'status-connecting' };
-  }
-
-  function pintarConectividad(estado) {
-    const descripcion = describirConectividad(estado);
-    ui.conexion.textContent = descripcion.texto;
-    ui.conexion.className = 'connection-status ' + descripcion.clase;
   }
 
   function mostrarMensajeLogin(mensaje) {
@@ -590,17 +526,13 @@
       }
     });
     limpiarPanel();
-    // Sin sesión solo se puede saber si el servidor contesta.
-    pintarConectividad(null);
-    refrescarConectividad();
   }
 
   /**
    * Devuelve el panel a su estado neutro.
    *
    * Se llama al cerrar sesion, para que ningun dato de una sesion quede
-   * visible en la siguiente. Solo limpia lo que se ve: los registros
-   * guardados en el dispositivo no se tocan.
+   * visible en la siguiente.
    */
   function limpiarPanel() {
     ui.saludo.textContent = '¡Hola!';
@@ -609,7 +541,6 @@
     ui.embarazoEstado.textContent = NO_DISPONIBLE;
     ui.embarazoInicio.textContent = NO_DISPONIBLE;
     ui.embarazoFpp.textContent = NO_DISPONIBLE;
-    ui.embarazoHistorico.hidden = true;
     ui.embarazoSemanaEtiqueta.textContent = 'Semana actual';
     ui.embarazoSemana.textContent = NO_DISPONIBLE;
     ui.embarazoAnteriores.textContent = NO_DISPONIBLE;
@@ -619,21 +550,15 @@
     limpiarMetricas();
     pintarSemaforo(null, null);
 
-    mostrarNota(ui.envioEstado, null);
-    mostrarNota(ui.envioResultado, null);
-    mostrarNota(ui.envioUltimo, null);
-    ui.botonSincronizarMovimientos.hidden = true;
-
-    mostrarNota(ui.datosActualizados, null);
     ocultarAvisoSesionCentral();
     estadoConexion = null;
+    envioConfirmadoVisto = undefined;
     datosConsultadosEn = null;
 
     // Nada de un episodio puede sobrevivir a un cierre de sesión.
     episodios = null;
     idInicio = null;
     idHistorial = null;
-    actualizarBotonDeRegistro();
 
     ui.selectorEmbarazo.innerHTML = '';
     const vacio = document.createElement('option');
@@ -737,23 +662,7 @@
     });
   }
 
-  /** Solo para la pantalla de inicio de sesión: si el servidor contesta. */
-  function refrescarConectividad() {
-    return pedir(API.conectividad).then(function (resultado) {
-      if (portalAbierto) {
-        // Con sesión, el indicador lo decide `refrescarEstadoConexion`, que
-        // sabe más. Esta respuesta llegó tarde y no lo pisa.
-        return;
-      }
-      if (!resultado.ok || !resultado.cuerpo) {
-        pintarConectividad(false);
-        return;
-      }
-      pintarConectividad(resultado.cuerpo.api_central === API_CENTRAL.DISPONIBLE);
-    });
-  }
-
-  /** Si con este estado se puede consultar y enviar al servidor. */
+  /** Si con este estado se puede consultar al servidor. */
   function operativa(estado) {
     return Boolean(
       estado &&
@@ -805,17 +714,29 @@
   }
 
   /**
-   * Pinta un estado comprobado y reacciona a los cambios.
+   * Reacciona a un estado comprobado.
    *
-   * Cuando la comunicación vuelve a ser operativa --el servidor regresó o la
-   * paciente se volvió a autenticar--, lo clínico y los envíos se consultan de
-   * nuevo una vez. No hay reintentos en bucle: la siguiente comprobación es la
-   * del temporizador.
+   * No hay indicador permanente: solo se avisa cuando algo falta. Si el
+   * servidor no responde, lo mostrado se conserva y se dice. Un servidor que
+   * contesta pero rechaza el token **no** es «sin conexión»: lo que falta es
+   * volver a autenticarse, y eso tiene su propio aviso. Si ni la aplicación
+   * local contestó (equipo suspendido), no se afirma nada.
+   *
+   * Lo clínico se consulta de nuevo **una vez** en dos casos: cuando la
+   * comunicación vuelve a ser operativa --el servidor regresó o la paciente se
+   * volvió a autenticar--, lo que además reemplaza el aviso; y cuando
+   * `ultimo_envio_confirmado` cambió, porque el envío automático acaba de
+   * entregar una captura nueva. Nunca por el mero paso del tiempo: no hay
+   * sondeo clínico. La siguiente comprobación es la del temporizador.
    */
   function aplicarEstadoConexion(nuevo) {
     const anterior = estadoConexion;
     estadoConexion = nuevo;
-    pintarConectividad(nuevo);
+
+    if (nuevo.api_central === API_CENTRAL.NO_DISPONIBLE ||
+        nuevo.api_central === API_CENTRAL.CON_ERRORES) {
+      mostrarNota(ui.notaEmbarazo, TEXTO_SIN_CONEXION_CONTEXTO_CONSERVADO);
+    }
 
     if (nuevo.autenticacion_central === AUTENTICACION.REQUERIDA) {
       mostrarAvisoSesionCentral(AVISOS[MOTIVO.REAUTENTICACION], true);
@@ -826,10 +747,30 @@
       ocultarAvisoSesionCentral();
     }
 
-    if (operativa(nuevo) && anterior !== null && !operativa(anterior)) {
+    const volvio = operativa(nuevo) && anterior !== null && !operativa(anterior);
+    const entregado = hayEnvioConfirmadoNuevo(nuevo);
+    if (volvio || entregado) {
       cargarClinico();
-      refrescarEnvios();
     }
+  }
+
+  /**
+   * ¿Confirmó el servidor una entrega nueva desde la última comprobación?
+   *
+   * Solo cuenta un estado que trae el campo: si la comprobación falló (sin
+   * respuesta de la aplicación local) o viene de otra ruta, la línea base se
+   * conserva y no se supone nada. La primera observación de la sesión es la
+   * línea base, no una entrega nueva. Un mismo valor repetido no vuelve a
+   * contar.
+   */
+  function hayEnvioConfirmadoNuevo(estado) {
+    if (!Object.prototype.hasOwnProperty.call(estado, 'ultimo_envio_confirmado')) {
+      return false;
+    }
+    const valor = estado.ultimo_envio_confirmado;
+    const visto = envioConfirmadoVisto;
+    envioConfirmadoVisto = valor;
+    return visto !== undefined && valor !== visto && !ausente(valor);
   }
 
   function mostrarAvisoSesionCentral(mensaje, ofrecerAccion) {
@@ -867,8 +808,7 @@
    * Vuelve a autenticar **la misma cuenta** sin cerrar la sesión local.
    *
    * La contraseña viaja una vez y se borra del campo en cuanto sale, igual que
-   * en el inicio de sesión. Los registros guardados no se tocan: viven en este
-   * dispositivo y no dependen del token.
+   * en el inicio de sesión.
    */
   function manejarReautenticar(evento) {
     evento.preventDefault();
@@ -914,135 +854,6 @@
   }
 
   // =======================================================================
-  // Envio de los registros de movimiento de esta cuenta
-  // =======================================================================
-
-  /**
-   * Resume el estado real de la cola de **esta cuenta** en una frase.
-   *
-   * No hay contadores técnicos a la vista: cada frase sale de los conteos que
-   * entrega el adaptador y dice solo lo que esos conteos confirman. El envío
-   * es manual, así que ninguna frase promete que ocurra solo.
-   *
-   * Devuelve la frase y la acción que corresponde ofrecer, o `null` si no
-   * hay nada que enviar.
-   */
-  function describirEnvios(estado) {
-    if (!estado.inicializado) {
-      return { mensaje: 'Todavía no has registrado sesiones de movimientos.', accion: null };
-    }
-
-    const pendientes = conteo(estado.pendientes);
-    const reintentables = conteo(estado.fallidos_reintentables);
-    const enRevision = conteo(estado.fallidos_en_revision);
-    const enviados = conteo(estado.enviados);
-
-    const frases = [];
-    let accion = null;
-
-    if (reintentables !== 0) {
-      frases.push(segun(
-        reintentables,
-        'No se pudo enviar un registro; continúa guardado en este dispositivo.',
-        'No se pudieron enviar {n} registros; continúan guardados en este dispositivo.'
-      ));
-      accion = 'Reintentar';
-    }
-    if (pendientes !== 0) {
-      frases.push(segun(
-        pendientes,
-        'Registro guardado, pendiente de envío.',
-        '{n} registros guardados, pendientes de envío.'
-      ));
-      accion = accion || 'Enviar ahora';
-    }
-    if (enRevision !== 0) {
-      frases.push(segun(
-        enRevision,
-        'Un registro no se pudo enviar y requiere revisión del personal; ' +
-          'sigue guardado en este dispositivo.',
-        '{n} registros no se pudieron enviar y requieren revisión del personal; ' +
-          'siguen guardados en este dispositivo.'
-      ));
-    }
-    if (!frases.length) {
-      frases.push(
-        enviados !== 0
-          ? 'Tus registros fueron enviados.'
-          : 'Todavía no has registrado sesiones de movimientos.'
-      );
-    }
-
-    return { mensaje: frases.join(' '), accion: accion };
-  }
-
-  function refrescarEnvios() {
-    const turno = avanzarTurno('envios');
-    return pedir(API.movimientosEstado).then(function (resultado) {
-      if (!esVigente('envios', turno)) {
-        return;
-      }
-      if (resultado.estado === 401) {
-        mostrarLogin();
-        return;
-      }
-      if (!resultado.ok || !resultado.cuerpo) {
-        mostrarNota(ui.envioEstado, 'No se pudo consultar el estado de tus registros.');
-        ui.botonSincronizarMovimientos.hidden = true;
-        return;
-      }
-
-      const resumen = describirEnvios(resultado.cuerpo);
-      mostrarNota(ui.envioEstado, resumen.mensaje);
-      ui.botonSincronizarMovimientos.hidden = resumen.accion === null;
-      if (resumen.accion !== null) {
-        ui.botonSincronizarMovimientos.textContent = resumen.accion;
-      }
-      // Solo cambia cuando el servidor confirmó una entrega: una conexión
-      // disponible o una consulta clínica no la mueven.
-      const ultimoEnvio = resultado.cuerpo.ultimo_envio_confirmado;
-      mostrarNota(
-        ui.envioUltimo,
-        ausente(ultimoEnvio) ? null : 'Último envío confirmado por el servidor: ' + fechaLegible(ultimoEnvio) + '.'
-      );
-    });
-  }
-
-  /**
-   * Una frase fiel al resultado de una ronda de envío.
-   *
-   * Lo que se dice es exactamente lo que la API contestó en esa ronda: si no
-   * se entregó nada, no se dice que se envió.
-   */
-  function describirRonda(r) {
-    const entregados = conteo(r.entregados);
-    const noEnviables = conteo(r.rechazados) + conteo(r.agotados);
-    const reintentables = conteo(r.reintentables);
-    const frases = [];
-
-    if (conteo(r.seleccionados) === 0) {
-      return 'No había registros pendientes de envío.';
-    }
-    if (entregados !== 0) {
-      frases.push(segun(entregados, 'Registro enviado.', '{n} registros enviados.'));
-    }
-    if (reintentables !== 0 || r.detenida_por_transporte) {
-      frases.push('No se pudo enviar; el registro continúa guardado en este dispositivo.');
-    }
-    if (noEnviables !== 0) {
-      frases.push(segun(
-        noEnviables,
-        'Un registro requiere revisión del personal.',
-        '{n} registros requieren revisión del personal.'
-      ));
-    }
-    if (r.detenida_por_credencial) {
-      frases.push('Para enviar hace falta volver a iniciar sesión; tus registros siguen guardados.');
-    }
-    return frases.join(' ') || 'No se envió ningún registro.';
-  }
-
-  // =======================================================================
   // Lectura clinica
   // =======================================================================
 
@@ -1080,17 +891,6 @@
    * sus episodios en «Mi historial», pero la interfaz no afirma cuál está en
    * curso, porque el dato no permite decidirlo.
    */
-  /**
-   * ¿La fecha de calendario `fecha` (AAAA-MM-DD) es anterior a `hoy`?
-   *
-   * Compara fechas, no magnitudes clínicas: en formato ISO el orden del texto
-   * es el orden del calendario. Es la única comparación de este tipo del
-   * archivo y la prueba de «sin umbrales» la admite por su texto literal.
-   */
-  function fechaYaPaso(fecha, hoy) {
-    return String(fecha) < String(hoy);
-  }
-
   function pintarEpisodios(datos) {
     const inicioAnterior = idInicio;
     episodios = datos;
@@ -1148,16 +948,11 @@
 
     mostrarNota(ui.notaEmbarazo, nota);
 
-    // Fecha probable de parto del embarazo de Inicio, tal como está
-    // registrada. Si ya pasó (comparada con `hoy` del adaptador, ambas fechas
-    // de calendario), el episodio se presenta como registro histórico: no se
-    // cambia su estado ni se deduce que terminó.
+    // Fecha probable de parto registrada, sin cambiar el estado del episodio.
     const actual = !datos.ambiguo && datos.actual ? datos.actual : null;
     ui.embarazoFpp.textContent = actual && !ausente(actual.fecha_probable_parto)
       ? fechaCortaLegible(actual.fecha_probable_parto)
       : NO_DISPONIBLE;
-    ui.embarazoHistorico.hidden = !(actual && !ausente(actual.fecha_probable_parto) &&
-      !ausente(datos.hoy) && fechaYaPaso(actual.fecha_probable_parto, datos.hoy));
 
     // El enlace lleva a los episodios que no son el de Inicio.
     const hayOtros = datos.ambiguo ? todos.length !== 0 : anteriores.length !== 0;
@@ -1167,7 +962,6 @@
       : 'Ver embarazos anteriores en «Mi historial»';
 
     llenarSelector(todos, datos.actual);
-    actualizarBotonDeRegistro();
   }
 
   /**
@@ -1204,26 +998,6 @@
     selector.value = String(idHistorial);
   }
 
-  /**
-   * El registro va siempre al embarazo de Inicio. Sin un embarazo en curso
-   * que venga de `/adaptador/embarazos`, el botón no tiene contra qué
-   * episodio registrar nada. La selección de Historial no cuenta.
-   */
-  function actualizarBotonDeRegistro() {
-    // El adaptador dice si este dispositivo está aprovisionado para el
-    // embarazo en curso de esta cuenta: sin eso, el registro se rechazaría.
-    const configurado = episodios !== null && episodios.registro_en_este_dispositivo === true;
-    ui.botonRegistrarMovimiento.disabled = idInicio === null || !configurado;
-    ui.botonRegistrarMovimiento.textContent = TEXTO_BOTON_REGISTRAR;
-    if (idInicio === null) {
-      ui.notaMovimientos.textContent = TEXTO_SIN_EMBARAZO_EN_CURSO;
-    } else if (!configurado) {
-      ui.notaMovimientos.textContent = TEXTO_DISPOSITIVO_NO_CONFIGURADO;
-    } else {
-      ui.notaMovimientos.textContent = TEXTO_LISTO_PARA_REGISTRAR;
-    }
-  }
-
   /** Estado neutro de todo lo clínico, con el aviso que corresponda. */
   function pintarSinDatosClinicos(clasificacion) {
     const aviso = avisoDe(clasificacion);
@@ -1231,7 +1005,6 @@
     ui.embarazoEstado.textContent = NO_DISPONIBLE;
     ui.embarazoInicio.textContent = NO_DISPONIBLE;
     ui.embarazoFpp.textContent = NO_DISPONIBLE;
-    ui.embarazoHistorico.hidden = true;
     ui.embarazoSemana.textContent = NO_DISPONIBLE;
     ui.embarazoAnteriores.textContent = NO_DISPONIBLE;
     mostrarNota(ui.notaEmbarazo, aviso);
@@ -1241,10 +1014,8 @@
     pintarSemaforo(null, null);
 
     ui.selectorEmbarazo.disabled = true;
-    // Sin lectura clínica confirmada no hay un embarazo autorizado contra el
-    // cual registrar nada.
+    // Sin lectura clínica confirmada no hay un embarazo en curso que mostrar.
     idInicio = null;
-    actualizarBotonDeRegistro();
     mostrarHistorialVacio(aviso);
   }
 
@@ -1377,12 +1148,20 @@
     return envoltura;
   }
 
+  /** ¿La gráfica ancha tiene hoy la fila entera? Sin `matchMedia`, no. */
+  function pantallaAncha() {
+    return typeof window !== 'undefined' && typeof window.matchMedia === 'function' &&
+      window.matchMedia(MEDIA_GRAFICA_ANCHA).matches;
+  }
+
   /**
    * Las tres gráficas de un embarazo, a partir de las series del adaptador.
    *
-   * Solo se traducen textos (fecha y valor, en español y hora de Panamá); lo
-   * que se dibuja lo decide graficas.js con esos mismos registros. Sin
-   * series (no llegaron, o no se pudieron consultar) no se dibuja nada.
+   * Solo se traducen textos (fecha y valor, en español y hora de Panamá) y se
+   * pasa la sesión de cada lectura; lo que se dibuja --y cómo se agrupan por
+   * sesión las lecturas de FC y SpO2-- lo decide graficas.js con esos mismos
+   * registros, sin resumir ninguno.
+   * Sin series (no llegaron, o no se pudieron consultar) no se dibuja nada.
    */
   function dibujarGraficas(contenedor, series, periodo) {
     if (!contenedor) {
@@ -1393,9 +1172,10 @@
       return;
     }
     const motor = typeof window !== 'undefined' ? window.FetalAlertGraficas : undefined;
+    const ancha = pantallaAncha();
     GRAFICAS.forEach(function (g) {
       const tarjeta = document.createElement('article');
-      tarjeta.className = 'tarjeta grafica';
+      tarjeta.className = g.ancha ? 'tarjeta grafica grafica-ancha' : 'tarjeta grafica';
       const cabecera = document.createElement('div');
       cabecera.className = 'grafica-cabecera';
       cabecera.appendChild(iconoEnCirculo(g.icono, g.circulo));
@@ -1421,13 +1201,19 @@
         tipo: g.tipo,
         clase: g.clase,
         periodo: periodo,
+        ancha: Boolean(g.ancha) && ancha,
         formatoEje: function (ms) {
           return FORMATO_EJE.format(new Date(ms));
+        },
+        formatoSesion: function (ms) {
+          const momento = new Date(ms);
+          return { fecha: FORMATO_EJE.format(momento), hora: FORMATO_HORA.format(momento) };
         },
         puntos: (serie.puntos || []).map(function (p) {
           return {
             instante: new Date(p.fecha_hora_captura).getTime(),
             valor: p.valor,
+            idSesion: p.id_sesion,
             textoValor: conUnidad(p.valor, g.unidad),
             textoFecha: fechaLegible(p.fecha_hora_captura),
             textoFechaCorta: fechaCortaLegible(p.fecha_hora_captura),
@@ -1720,8 +1506,7 @@
         // Sin conexión (o con reautenticación pendiente) no cambia nada de lo
         // que ya se sabía en esta sesión: el embarazo en curso sigue siendo el
         // mismo, y cada registro mostrado lleva su propia fecha. Se avisa
-        // y se conserva el contexto, para que el registro local --que el
-        // adaptador admite sin conexión-- siga disponible.
+        // y se conserva lo mostrado.
         avisarContextoConservado(clasificacion);
         return;
       }
@@ -1737,31 +1522,26 @@
 
       pintarEpisodios(clasificacion.datos);
       datosConsultadosEn = Date.now();
-      mostrarNota(
-        ui.datosActualizados,
-        'Información consultada al servidor el ' + fechaLegible(new Date(datosConsultadosEn).toISOString()) + '.'
-      );
 
       const compartidas = {};
       return Promise.all([cargarInicio(compartidas), cargarHistorial(compartidas)]);
     });
   }
 
-  /** Todo: estado, envíos y lo clínico. Para entrar, volver a Inicio o «Actualizar». */
+  /** Estado y lo clínico. Para entrar o volver a Inicio. */
   function refrescar() {
     return Promise.all([
       refrescarEstadoConexion(),
-      refrescarEnvios(),
       cargarClinico()
     ]);
   }
 
   /**
-   * Lo que se repite cada `INTERVALO_REFRESCO_MS`: el estado de la conexión y
-   * de la cola de envíos. Ni una lectura clínica (ver la constante).
+   * Lo que se repite cada `INTERVALO_REFRESCO_MS`: el estado de la conexión.
+   * Ni una lectura clínica (ver la constante).
    */
   function refrescarPeriodico() {
-    return Promise.all([refrescarEstadoConexion(), refrescarEnvios()]);
+    return refrescarEstadoConexion();
   }
 
   /**
@@ -1774,7 +1554,7 @@
     if (!portalAbierto || document.visibilityState !== 'visible') {
       return Promise.resolve();
     }
-    return Promise.all([refrescarEstadoConexion(), refrescarEnvios()]).then(function () {
+    return refrescarEstadoConexion().then(function () {
       const viejos =
         datosConsultadosEn === null || Date.now() - datosConsultadosEn > ANTIGUEDAD_MAXIMA_DATOS_MS;
       if (portalAbierto && operativa(estadoConexion) && viejos) {
@@ -1851,123 +1631,6 @@
       });
   }
 
-  /**
-   * Registra una sesión de movimiento simulada para el embarazo de Inicio.
-   *
-   * `idInicio` sólo puede ser el embarazo en curso que vino de
-   * `/adaptador/embarazos`, así que esta función nunca fabrica ni adivina un
-   * identificador, y la selección de «Mi historial» no la desvía. El
-   * adaptador vuelve a comprobar del lado del servidor que ese embarazo es
-   * de esta cuenta antes de guardar nada.
-   */
-  function manejarRegistrarMovimiento() {
-    if (idInicio === null) {
-      return;
-    }
-    const destino = idInicio;
-
-    // Deshabilitado hasta que responda el adaptador: sin la API, guardar
-    // puede tardar unos segundos y una segunda pulsación no debe duplicar.
-    ui.botonRegistrarMovimiento.disabled = true;
-    ui.botonRegistrarMovimiento.textContent = 'Guardando…';
-    ui.notaMovimientos.textContent = 'Guardando…';
-
-    pedir(API.sesionesSimuladas(destino), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ tipo_sesion: TIPO_SESION_SIMULADA })
-    })
-      .then(function (resultado) {
-        if (resultado.estado === 401) {
-          mostrarLogin();
-          return;
-        }
-
-        actualizarBotonDeRegistro();
-
-        if (resultado.estado === 200 && resultado.cuerpo && resultado.cuerpo.disponible === false) {
-          ui.notaMovimientos.textContent = avisoDe({
-            clase: CLASE.NO_DISPONIBLE,
-            motivo: resultado.cuerpo.motivo
-          });
-          return;
-        }
-
-        if (resultado.ok && resultado.cuerpo && resultado.cuerpo.registrado) {
-          ui.notaMovimientos.textContent =
-            'Registro guardado en este dispositivo, pendiente de envío.';
-          mostrarNota(ui.envioResultado, null);
-          refrescarEnvios();
-          return;
-        }
-
-        // El adaptador escribe un `detail` seguro y explicativo para cada
-        // negativa: el dispositivo sin aprovisionar, una semana gestacional
-        // fuera del catálogo, un episodio que no es suyo. Mostrarlo es más
-        // útil que un texto genérico, y no expone nada: esos mensajes los
-        // redacta este proyecto, no el servidor central.
-        ui.notaMovimientos.textContent =
-          resultado.cuerpo && typeof resultado.cuerpo.detail === 'string'
-            ? resultado.cuerpo.detail
-            : 'No se pudo guardar el registro. Inténtalo de nuevo más tarde.';
-      });
-  }
-
-  /**
-   * Envía ahora la cola de **esta cuenta**. Una sola ronda real contra el
-   * servidor central: lo que se muestra es exactamente lo que la API
-   * contestó, nunca un resultado inventado por esta pantalla.
-   */
-  function manejarSincronizarMovimientos() {
-    const etiqueta = ui.botonSincronizarMovimientos.textContent;
-    ui.botonSincronizarMovimientos.disabled = true;
-    ui.botonSincronizarMovimientos.textContent = 'Enviando…';
-    mostrarNota(ui.envioResultado, null);
-
-    pedir(API.movimientosSincronizar, { method: 'POST' })
-      .then(function (resultado) {
-        if (resultado.estado === 401) {
-          mostrarLogin();
-          return;
-        }
-
-        if (resultado.estado === 200 && resultado.cuerpo && resultado.cuerpo.disponible === false) {
-          mostrarNota(
-            ui.envioResultado,
-            'No se pudo enviar; tus registros continúan guardados en este dispositivo. ' +
-              avisoDe({ clase: CLASE.NO_DISPONIBLE, motivo: resultado.cuerpo.motivo })
-          );
-          return Promise.all([refrescarEnvios(), refrescarEstadoConexion()]);
-        }
-
-        if (!resultado.ok || !resultado.cuerpo) {
-          mostrarNota(
-            ui.envioResultado,
-            'No se pudo enviar; tus registros continúan guardados en este dispositivo.'
-          );
-          return refrescarEnvios();
-        }
-
-        mostrarNota(ui.envioResultado, describirRonda(resultado.cuerpo));
-        const recargas = [refrescarEnvios()];
-        if (resultado.cuerpo.detenida_por_credencial || resultado.cuerpo.detenida_por_transporte) {
-          // El envío descubrió un cambio de estado: que el indicador lo diga.
-          recargas.push(refrescarEstadoConexion());
-        }
-        if (conteo(resultado.cuerpo.entregados) !== 0) {
-          // Lo entregado ya es parte del embarazo en el servidor central.
-          recargas.push(cargarClinico());
-        }
-        return Promise.all(recargas);
-      })
-      .finally(function () {
-        ui.botonSincronizarMovimientos.disabled = false;
-        if (ui.botonSincronizarMovimientos.textContent === 'Enviando…') {
-          ui.botonSincronizarMovimientos.textContent = etiqueta;
-        }
-      });
-  }
-
   // -- Confirmación de cierre ----------------------------------------------
 
   function abrirDialogoDeCierre(evento) {
@@ -2034,26 +1697,40 @@
   // Arranque
   // =======================================================================
 
+  function redibujarInicio() {
+    if (seriesInicio) {
+      dibujarGraficas(ui.graficasInicio, seriesInicio, periodoElegido(ui.periodoInicio));
+    }
+  }
+
+  function redibujarHistorial() {
+    const graficas = ui.historialLista.querySelector('.graficas');
+    if (graficas && seriesHistorial) {
+      dibujarGraficas(graficas, seriesHistorial, periodoElegido(ui.periodoHistorial));
+    }
+  }
+
   function conectarEventos() {
     ui.formLogin.addEventListener('submit', manejarLogin);
     ui.botonCerrarSesion.addEventListener('click', abrirDialogoDeCierre);
     ui.botonCancelarCierre.addEventListener('click', cancelarCierre);
     ui.botonConfirmarCierre.addEventListener('click', manejarLogout);
-    ui.botonRegistrarMovimiento.addEventListener('click', manejarRegistrarMovimiento);
-    ui.botonSincronizarMovimientos.addEventListener('click', manejarSincronizarMovimientos);
     ui.botonVerAnteriores.addEventListener('click', verEmbarazosAnteriores);
 
     // El período solo cambia el dibujo de lo ya recibido: no pide nada.
-    ui.periodoInicio.addEventListener('change', function () {
-      dibujarGraficas(ui.graficasInicio, seriesInicio, periodoElegido(ui.periodoInicio));
-    });
-    ui.periodoHistorial.addEventListener('change', function () {
-      const graficas = ui.historialLista.querySelector('.graficas');
-      if (graficas && seriesHistorial) {
-        dibujarGraficas(graficas, seriesHistorial, periodoElegido(ui.periodoHistorial));
+    ui.periodoInicio.addEventListener('change', redibujarInicio);
+    ui.periodoHistorial.addEventListener('change', redibujarHistorial);
+    // Al cruzar el corte de una a dos columnas cambia el lienzo de la gráfica
+    // ancha: se vuelve a dibujar lo ya recibido, sin pedir nada.
+    if (typeof window.matchMedia === 'function') {
+      const consulta = window.matchMedia(MEDIA_GRAFICA_ANCHA);
+      if (typeof consulta.addEventListener === 'function') {
+        consulta.addEventListener('change', function () {
+          redibujarInicio();
+          redibujarHistorial();
+        });
       }
-    });
-    ui.botonActualizarDatos.addEventListener('click', refrescar);
+    }
     ui.botonMostrarReautenticar.addEventListener('click', abrirReautenticacion);
     ui.botonCancelarReautenticar.addEventListener('click', cancelarReautenticacion);
     ui.formReautenticar.addEventListener('submit', manejarReautenticar);
@@ -2101,11 +1778,8 @@
   function arrancar() {
     conectarEventos();
     limpiarPanel();
-    pintarConectividad(null);
 
     consultarSesion().then(function (sesion) {
-      // Con sesión, el indicador lo pinta `refrescarEstadoConexion`; sin ella,
-      // `mostrarLogin` comprueba si el servidor contesta.
       if (sesion) {
         mostrarPortal();
       } else {

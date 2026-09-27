@@ -10,7 +10,8 @@ Este proceso corre **en el dispositivo de la paciente**. Sirve los cuatro archiv
 de la interfaz y actua de intermediario con lo que ya existe: la API central,
 por HTTP; el almacenamiento del nodo edge compartido, en solo lectura; y su
 propio archivo SQLite por cuenta para las sesiones de movimiento simuladas,
-que captura y sincroniza reutilizando las funciones de ``app.edge`` sin
+que el dispositivo captura (``scripts/dispositivo_gestante.py``) y este
+proceso entrega automaticamente reutilizando las funciones de ``app.edge`` sin
 duplicar ninguna de sus reglas.
 
 **Por que el navegador no llama directamente a la API central.** Porque asi el

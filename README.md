@@ -167,7 +167,7 @@ tesis-bi-prenatal/
 
 ## Estado actual del proyecto
 
-El repositorio se encuentra en una etapa temprana. Lo que ya existe y funciona es el esquema operacional en PostgreSQL con sus migraciones, el generador del dataset simulado, su carga idempotente, el endpoint que recibe una sesión de monitoreo con sus lecturas biométricas —con su contrato de idempotencia—, el nodo edge simulado, que captura paquetes sin conexión y los entrega después sin duplicarlos, con reintentos de espera incremental, agotamiento controlado y trazabilidad de extremo a extremo, y el esquema analítico (Star Schema) con su ETL reproducible, idempotente e incremental. A partir de SCRUM-70 existen además autenticación con JWT, autorización por rol y auditoría de accesos: el endpoint de ingesta ya no es público. SCRUM-97 añade el aprovisionamiento administrativo de cuentas para perfiles clínicos existentes y su desactivación y reactivación. SCRUM-98 añade el aislamiento por fila (RLS) sobre las tablas clínicas, las rutas mínimas de lectura para gestante y médico, la auditoría de los accesos clínicos concedidos y denegados, y la capa publicada y seudonimizada que Power BI consultará. **Aún no existen un servicio permanente o demonio que dispare la sincronización o el ETL por sí solo, la detección automática de conectividad, HTTPS/TLS, el cifrado en reposo, los dashboards ni la configuración del workspace de Power BI.** El desarrollo activo continúa en el Capítulo IV, centrado en seguridad, interfaces, aislamiento de datos y analítica del MVP, y todo el trabajo se desarrolla y prueba en un entorno controlado/local, no en comunidades rurales reales.
+El repositorio se encuentra en una etapa temprana. Lo que ya existe y funciona es el esquema operacional en PostgreSQL con sus migraciones, el generador del dataset simulado, su carga idempotente, el endpoint que recibe una sesión de monitoreo con sus lecturas biométricas —con su contrato de idempotencia—, el nodo edge simulado, que captura paquetes sin conexión y los entrega después sin duplicarlos, con reintentos de espera incremental, agotamiento controlado y trazabilidad de extremo a extremo, y el esquema analítico (Star Schema) con su ETL reproducible, idempotente e incremental. A partir de SCRUM-70 existen además autenticación con JWT, autorización por rol y auditoría de accesos: el endpoint de ingesta ya no es público. SCRUM-97 añade el aprovisionamiento administrativo de cuentas para perfiles clínicos existentes y su desactivación y reactivación. SCRUM-98 añade el aislamiento por fila (RLS) sobre las tablas clínicas, las rutas mínimas de lectura para gestante y médico, la auditoría de los accesos clínicos concedidos y denegados, y la capa publicada y seudonimizada que Power BI consultará. **Aún no existen un servicio permanente o demonio que dispare la sincronización del nodo edge de clínica o el ETL por sí solo** (el portal de la gestante sí envía automáticamente la cola local de cada cuenta con sesión iniciada; ver «Captura simulada, operación sin conexión y envío automático»)**, HTTPS/TLS, el cifrado en reposo, los dashboards ni la configuración del workspace de Power BI.** El desarrollo activo continúa en el Capítulo IV, centrado en seguridad, interfaces, aislamiento de datos y analítica del MVP, y todo el trabajo se desarrolla y prueba en un entorno controlado/local, no en comunidades rurales reales.
 
 ## Roadmap general
 
@@ -1718,12 +1718,46 @@ y su seguimiento PRINCIPAL. Es idempotente y **no modifica ni borra una sola
 fila del dataset canónico**; `tests/test_provisionar_demo_postgresql.py` lo
 comprueba fila por fila.
 
-### Registro simulado, operación sin conexión y sincronización
+### Captura simulada, operación sin conexión y envío automático
 
-Desde «Inicio», el botón **Registrar sesión de movimientos** captura un
-paquete en este dispositivo, siempre para el embarazo en curso. Funciona con la API central caída, que es el
-requisito: la autorización de ese paso la da el aprovisionamiento —a qué cuenta
-y a qué embarazo sirve—, que el navegador no puede alterar.
+**La interfaz web de la gestante solo consulta.** No ofrece «Registrar sesión
+de movimientos», «Tomar medición», «Enviar ahora», «Reintentar» ni ningún
+control de la cola: la paciente no inicia ni transmite nada. La captura
+pertenece al dispositivo, y el flujo es:
+
+```
+scripts/dispositivo_gestante.py capturar          (el dispositivo simulado)
+  → app.gestante.movimientos.registrar_sesion_simulada
+  → app.edge.capturar
+  → data/gestante/movimientos/cuenta-<id_usuario>.sqlite3   outbox PENDIENTE
+      (sin Internet y sin credencial; sobrevive a cortes y reinicios)
+  → app.gestante.envio_automatico  (hilo del portal, cada 30 s)
+  → app.edge.ejecutar_pasada
+  → POST /api/v1/sesiones-monitoreo  (JWT PACIENTE, Idempotency-Key)
+  → ENVIADO
+```
+
+**El dispositivo: `scripts/dispositivo_gestante.py`.** Este MVP no tiene
+hardware, así que el script representa el evento de captura que en producción
+originaría el dispositivo físico: una captura por ejecución, sin generación
+periódica. No es un control de la paciente.
+
+```powershell
+python scripts/dispositivo_gestante.py capturar                          # MOVIMIENTOS_FETALES
+python scripts/dispositivo_gestante.py capturar --tipo SIGNOS_MATERNOS
+```
+
+- Lee `provision.json` y toma de ahí, y solo de ahí, la cuenta, el embarazo,
+  el dispositivo y los catálogos. No acepta `id_usuario`, `id_embarazo`,
+  `id_dispositivo` ni credenciales como argumentos.
+- **Capturar no requiere Internet ni JWT.** No usa la red.
+- Escribe con `app.edge.capturar` en la cola de la cuenta aprovisionada, la
+  misma que entrega el envío automático. No hay otra cola ni otra idempotencia.
+
+La ruta `POST /adaptador/embarazos/{id}/sesiones-simuladas` hace la misma
+captura desde el portal, con la sesión local de la paciente; la web no la
+llama. Ambas entradas se autorizan con el aprovisionamiento —a qué cuenta y a
+qué embarazo sirve el dispositivo—, no con el navegador.
 
 Los valores biométricos son constantes fijas del módulo
 `app.gestante.simulacion`: no los escribe la paciente, no los genera el
@@ -1736,17 +1770,55 @@ guardar algo que el servidor rechazaría después.
 
 Lo capturado queda `PENDIENTE` en un SQLite **propio de cada cuenta**
 (`data/gestante/movimientos/cuenta-<id_usuario>.sqlite3`), sobrevive a un
-reinicio del portal y no se mezcla con el de otra cuenta. La interfaz no
-muestra contadores por estado: resume la cola de la cuenta en una frase
-(«Registro guardado, pendiente de envío», «Registro enviado», «No se pudo
-enviar; el registro continúa guardado…») derivada de los conteos reales. El
-envío **no es automático**: el botón **Enviar ahora** —**Reintentar** si un
-intento falló— ejecuta una sola ronda real contra
-`POST /api/v1/sesiones-monitoreo` reutilizando `app.edge.ejecutar_pasada`, con
-el token de la paciente que ya está en memoria —nunca `EDGE_API_TOKEN`, que es
-del nodo edge y este proceso no lee—. El resultado se muestra tal cual: no se
-finge un éxito. Un reenvío posterior no duplica nada: `ENVIADO` es terminal
-para la elegibilidad del nodo, y la clave de idempotencia se conserva.
+reinicio del portal y no se mezcla con el de otra cuenta.
+
+**Quién reintenta: `app.gestante.envio_automatico`.** Un hilo del portal
+ejecuta cada `GESTANTE_ENVIO_AUTOMATICO_SEGUNDOS` (30 por omisión; 0 lo
+desactiva) un ciclo que, por cada cuenta con token en memoria:
+
+0. repara la cola localmente, sin red ni credencial, con las mismas funciones
+   de SCRUM-65 que usa `sincronizar`: `app.edge.reconciliar_abandonados`
+   sella los intentos cuyo lease venció sin resultado —un portal o un equipo
+   que se apagó en mitad de un envío— y los devuelve al reintento programado,
+   y `app.edge.resolver_herencia` cierra los heredados que ya agotaron el
+   límite. Así, una caída **durante** un intento también se recupera;
+1. hace el censo de su cola (`app.edge.censar`), sin red; si no hay nada
+   elegible, no toca la API;
+2. verifica la credencial contra `/api/v1/autenticacion/yo`
+   (`ClienteEdge.verificar_credencial`, el mismo preflight de SCRUM-65). Sin
+   red, con la API caída o con el token vencido **no reclama ningún evento**,
+   así que los ciclos sin conexión no gastan intentos; un token rechazado se
+   olvida y la interfaz pide volver a iniciar sesión;
+3. ejecuta una ronda de `app.edge.ejecutar_pasada` con
+   `respetar_programacion=True` contra `POST /api/v1/sesiones-monitoreo`.
+
+No hay cola, estados, reintentos ni transporte nuevos: todo es `app.edge`
+(SCRUM-64/65). Un reintento reenvía la misma `Idempotency-Key` y los mismos
+bytes guardados en la captura, así que el servidor lo reconoce y no crea una
+segunda sesión; `ENVIADO` es terminal. El envío usa el token de la paciente que
+ya está en memoria —nunca `EDGE_API_TOKEN`, que es del nodo edge y este
+proceso no lee— y solo para la cola de **su** cuenta.
+
+**Los datos no expiran; la credencial para enviarlos, sí.** El JWT de la
+paciente dura 30 minutos (SCRUM-70), vive solo en memoria y no se guarda en
+disco, igual que la contraseña. La recuperación de conectividad activa
+automáticamente el reintento de las capturas pendientes; si la sesión central
+requiere reautenticación, las capturas permanecen conservadas hasta
+restablecerla.
+
+| Situación | Qué pasa con la captura |
+|---|---|
+| Se cae Internet y vuelve **con el JWT vigente** | Sigue `PENDIENTE` mientras no hay red; sin gastar intentos; el siguiente ciclo (≤ 30 s) la envía → `ENVIADO`. |
+| Se cae Internet y vuelve **con el JWT vencido** | `/yo` responde 401: el token se olvida y la interfaz pide volver a iniciar sesión. La captura sigue `PENDIENTE`, intacta: no se pierde, no se descarta, no se duplica y no gasta intentos. Tras reautenticarse, el siguiente ciclo la envía. |
+| Se reinicia el portal o el dispositivo | La captura sigue en SQLite; la sesión local (72 h) permite abrir la interfaz sin contraseña, pero el JWT se perdió a propósito. Tras volver a autenticarse, el ciclo envía **el mismo** registro. |
+
+No se promete que un pendiente salga «siempre en cuanto vuelve Internet»: sale
+en cuanto vuelve Internet **y** hay una credencial central vigente.
+
+El nodo edge de clínica (`scripts/edge_node.py`) no cambia:
+sigue siendo un comando finito (`enviar`, `sincronizar`) que se lanza o se
+programa desde fuera. `GET /adaptador/movimientos/estado` sigue existiendo
+como consulta de solo lectura de la cola; la web no lo usa.
 
 **El envío confirmado no es la actualización analítica.** Que el servidor
 acepte el paquete lo deja en el esquema operacional; para verlo en el esquema
@@ -1773,69 +1845,90 @@ analítico y en `publicacion` hay que ejecutar después
     registrada es «Sin registros»; una que no llegó es «No disponible».
     `id_lectura`/`id_sesion` viajan como atributos para trazabilidad y
     pruebas, no se muestran.
-  - **Tus registros en el tiempo**: tres gráficas (FC materna y SpO₂ con
-    puntos y línea; movimientos con una barra por registro) dibujadas con
+  - **Tus registros en el tiempo**: tres gráficas dibujadas con
     `frontend/gestante/graficas.js`, servido por el propio portal, sin
-    dependencias ni CDN. Eje temporal proporcional, sin puntos inventados,
-    sin interpolación ni agregación y sin bandas clínicas; período «Todo el
-    embarazo» o «Últimos 30 días con registros» (contados desde el último
-    registro, no desde hoy). Cada punto se consulta con ratón, toque o
-    flechas del teclado, y hay una tabla alternativa por gráfica.
+    dependencias ni CDN.
+    - **FC materna y SpO₂**, lado a lado: dispersión **sin línea**, **un
+      punto por lectura real**, sin promedios ni ningún valor derivado. Las
+      lecturas se agrupan por sesión (`id_sesion`): cada sesión es una columna
+      propia, con una franja de fondo, en orden cronológico y rotulada con su
+      fecha y hora reales (dos sesiones del mismo día se distinguen por la
+      hora; el `id_sesion` no se muestra). Dentro de la columna las lecturas se
+      separan un poco en horizontal solo para no taparse; ese desplazamiento
+      no representa tiempo y la altura es siempre el valor exacto. La gráfica
+      crece a lo ancho con el número de sesiones: el eje de valores queda fijo
+      y las sesiones se recorren con scroll horizontal nativo (dedo,
+      trackpad, barra o teclado) y dos flechas que avanzan sesiones enteras y
+      se deshabilitan en los extremos. Empieza en las más recientes. Solo la
+      gráfica se desplaza, nunca la página. Cada punto dice su valor, su
+      fecha y hora y «Lectura i de n de esta sesión».
+    - **Movimientos**, debajo, a todo el ancho: una barra por registro, sin
+      agregar, sobre un eje temporal proporcional.
+
+    Sin puntos inventados, sin interpolación y sin bandas clínicas; período
+    «Todo el embarazo» o «Últimos 30 días con registros» (contados desde el
+    último registro, no desde hoy; se filtran las lecturas y después se
+    agrupan las sesiones visibles). Cada punto o barra se consulta con ratón,
+    toque o flechas del teclado, y hay una tabla alternativa por gráfica.
   - **Tu lectura más reciente**: la `ultima_lectura` de siempre —una sola
     lectura, con su fecha y lo que midió— y **su** semáforo, con el alcance
     escrito: «La clasificación corresponde a esta lectura completa, no a cada
     medición por separado». No hay semáforo conjunto de las tres tarjetas.
-  - Con ambigüedad o sin embarazo en curso, Inicio no muestra lecturas y el
-    registro queda deshabilitado.
+  - Con ambigüedad o sin embarazo en curso, Inicio no muestra lecturas.
 - **Series**: `/adaptador/embarazos/{id}/monitoreo` entrega además `series`
   por variable (unidad y puntos en orden cronológico, solo lecturas
-  existentes: sin interpolar, promediar ni agrupar por día). La tarjeta es por
-  construcción el último punto de su serie (`app.gestante.clinico.serie` y
-  `ultimo_registro` comparten la regla). La siguiente etapa las dibujará.
+  existentes: sin interpolar, promediar ni agrupar por día; cada punto lleva
+  su `id_sesion`). La tarjeta es por construcción el último punto de su serie
+  (`app.gestante.clinico.serie` y `ultimo_registro` comparten la regla). La
+  agrupación por sesión de FC y SpO₂ es solo de dibujo, en el navegador; el
+  adaptador entrega cada lectura y ninguna se resume.
 - **Mi historial** tiene su propia selección de embarazo y lista **todas** sus
   lecturas en una tabla (fecha, FC, SpO₂, movimientos, semana y semáforo),
-  también cuando la última solo midió movimientos. Cambiar esa selección no
-  repinta Inicio ni cambia el destino del registro, y una respuesta que llega
-  tarde de una selección anterior se descarta.
+  también cuando la última solo midió movimientos. Cambiar esa
+  selección no repinta Inicio, y una respuesta que llega tarde de una
+  selección anterior se descarta.
 
 Ninguna vista crea filas: abrir, navegar, refrescar o iniciar sesión solo
-consulta. Las únicas filas nuevas son las que la paciente registra
-explícitamente con el botón de movimientos. Las fechas se muestran en español
+consulta. Las fechas se muestran en español
 y en hora de Panamá, sea cual sea el navegador; las fechas de calendario
 (`fecha_inicio`) no cambian de día por la zona horaria.
 
 ### Estado de conexión y sesión con el servidor
 
-El indicador refleja **dos comprobaciones**, las de
-`GET /adaptador/estado-conexion` (exige sesión local, no renueva nada y usa
-`/yo`, que no escribe auditoría):
+No hay indicador permanente en el encabezado (la píldora «Conectada al
+servidor» se retiró el 2026-09-27): solo se avisa cuando algo falta, según
+las **dos comprobaciones** de `GET /adaptador/estado-conexion` (exige sesión
+local, no renueva nada y usa `/yo`, que no escribe auditoría):
 
-| Indicador | Qué se comprobó |
+| Estado comprobado | Qué ve la paciente |
 |---|---|
-| Conectada al servidor | La API respondió y `/yo` aceptó el token. |
-| Vuelve a iniciar sesión | La API respondió 401 (token vencido, inválido o cuenta desactivada, indistinguibles por diseño) o el portal se reinició y no tiene token. Se ofrece **Volver a iniciar sesión**. |
-| Acceso no autorizado | 403: identidad válida sin permiso. No se ofrece reautenticar. |
-| Sin conexión con el servidor | La API no respondió. |
-| Error del servidor | Respuesta fuera de contrato (5xx…). |
-| No se pudo comprobar la conexión | Ni el portal local contestó: típico al suspenderse el equipo. |
+| La API respondió y `/yo` aceptó el token | Nada: los datos se muestran normalmente. |
+| 401 (token vencido, inválido o cuenta desactivada, indistinguibles por diseño) o portal reiniciado sin token | Aviso con **Volver a iniciar sesión**. |
+| 403: identidad válida sin permiso | «Tu cuenta no puede consultar esta información.» No se ofrece reautenticar. |
+| La API no respondió o respondió fuera de contrato (5xx…) | «Sin conexión con el servidor. Se muestra la última información consultada.» |
+| Ni el portal local contestó (equipo suspendido) | Nada: no se afirma «sin conexión»; se vuelve a comprobar al reanudar. |
 
 `POST /adaptador/reautenticar` vuelve a pedir la contraseña **de la misma
 cuenta** sin cerrar la sesión local (otra cuenta: 403; credenciales que no
-sirven: 400) y conserva los registros guardados. No hay refresh de token:
+sirven: 400). No hay refresh de token:
 el contrato central no lo tiene, y no se guarda ninguna contraseña. El JWT
 (30 min) y la ventana local (72 h) no cambian.
 
-El refresco cada 20 s comprueba solo conexión y cola de envíos. Lo clínico
-—que el servidor audita en cada lectura— se pide al entrar, al volver a
-Inicio, al cambiar de embarazo, con «Actualizar información», al volver a la
-pestaña con datos de más de un minuto (también `online`, `resume` y
-`pageshow`), al recuperar la conexión o la autenticación y tras un envío
-confirmado. Antes se recargaba cada 20 s: ~80 filas de auditoría por minuto
-por pestaña abierta.
-
-«Información consultada al servidor el …» (última actualización de los
-datos) y «Último envío confirmado por el servidor: …» (`enviado_en` de la
-outbox) son cosas distintas; un servidor disponible no mueve la segunda.
+El refresco cada 20 s comprueba solo la conexión. La misma respuesta de
+`/adaptador/estado-conexion` trae `ultimo_envio_confirmado`, leído del SQLite
+local de la cuenta (sin red): cuándo aceptó el servidor por última vez una
+captura suya. Lo clínico —que el servidor audita en cada lectura— se pide al
+entrar, al volver a Inicio, al cambiar de embarazo, al volver a la pestaña con
+datos de más de un minuto (también `online`, `resume` y `pageshow`), al
+recuperar la conexión o la autenticación y **una sola vez** cuando
+`ultimo_envio_confirmado` cambia, porque el envío automático acaba de
+entregar una captura nueva. El primer valor de cada sesión es solo la línea
+base; un valor repetido no recarga; al cerrar sesión se olvida, y una
+respuesta tardía de otra sesión se descarta. **No es un sondeo clínico:** si
+nada nuevo se entregó, no se piden embarazos, sesiones ni lecturas. Antes se
+recargaba cada 20 s: ~80 filas de auditoría por minuto por pestaña abierta.
+Inicio ya no muestra la hora de la última consulta ni un botón «Actualizar
+información».
 
 ### Procedencia de los datos de la cuenta de demostración
 
@@ -1901,12 +1994,12 @@ Dos cuentas (la contraseña de ambas es la `PASSWORD_SIMULADA` del generador):
 - `paciente30@example.com` (embarazo canónico 129, `ACTIVO`): consulta y
   gráficas. Inicio muestra FC 83 y SpO₂ 96 del 29 may 2026 03:27 (lectura 549)
   y 7 movimientos del 21 jun 2026 09:56 (lectura 1259), en tarjetas neutrales;
-  «Semana en el último registro 39 (21 jun 2026)»; gráficas con 30, 30 y 20
-  registros; y el semáforo Amarillo de la
+  «Semana en el último registro 39 (21 jun 2026)»; gráficas de FC y SpO₂ con
+  6 sesiones (30 lecturas) cada una y de movimientos con 20 registros; y el
+  semáforo Amarillo de la
   lectura 1259 en su propio bloque.
 
-- `paciente01@example.com`: historial longitudinal y registro de
-  movimientos.
+- `paciente01@example.com`: historial longitudinal.
 
 **Limitación del escenario de demostración.** El dataset simulado se generó
 con fechas de 2025-2026 y sus episodios `ACTIVO` quedaron atrás en el
@@ -1921,15 +2014,20 @@ Con `paciente01` comprobar:
    28). FC/SpO₂ dicen «Sin registros» —ese episodio nunca los midió— y
    movimientos muestra 12, que es `MOV_SIMULADO`, con su fecha.
 2. **Ver embarazos anteriores en «Mi historial»** abre el embarazo 100: 41
-   lecturas, con gráficas de 20, 20 y 21 registros por medición. En «Ver las
+   lecturas; FC y SpO₂ con 4 sesiones (20 lecturas) y movimientos con 21
+   registros. En «Ver las
    41 lecturas en tabla», la fila del 8 sept 2025 a las 12:13 (hora de
    Panamá; 17:13 UTC) muestra 86 BPM, 97 %, semana 36 y semáforo verde.
 3. Volver a **Inicio**: sigue mostrando el embarazo en curso.
-4. **Registrar movimientos / Enviar ahora**: el resumen dice lo que la cola de
-   la cuenta contiene; el envío es manual. Sin conexión, el registro se guarda
-   en el dispositivo y el intento de envío lo conserva para «Reintentar».
-5. **Cerrar sesión**, arriba a la derecha, pide confirmación; «Cancelar» (o
+4. **Cerrar sesión**, arriba a la derecha, pide confirmación; «Cancelar» (o
    Escape) no cierra nada y devuelve el foco al botón.
+5. **Captura del dispositivo y envío automático** (escribe en la base de
+   demostración, solo en el embarazo 130): con la sesión de `paciente01`
+   abierta, `python scripts/dispositivo_gestante.py capturar`. La captura queda
+   `PENDIENTE` en `cuenta-107.sqlite3`; en 30 s o menos el portal la envía
+   sola, y al volver a «Inicio» aparece un nuevo registro de 12 movimientos.
+   Con la API detenida, la captura espera `PENDIENTE` y sale al volver la API
+   si el JWT sigue vigente; si venció, sale tras volver a iniciar sesión.
 
 ## Calidad del proyecto
 

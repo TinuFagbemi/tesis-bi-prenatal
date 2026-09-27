@@ -1,7 +1,12 @@
 # SCRUM-72 — Etapa 2 (interfaz y gráficas): resumen
 
-Estado al 2026-09-25. Continúa `docs/scrum72_etapa1_resumen.md`. SCRUM-72
+Estado al 2026-09-27. Continúa `docs/scrum72_etapa1_resumen.md`. SCRUM-72
 **no está cerrado**: ver «Pendientes» al final.
+
+La sección «Qué cambió» describe la etapa tal como se entregó el 2026-09-25.
+Lo que la revisión del 2026-09-27 sustituye --registro y envío desde la web,
+indicador de conexión, líneas de FC y SpO₂-- está en «Revisión de la interfaz
+del 2026-09-27» y manda sobre lo anterior.
 
 ## Qué cambió
 
@@ -26,15 +31,12 @@ Estado al 2026-09-25. Continúa `docs/scrum72_etapa1_resumen.md`. SCRUM-72
   en vertical en el eje. El valor se escribe sobre cada marca solo si caben
   todos; si no, se consulta tocando la marca o en la tabla. El resumen sobre
   cada gráfica va en tres líneas: período, fechas y número de registros.
-- **Embarazo actual**: muestra también la fecha probable de parto. Si esa
-  fecha ya pasó (paciente30, 1 jul 2026) aparece «Registro histórico: la
-  fecha probable de parto ya pasó.», sin cambiar el estado ni las fechas del
-  dataset.
-- **Botón de registro**: `/adaptador/embarazos` publica
-  `registro_en_este_dispositivo` (la misma comprobación `Provision.sirve_a`
-  que hace el registro). Si es falso, el botón queda deshabilitado con
-  «Este dispositivo no está configurado para registrar sesiones de este
-  embarazo.». En la demo solo `paciente01` (embarazo 130) puede registrar.
+- **Embarazo actual**: muestra también la fecha probable de parto, sin
+  aviso visible de registro histórico. Se conservan el estado, las fechas y
+  la semana del último registro cuando el calendario del episodio ya pasó.
+- **Botón de registro** (retirado el 2026-09-27, ver abajo, junto con el
+  campo `registro_en_este_dispositivo` de `/adaptador/embarazos`, que solo
+  servía a ese botón).
 - **Historial**: resumen con el número de lecturas del episodio, las tres
   gráficas (cada una con su número de registros) y la tabla completa en un
   desplegable.
@@ -55,6 +57,119 @@ Estado al 2026-09-25. Continúa `docs/scrum72_etapa1_resumen.md`. SCRUM-72
 Sin cambios en la API central, migraciones, permisos, reglas clínicas,
 generador, dataset ni fechas. El refresco periódico sigue sin releer datos
 clínicos.
+
+## Revisión de la interfaz del 2026-09-27
+
+`frontend/gestante` y el adaptador del portal (`backend/app/gestante`), con sus
+pruebas y documentación. La API central, `app.edge`, `scripts/edge_node.py`,
+el generador, el dataset, el ETL, las migraciones y `publicacion.*` no
+cambian.
+
+- **Gráficas 2 + 1**: FC y SpO₂ lado a lado; movimientos debajo, a todo el
+  ancho, con un lienzo de 720 × 220 para que no crezca en alto. En una
+  columna (≤ 768 px) vuelven a apilarse con el lienzo normal.
+- **FC y SpO₂: dispersión de lecturas reales agrupadas por sesión.** Sin
+  línea, sin promedio ni ningún valor derivado: un punto por lectura. Cada
+  sesión (`id_sesion`) ocupa su propia columna con franja de fondo, en orden
+  cronológico, rotulada con su fecha y hora reales (el `id_sesion` no se
+  muestra); dentro de la columna las lecturas se separan en horizontal solo
+  para no taparse. El período filtra primero las lecturas y después se
+  agrupan las sesiones visibles. El ancho crece con las sesiones (96 px cada
+  una, mínimo 300 px: con 64 px las 6 sesiones de un embarazo cabían en una
+  tarjeta de escritorio y no había nada que desplazar); el eje de valores
+  queda fijo y las sesiones se recorren con scroll horizontal nativo --barra
+  siempre visible bajo la gráfica; en móviles, donde la barra nativa es
+  superpuesta e invisible, una barra propia sincronizada y arrastrable-- y
+  dos flechas (botones con `aria-label`) que avanzan hasta tres sesiones
+  enteras --nunca todo lo visible-- y se deshabilitan en los extremos. Una
+  nota indica si todas las sesiones están a la vista. Empieza en las más
+  recientes.
+  Cada punto dice valor, fecha y hora y «Lectura i de n de esta sesión», y al
+  enfocarlo se destaca su sesión. La tabla alternativa lista cada lectura. Un
+  promedio por sesión llegó a implementarse ese mismo día y se retiró antes
+  de cualquier commit.
+- **Movimientos no cambian**: barras sobre eje temporal proporcional, a todo
+  el ancho.
+- **La web no inicia ni envía mediciones.** Se retiró la sección «Sesión de
+  movimientos» («Registrar sesión de movimientos», resumen de la cola,
+  «Enviar ahora»/«Reintentar»), los pasos del manual y la tarjeta «Guardado y
+  envío» de Acerca de. En el adaptador se eliminó la ruta manual
+  `POST /adaptador/movimientos/sincronizar`. Todo lo que este documento
+  describe más abajo sobre ese botón, la prueba sin conexión con
+  «Registrar»/«Enviar ahora» y la limitación del arranque sin API es
+  historial de la etapa y ya no describe la interfaz.
+- **Envío automático de la cola local** (`app.gestante.envio_automatico`).
+  Diagnóstico previo: SCRUM-64/65 daban captura persistente, idempotencia y
+  rondas resilientes, pero nada las disparaba solo --`sincronizar` es un
+  comando finito que alguien lanza-- y la cola por cuenta del portal se había
+  quedado sin emisor al quitar «Enviar ahora». Ahora un hilo del portal
+  ejecuta cada 30 s (`GESTANTE_ENVIO_AUTOMATICO_SEGUNDOS`; 0 lo desactiva) un
+  ciclo que, por cada cuenta con token en memoria, hace el censo de su cola,
+  verifica la credencial contra `/yo` antes de reclamar nada (sin red no se
+  gastan intentos) y ejecuta una ronda de `app.edge.ejecutar_pasada` con
+  `respetar_programacion=True`. Reutiliza outbox, estados, reintentos,
+  idempotencia y transporte de `app.edge`; no crea ninguno propio. Antes del
+  censo repara la cola con `reconciliar_abandonados` y `resolver_herencia`,
+  como el sincronizador de SCRUM-65: un intento que quedó abierto porque el
+  portal o el equipo se apagaron en mitad de un envío se sella al vencer su
+  lease --sin red, sin credencial y sin inventar el resultado-- y vuelve al
+  reintento programado, que reenvía la misma clave y los mismos bytes.
+- **Tokens entre hilos**: `AlmacenDeTokens` protege todas sus operaciones con
+  un `threading.Lock`; «olvidar el token rechazado solo si sigue siendo ese»
+  es atómico, así que el 401 tardío de un token A no borra el token B de una
+  reautenticación que llegó en medio. El JWT sigue solo en memoria.
+- **Una recarga cuando hay una entrega nueva**: `/adaptador/estado-conexion`
+  incluye `ultimo_envio_confirmado` (lectura local de la cola de la cuenta).
+  La interfaz toma el primer valor de la sesión como línea base y, si cambia,
+  recarga lo clínico una sola vez. No es un sondeo clínico, no muestra la
+  cola y se reinicia al cerrar sesión; las respuestas tardías de otra sesión
+  se descartan con el turno de siempre.
+- **Productor del dispositivo** (`scripts/dispositivo_gestante.py capturar
+  [--tipo ...]`). Una revisión de extremo a extremo mostró que, sin el botón,
+  nada producía capturas hacia la cola que vigila el envío automático (la
+  ruta `sesiones-simuladas` exige la cookie de la paciente y la web ya no la
+  llama; `edge_node.py` escribe en otra cola, `data/edge/nodo_edge.sqlite3`,
+  con `EDGE_API_TOKEN`). El script representa el evento de captura del
+  dispositivo físico: lee `provision.json` (cuenta, embarazo, dispositivo y
+  catálogos, sin aceptar identificadores como argumentos), llama a
+  `movimientos.registrar_sesion_simulada` → `app.edge.capturar` y deja la
+  captura `PENDIENTE` en `data/gestante/movimientos/cuenta-<id_usuario>.sqlite3`,
+  la misma cola del envío automático. No usa la red ni ninguna credencial y no
+  genera lecturas periódicas. En movimientos, `MOV_SIMULADO = 12` con FC y
+  SpO₂ nulos, solo en el escenario técnico (embarazo 130).
+- **Los datos no expiran; la credencial para enviarlos, sí.** El JWT (30 min,
+  SCRUM-70) vive solo en memoria y no se persiste. La recuperación de
+  conectividad activa automáticamente el reintento de las capturas
+  pendientes; si la sesión central requiere reautenticación, las capturas
+  permanecen conservadas hasta restablecerla. Caída corta con el JWT
+  vigente: se envía sola al volver la red. Caída larga con el JWT vencido: la
+  captura sigue `PENDIENTE`, intacta y sin gastar intentos, y se envía tras
+  la reautenticación. Reinicio del portal: el dato sigue en SQLite, el JWT
+  no; tras volver a iniciar sesión se envía el mismo registro.
+- **Sin indicador de conexión**: se retiró la píldora del encabezado. Solo se
+  avisa cuando algo falta: «Sin conexión con el servidor. Se muestra la
+  última información consultada.» si la API no responde (se quita al
+  recargar con la API de vuelta), y el aviso de reautenticación o de acceso
+  denegado como antes. Un corte de la propia aplicación local (equipo
+  suspendido) sigue sin afirmarse como «sin conexión».
+- **Pie y Acerca de**: sin la línea de autoría de la tesis; el pie ofrece el
+  contacto del administrador del sistema (+507 6921-0003) y «© 2026
+  FetalAlert Panamá. Todos los derechos reservados.». En Acerca de, las dos
+  tarjetas de la segunda fila quedan centradas, alternadas con las tres de
+  arriba.
+- **Sin hora de consulta**: se retiró de Inicio «Información consultada al
+  servidor el …» junto con «Actualizar información»; lo clínico se vuelve a
+  pedir al volver a Inicio, al cambiar de embarazo, al volver a la pestaña y
+  al recuperar la conexión.
+- **Margen del eje de valores de FC y SpO₂**: queda al menos un paso de la
+  rejilla libre por debajo del punto más bajo. Las barras siguen partiendo de
+  cero.
+- **Barras de un solo grosor**: todas las de una gráfica miden lo mismo
+  (entre 6 y 16 unidades del lienzo, según cuántos registros hay). Si dos
+  registros están tan cerca que se tocarían, la de detrás se corre lo justo
+  para quedar al lado; su fecha exacta está en el aviso y en la tabla. Antes
+  se estrechaban solo las cercanas.
+- **Acerca de**: más separación entre tarjetas (1,6 rem).
 
 ## Escenarios de demostración y procedencia de los datos
 
@@ -145,8 +260,11 @@ histórica del dataset ni una medición**: se conserva a propósito, porque
 reemplazarlo por una lectura del dataset haría pasar un dato antiguo por una
 medición nueva.
 
-- Solo se usa en `construir_paquete_simulado`, cuando la gestante pulsa
-  «Registrar sesión de movimientos» en Inicio.
+- Solo se usa en `construir_paquete_simulado`, en la captura del dispositivo
+  simulado (`scripts/dispositivo_gestante.py capturar`, o la ruta
+  `POST /adaptador/embarazos/{id}/sesiones-simuladas`). Hasta el 2026-09-27
+  la disparaba el botón «Registrar sesión de movimientos» de Inicio; la web
+  ya no lo ofrece.
 - Solo puede ir al embarazo para el que está aprovisionado el dispositivo
   (`Provision.sirve_a`: cuenta 107, embarazo 130). Una captura contra el 100 o
   contra el 129 de otra cuenta se rechaza (404) sin dejar nada en la cola.
@@ -155,11 +273,10 @@ medición nueva.
   `id_dispositivo` 130.
 - Las lecturas de movimientos del embarazo 100 siguen siendo las del dataset
   (21 valores idénticos al CSV).
-- La interfaz no lo atribuye al dataset: «Acerca de» dice que las sesiones
-  registradas desde Inicio «usan valores simulados fijos; no son una
-  medición».
+- La interfaz no lo atribuye al dataset: «Acerca de» dice que toda la
+  información de esta versión es simulada y no procede de sensores.
 
-### Prueba sin conexión (paciente01, entorno aislado)
+### Prueba sin conexión (paciente01, entorno aislado; historial del 2026-09-25)
 
 API 8011 con JWT de 1 minuto, portal 8101 y base `scrum72_prueba_offline`;
 la API 8010, el portal 8100 y `scrum72_demo_gestante` no se tocan.
@@ -186,7 +303,27 @@ la API 8010, el portal 8100 y `scrum72_demo_gestante` no se tocan.
     el canónico sigue en 30 / 732 / 1180 y el Historial del 100 sigue con
     41 lecturas.
 
-El envío es manual («Enviar ahora»), no automático.
+En esa prueba el envío era manual («Enviar ahora»). Desde el 2026-09-27 la
+web ya no lo ofrece y el envío es automático: ver «Revisión de la interfaz
+del 2026-09-27».
+
+**Limitación del arranque sin API (revisión del 2026-09-26).** Conservar la
+sesión local y la outbox tras una recarga o reinicio no equivale a poder
+crear otra captura desde la interfaz. El registro desde Inicio requiere que
+esta página haya recibido antes el contexto de `/adaptador/embarazos`.
+Si se recarga sin API, el contexto en memoria se pierde y el botón queda
+deshabilitado. Tras reiniciar el portal también se pierde el token central,
+por diseño: hará falta recuperar la API y reautenticarse para reconstruir
+el contexto. Los registros pendientes se conservan. La captura directa del
+adaptador con sesión local válida y aprovisionamiento sí admite ausencia de
+API; esta capacidad no elimina la limitación de Inicio.
+
+`provision.json` contiene la vinculación de captura y los catálogos, no la
+lista clínica de episodios ni su estado actualizado. Publicar un contexto
+local de captura separado sería una posible extensión, pero requeriría un
+contrato y pruebas de selección, vigencia y revocación. No se presenta ese
+archivo como un embarazo clínico actual ni se cambia la autorización para
+cerrar SCRUM-72.
 
 ## Verificación
 
@@ -205,6 +342,41 @@ El envío es manual («Enviar ahora»), no automático.
 - Entorno aislado (API 8011 con JWT de 1 minuto, portal 8101, base
   `scrum72_prueba_offline`): vencimiento, reautenticación, caída, «Guardando…»,
   recuperación, envío y corte de red, también a 360 px.
+- Revisión del 2026-09-27 (versión final):
+  - `node --test frontend/gestante/pruebas/*.test.js`: 70 pasadas, 0
+    fallidas, 0 omitidas (incluye la recarga única por entrega confirmada:
+    línea base, valor repetido, valor nuevo, cierre de sesión, otra cuenta,
+    respuesta tardía y fallo de la comprobación). Incluye la dispersión --un punto por lectura, sin
+    promedio, cinco lecturas son cinco puntos, dos sesiones del mismo día son
+    dos grupos, orden cronológico, cero frente a nulo, «Últimos 30 días»,
+    lienzo desplazable con muchas sesiones, flechas, sin línea, tabla con los
+    valores reales-- y una comprobación de las 560 lecturas de signos
+    maternos de `data/generated` que se omite si el dataset no está generado.
+  - pytest de la gestante (`test_gestante_sesion`, `_seguridad`, `_rutas`,
+    `_movimientos`, `_dataset`, `_frontend`, `_frontend_comportamiento`,
+    `_ultimos_registros`) y la suite nueva del productor
+    (`test_gestante_dispositivo`, 20 pruebas): 267 pasadas, 0 fallidas, 0
+    omitidas. La suite del productor incluye además el intento abandonado
+    (reclamado sin resultado, lease vencido, reconciliado y enviado como
+    replay con la misma clave y los mismos bytes: una sola sesión remota) y
+    la carrera de tokens (el 401 tardío de A no borra B, también con la
+    escritura de B intercalada entre la comparación y el borrado). El productor se
+    prueba sin red ni JWT (una captura `PENDIENTE` en `cuenta-<id>.sqlite3`,
+    `MOV_SIMULADO = 12`, FC/SpO₂ nulos, sin aceptar identificadores); y
+    ESA captura se sigue hasta `ENVIADO`: caída corta (se envía sola con la
+    misma clave y los mismos bytes, sin duplicar), JWT vencido (sigue
+    intacta y sin gastar intentos hasta reautenticar), reinicio del portal
+    (el pendiente sigue, el token no queda en ningún archivo y se envía al
+    volver a entrar) y aislamiento por cuenta.
+  - pytest completo sin PostgreSQL: 2377 pasadas, 892 omitidas (requieren
+    PostgreSQL), 0 fallidas. Las omitidas no validan el DoD con PostgreSQL:
+    eso lo hará el CI con PostgreSQL 16.
+  - Chrome headless contra 8100, solo lectura: 29/29 de la dispersión
+    (1280, 390 y 360 px: 30 puntos en 6 sesiones para `paciente30`, sin
+    línea, tabla de 30 lecturas, flechas con ratón, Enter y movimiento
+    reducido, zona desplazable con teclado, página sin desborde; embarazo 100
+    con 20 lecturas en 4 sesiones y 21 barras; embarazo 130 sin FC ni SpO₂)
+    y 25/25 de la revisión general (disposición, pie, Acerca de, barras).
 
 ## Tesis: apartados a revisar
 
@@ -223,11 +395,19 @@ una revisión contra el texto real.
    más reciente y gráficas de los registros de cada embarazo. El análisis
    para el personal médico autorizado se realiza aparte, en Power BI, sobre
    una capa seudonimizada.»
-2. **Funcionamiento sin conexión.** «Las sesiones de movimientos se guardan
-   primero en el dispositivo y se envían al servidor cuando la gestante lo
-   solicita. El reenvío no duplica registros. Sin conexión puede seguir
-   consultando lo ya mostrado en la sesión y guardar registros, pero no
-   enviarlos ni actualizar su información. El envío no es automático.»
+2. **Funcionamiento sin conexión** (redacción del 2026-09-27). «La gestante
+   no inicia ni transmite mediciones: la interfaz web es de consulta. La
+   captura la produce el dispositivo --en este MVP, un simulador-- y se
+   guarda primero localmente, sin necesitar Internet; queda pendiente si no
+   hay conexión y sobrevive a un reinicio. La recuperación de conectividad
+   activa automáticamente el reintento de las capturas pendientes; si la
+   sesión central requiere reautenticación, las capturas permanecen
+   conservadas hasta restablecerla. El reenvío no duplica registros gracias
+   a la idempotencia. Sin conexión, la interfaz sigue mostrando la última
+   información consultada y lo indica.»
+   Si la tesis presenta el envío como una acción de la gestante («Enviar
+   ahora»), hay que corregirlo. Las gráficas de FC y SpO₂ muestran cada
+   lectura real agrupada por sesión, sin promedios.
 3. **ESP32.** El ESP32 pertenece al antecedente tecnológico del proyecto y
    no es hardware desarrollado en esta tesis. El MVP no integra hardware:
    las capturas son simuladas y el dataset es sintético.

@@ -17,8 +17,6 @@
     <symbol id="i-reloj" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
     <symbol id="i-grafica" viewBox="0 0 24 24"><path d="M4 19.5h16M6.5 16V11m5 5V6m5 10v-7"/></symbol>
     <symbol id="i-calendario" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15" rx="2.5"/><path d="M3.5 9.5h17M8 3v4m8-4v4"/></symbol>
-    <symbol id="i-enviar" viewBox="0 0 24 24"><path d="M20.5 3.5 10 14M20.5 3.5l-6.3 17-3.5-7.1-7.2-3.5z"/></symbol>
-    <symbol id="i-guardar" viewBox="0 0 24 24"><path d="M5 3.5h11l3.5 3.5v13H5z"/><path d="M8 3.5v5h7v-5M8 20.5v-6h8v6"/></symbol>
     <symbol id="i-usuario" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4.5 20.5c.6-4 3.6-6 7.5-6s6.9 2 7.5 6"/></symbol>
     <symbol id="i-candado" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/></symbol>
     <symbol id="i-salir" viewBox="0 0 24 24"><path d="M14.5 4.5h-8v15h8M10.5 12h10m-3.5-3.5L20.5 12 17 15.5"/></symbol>
@@ -32,8 +30,7 @@
   <!-- =====================================================================
        ENCABEZADO
        Marca (logotipo tipografico con degradado y eslogan), secciones y
-       area de cuenta. La pildora de estado habla del servidor de FetalAlert,
-       nunca de un dispositivo.
+       area de cuenta.
        ===================================================================== -->
   <header class="cabecera">
     <div class="logo">
@@ -52,9 +49,6 @@
     </nav>
 
     <div class="cabecera-estado">
-      <div id="connection-status" class="connection-status status-connecting" role="status" aria-live="polite">
-        Comprobando conexión…
-      </div>
       <!-- Area de cuenta: fuera del menu de secciones, solo con sesion. -->
       <div class="area-cuenta" id="area-cuenta" hidden>
         <button type="button" class="btn-cuenta" id="btn-cerrar-sesion">
@@ -68,7 +62,7 @@
   <dialog id="dialogo-cerrar-sesion" class="dialogo" aria-labelledby="dialogo-titulo">
     <h2 id="dialogo-titulo" class="dialogo-titulo">¿Deseas cerrar sesión?</h2>
     <p class="texto-apoyo">
-      Tus registros guardados en este dispositivo se conservan.
+      Podrás volver a entrar con tu correo y tu contraseña.
     </p>
     <div class="dialogo-acciones">
       <button type="button" class="btn-secundario" id="btn-cancelar-cierre">Cancelar</button>
@@ -79,8 +73,8 @@
   <main>
 
     <!-- Sesion con el servidor central vencida o rechazada. La sesion de este
-         dispositivo sigue abierta y los registros guardados no se tocan: solo
-         falta volver a presentar las credenciales de la MISMA cuenta. -->
+         dispositivo sigue abierta: solo falta volver a presentar las
+         credenciales de la MISMA cuenta. -->
     <div class="aviso-sesion-central" id="aviso-sesion-central" role="status" hidden>
       <p id="aviso-sesion-central-texto"></p>
       <button type="button" class="btn-primario" id="btn-mostrar-reautenticar">
@@ -181,12 +175,6 @@
               <dd class="value" id="embarazo-semana">No disponible</dd>
             </div>
           </dl>
-          <!-- Solo cuando la fecha probable de parto registrada ya pasó: el
-               episodio se muestra como un registro histórico, sin cambiar su
-               estado ni sus fechas. -->
-          <p class="embarazo-historico" id="embarazo-historico" hidden>
-            Registro histórico: la fecha probable de parto ya pasó.
-          </p>
           <p class="nota-pendiente" id="nota-embarazo" hidden></p>
           <div class="embarazo-anteriores">
             <span>Embarazos anteriores: <strong id="embarazo-anteriores">No disponible</strong></span>
@@ -277,7 +265,9 @@
         </div>
       </section>
 
-      <!-- Graficas del embarazo en curso: las mismas lecturas, en el tiempo. -->
+      <!-- Graficas del embarazo en curso: las mismas lecturas, en el tiempo.
+           Frecuencia cardiaca y saturacion lado a lado; movimientos debajo, a
+           todo el ancho. -->
       <section class="bloque-graficas" aria-labelledby="titulo-graficas-inicio">
         <div class="bloque-titulo bloque-titulo-fila">
           <div class="bloque-titulo">
@@ -294,42 +284,6 @@
         </div>
         <div class="graficas" id="graficas-inicio"></div>
       </section>
-
-      <!-- Registro de movimientos y su envio ------------------------------
-           Mensajes breves basados en el estado real de la cola de esta
-           cuenta. El envio es manual: no se promete nada automatico. -->
-      <section class="tarjeta bloque-registro" aria-labelledby="titulo-registro">
-        <div class="bloque-titulo">
-          <span class="icono-circulo lila"><svg class="icono"><use href="#i-huellas"/></svg></span>
-          <h3 class="subtitulo" id="titulo-registro">Sesión de movimientos</h3>
-        </div>
-        <div class="registro-acciones">
-          <div class="registro-paso">
-            <button id="btn-registrar-movimientos"
-                    class="btn-iniciar-conteo" type="button" disabled>
-              Registrar sesión de movimientos
-            </button>
-            <p class="texto-ayuda-conteo" id="nota-movimientos">
-              Necesitas un embarazo en curso para registrar movimientos.
-            </p>
-          </div>
-          <div class="envio" id="envio">
-            <p class="envio-estado" id="envio-estado" role="status"></p>
-            <button id="btn-sincronizar-movimientos" class="btn-secundario" type="button" hidden>
-              Enviar ahora
-            </button>
-            <p class="envio-resultado" id="envio-resultado" role="status" hidden></p>
-            <p class="texto-apoyo" id="envio-ultimo" hidden></p>
-          </div>
-        </div>
-      </section>
-
-      <div class="pie-datos">
-        <p class="texto-apoyo" id="datos-actualizados" hidden></p>
-        <button type="button" class="btn-enlace" id="btn-actualizar-datos">
-          Actualizar información
-        </button>
-      </div>
     </section>
 
     <!-- =================================================================
@@ -408,7 +362,7 @@
             <span class="paso-numero">3</span>
             <span class="icono-circulo morado"><svg class="icono"><use href="#i-grafica"/></svg></span>
             <h3>Recorre tus gráficas</h3>
-            <p>Toca un punto o una barra para ver su fecha y su valor.</p>
+            <p>Toca un punto o una barra para ver su fecha y su valor. En frecuencia cardíaca y oxígeno, cada columna es una sesión: desliza o usa las flechas para ver todas.</p>
           </div>
           <div class="recorte" aria-hidden="true">
             <svg class="recorte-grafica" viewBox="0 0 160 70">
@@ -435,35 +389,9 @@
         <li class="manual-step tarjeta">
           <div class="paso-texto">
             <span class="paso-numero">5</span>
-            <span class="icono-circulo rosa"><svg class="icono"><use href="#i-huellas"/></svg></span>
-            <h3>Registra una sesión de movimientos</h3>
-            <p>Toca el botón una sola vez y espera el mensaje de guardado.</p>
-          </div>
-          <div class="recorte" aria-hidden="true">
-            <span class="recorte-boton rosa marcado">Registrar sesión de movimientos</span>
-            <span class="recorte-pie">Registro guardado en este dispositivo, pendiente de envío.</span>
-          </div>
-        </li>
-
-        <li class="manual-step tarjeta">
-          <div class="paso-texto">
-            <span class="paso-numero">6</span>
-            <span class="icono-circulo morado"><svg class="icono"><use href="#i-enviar"/></svg></span>
-            <h3>Envía lo guardado</h3>
-            <p>Guardado no es enviado. Con conexión, toca «Enviar ahora» o «Reintentar».</p>
-          </div>
-          <div class="recorte" aria-hidden="true">
-            <span class="recorte-pie">Registro guardado, pendiente de envío.</span>
-            <span class="recorte-boton secundario marcado">Enviar ahora</span>
-          </div>
-        </li>
-
-        <li class="manual-step tarjeta">
-          <div class="paso-texto">
-            <span class="paso-numero">7</span>
             <span class="icono-circulo lila"><svg class="icono"><use href="#i-candado"/></svg></span>
             <h3>Si te lo pide, vuelve a entrar</h3>
-            <p>Toca «Volver a iniciar sesión». Tus registros guardados se conservan.</p>
+            <p>Toca «Volver a iniciar sesión» y escribe tu correo y tu contraseña.</p>
           </div>
           <div class="recorte" aria-hidden="true">
             <span class="recorte-pildora aviso">Vuelve a iniciar sesión</span>
@@ -473,19 +401,19 @@
 
         <li class="manual-step tarjeta">
           <div class="paso-texto">
-            <span class="paso-numero">8</span>
+            <span class="paso-numero">6</span>
             <span class="icono-circulo morado"><svg class="icono"><use href="#i-sin-red"/></svg></span>
             <h3>Sin conexión</h3>
-            <p>Sigues viendo lo ya consultado y puedes guardar registros. Para enviarlos hace falta conexión.</p>
+            <p>Sigues viendo lo ya consultado. Tu información se actualiza cuando vuelve la conexión.</p>
           </div>
           <div class="recorte" aria-hidden="true">
-            <span class="recorte-pildora sin-red marcado">Sin conexión con el servidor</span>
+            <span class="recorte-aviso marcado">Sin conexión con el servidor. Se muestra la última información consultada.</span>
           </div>
         </li>
 
         <li class="manual-step tarjeta">
           <div class="paso-texto">
-            <span class="paso-numero">9</span>
+            <span class="paso-numero">7</span>
             <span class="icono-circulo rosa"><svg class="icono"><use href="#i-salir"/></svg></span>
             <h3>Cierra sesión</h3>
             <p>Arriba a la derecha, «Cerrar sesión». Confirma o toca «Cancelar».</p>
@@ -531,20 +459,10 @@
           <span class="icono-circulo morado"><svg class="icono"><use href="#i-pantalla"/></svg></span>
           <h4>Esta interfaz</h4>
           <p>
-            Es la vista de la gestante: sus registros, sus embarazos y sus
-            sesiones de movimientos. El análisis para el personal médico
+            Es la vista de la gestante: sus registros y sus embarazos. El
+            análisis para el personal médico
             autorizado está previsto aparte, en Power BI, sobre una capa de
             datos seudonimizada; no forma parte de esta pantalla.
-          </p>
-        </article>
-
-        <article class="value-card">
-          <span class="icono-circulo lila"><svg class="icono"><use href="#i-guardar"/></svg></span>
-          <h4>Guardado y envío</h4>
-          <p>
-            Una sesión registrada se guarda primero en este dispositivo. Se
-            envía al servidor cuando tocas «Enviar ahora», sin duplicarse si
-            se reintenta. El envío no es automático.
           </p>
         </article>
 
@@ -564,8 +482,7 @@
           <p>
             Toda la información de esta versión es simulada con fines
             académicos: no corresponde a pacientes reales ni procede de
-            sensores. Las sesiones de movimientos que se registran desde
-            «Inicio» usan valores simulados fijos; no son una medición.
+            sensores.
           </p>
         </article>
 
@@ -581,16 +498,16 @@
           </p>
         </article>
       </div>
-
-      <p class="autoria texto-centrado">
-        Trabajo de tesis de Tinuola Fagbemi y Viviana Jaén.
-      </p>
     </section>
 
   </main>
 
   <footer class="footer">
-    <p>FetalAlert Panamá &copy; 2026</p>
+    <p class="footer-soporte">
+      ¿Problemas técnicos? Comunícate con el administrador del sistema al
+      <a href="tel:+50769210003">+507 6921-0003</a>.
+    </p>
+    <p>&copy; 2026 FetalAlert Panamá. Todos los derechos reservados.</p>
   </footer>
 
   <script src="graficas.js"></script>

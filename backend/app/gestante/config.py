@@ -106,6 +106,12 @@ VENTANA_MAXIMA_HORAS = 720.0
 # propiedad del diseno.
 COOKIE_SECURE_POR_OMISION = False
 
+# Segundos entre dos ciclos del envio automatico de la cola local
+# (``app.gestante.envio_automatico``). Es lo que tarda, como mucho, en salir un
+# pendiente despues de que vuelve la conexion. Con 0 el emisor no arranca: lo
+# usan las pruebas, que llaman al ciclo directamente.
+ENVIO_AUTOMATICO_POR_OMISION_SEGUNDOS = 30.0
+
 # Nombre de la cookie de sesion local. Lo que viaja en ella es un identificador
 # opaco y nada mas: ni el token central, ni el correo, ni el rol, ni dato alguno
 # de la cuenta.
@@ -146,6 +152,9 @@ class GestanteSettings(BaseSettings):
         le=VENTANA_MAXIMA_HORAS,
     )
     cookie_secure: bool = COOKIE_SECURE_POR_OMISION
+    envio_automatico_segundos: float = Field(
+        default=ENVIO_AUTOMATICO_POR_OMISION_SEGUNDOS, ge=0
+    )
 
     @property
     def ventana_en_segundos(self) -> int:

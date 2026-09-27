@@ -37,6 +37,7 @@ from fastapi.responses import JSONResponse
 
 from app.gestante.central import ClienteCentral, ClienteCentralHTTP
 from app.gestante.config import GestanteSettings, cargar_settings_gestante
+from app.gestante.envio_automatico import EmisorAutomatico
 from app.gestante.rutas import ContextoAdaptador, crear_router
 from app.gestante.sesion import ahora_utc
 
@@ -117,8 +118,8 @@ def crear_aplicacion(
     * ``cliente_central`` se construye sobre httpx si no se pasa, y entonces
       esta aplicacion es su duena y lo cierra al apagarse;
     * ``reloj`` es el reloj real si no se pasa;
-    * ``constructor_cliente_edge`` construye el cliente HTTP real de la
-      sincronizacion de movimientos si no se pasa una prueba con
+    * ``constructor_cliente_edge`` construye el cliente HTTP real del envio
+      automatico de la cola local si no se pasa una prueba con
       ``httpx.MockTransport``.
     """
     configuracion = settings or cargar_settings_gestante()
@@ -137,9 +138,19 @@ def crear_aplicacion(
 
     @asynccontextmanager
     async def ciclo_de_vida(_: FastAPI) -> AsyncIterator[None]:
+        # El envio automatico de la cola local: lo pendiente sale solo cuando
+        # hay conexion y token, sin que la paciente pulse nada.
+        emisor = None
+        if configuracion.envio_automatico_segundos > 0:
+            emisor = EmisorAutomatico(
+                contexto, configuracion.envio_automatico_segundos
+            )
+            emisor.iniciar()
         try:
             yield
         finally:
+            if emisor is not None:
+                emisor.detener()
             # Solo se cierra el cliente que esta aplicacion creo. Uno inyectado
             # pertenece a quien lo paso.
             if http is not None:

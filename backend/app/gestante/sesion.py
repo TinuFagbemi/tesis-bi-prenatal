@@ -218,6 +218,24 @@ def validar(
     return None if fila is None else _sesion_de(fila)
 
 
+def titular_vigente(
+    conexion: sqlite3.Connection, hash_sesion: str, *, ahora: datetime
+) -> int | None:
+    """El ``id_usuario`` de la sesion con ese digest, si sigue valiendo.
+
+    Lo usa el envio automatico, que no tiene cookie: recorre los tokens en
+    memoria --indexados por digest-- y necesita saber de que cuenta es cada
+    uno. Mismas guardas que :func:`validar`: una sesion cerrada o vencida no
+    tiene titular a estos efectos, y su cola no se envia con su token.
+    """
+    fila = conexion.execute(
+        f"SELECT id_usuario FROM {TABLA_SESION}"
+        " WHERE hash_sesion = ? AND cerrada_en IS NULL AND expira_en > ?",
+        (hash_sesion, _texto(ahora)),
+    ).fetchone()
+    return None if fila is None else int(fila["id_usuario"])
+
+
 def renovar(
     conexion: sqlite3.Connection,
     identificador: str,

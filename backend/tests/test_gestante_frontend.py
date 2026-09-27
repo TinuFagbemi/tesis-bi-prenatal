@@ -138,11 +138,6 @@ def test_el_semaforo_solo_traduce_codigos_a_clases():
     antiguedad = "Date.now() - datosConsultadosEn > ANTIGUEDAD_MAXIMA_DATOS_MS"
     assert contenido.count(antiguedad) == 1
     contenido = contenido.replace(antiguedad, "")
-    # Y la de dos fechas de calendario ISO (¿ya pasó la fecha probable de
-    # parto?), que ordena fechas, no valores clínicos.
-    calendario = "String(fecha) < String(hoy)"
-    assert contenido.count(calendario) == 1
-    contenido = contenido.replace(calendario, "")
     assert " < " not in contenido.replace("for (", "")
     assert " > " not in contenido.replace("=>", "").replace("->", "")
 
@@ -225,9 +220,9 @@ def test_no_quedan_paneles_de_contadores_tecnicos():
         "estado-conteo",
         "FALLIDO (reintentable)",
         "FALLIDO (requiere revisión)",
+        'id="envio-estado"',
     ):
         assert retirado not in html, retirado
-    assert 'id="envio-estado"' in html
 
 
 def test_la_interfaz_no_muestra_comandos_ni_rutas():
@@ -288,10 +283,8 @@ def test_se_conserva_la_identidad_del_encabezado(marca):
         "--clr-count-start:#db7093",
         "--clr-header-grad-1:#0f172a",
         "-webkit-background-clip:text",
-        "@keyframes pulse",
         "@keyframes urFade",
         ".card::before",
-        ".connection-status",
         ".qa-btn",
         ".result-card",
         ".data-row",
@@ -378,43 +371,49 @@ def test_ultimo_resultado_ya_no_es_una_pagina():
 # ---------------------------------------------------------------------------
 
 
-def test_el_registro_de_movimientos_simulados_existe_y_arranca_deshabilitado():
-    """El boton existe, se ve como simulado, y arranca deshabilitado en el HTML.
+def test_la_interfaz_no_registra_ni_envia_sesiones():
+    """La vista de la gestante solo consulta.
 
-    Arranca deshabilitado porque el marcado estatico no sabe todavia si hay un
-    embarazo elegido -- eso lo decide `app.js` en tiempo de ejecucion, contra
-    la lista que entrega el adaptador. La sincronizacion es una accion
-    aparte, siempre disponible, porque no depende de tener un embarazo
-    elegido.
+    El registro simulado de movimientos y su envio siguen en el adaptador
+    (``/adaptador/embarazos/{id}/sesiones-simuladas`` y
+    ``/adaptador/movimientos/*``, con sus pruebas), pero esta pantalla ya no
+    los ofrece: ni boton, ni resumen de la cola, ni llamadas.
     """
-    import re
+    html = leer(HTML)
+    js = leer(JS)
 
-    contenido = leer(HTML)
+    for retirado in (
+        'id="btn-registrar-movimientos"',
+        'id="btn-sincronizar-movimientos"',
+        'id="nota-movimientos"',
+        "Sesión de movimientos",
+        "Enviar ahora",
+    ):
+        assert retirado not in html, retirado
+    for retirado in (
+        "sesiones-simuladas",
+        "/adaptador/movimientos/",
+        "manejarRegistrarMovimiento",
+        "manejarSincronizarMovimientos",
+        "TIPO_SESION_SIMULADA",
+    ):
+        assert retirado not in js, retirado
 
-    boton = re.search(r'<button id="btn-registrar-movimientos"[^>]*>', contenido)
-    assert boton is not None
-    assert "disabled" in boton.group(0)
-    assert 'id="btn-sincronizar-movimientos"' in contenido
-    # Que es simulado se explica una vez, en «Acerca de».
-    acerca = contenido.split('id="vista-acerca"', 1)[1]
-    assert "valores" in acerca and "simulados fijos" in acerca
+
+def test_no_hay_indicador_permanente_de_conexion():
+    """Se retiro la pildora del encabezado; solo se avisa cuando algo falta."""
+    assert "connection-status" not in leer(HTML)
+    assert "connection-status" not in leer(JS)
+    assert ".connection-status" not in leer(CSS)
+    assert "/adaptador/conectividad" not in leer(JS)
 
 
-def test_el_registro_de_movimientos_simulados_esta_conectado_en_app_js():
-    """La accion ya llama al adaptador: no es un boton decorativo.
-
-    El paquete concreto -- valores fijos, referencias de catalogo -- lo arma
-    el servidor en ``app.gestante.simulacion``; este archivo solo elige el
-    tipo de sesion y llama a la ruta.
-    """
-    contenido = leer(JS)
-
-    assert "sesionesSimuladas" in contenido
-    assert "movimientosSincronizar" in contenido
-    assert "movimientosEstado" in contenido
-    assert "manejarRegistrarMovimiento" in contenido
-    assert "manejarSincronizarMovimientos" in contenido
-    assert "TIPO_SESION_SIMULADA" in contenido
+def test_el_pie_tiene_contacto_tecnico_y_derechos_reservados():
+    pie = leer(HTML).split("<footer", 1)[1]
+    assert "administrador del sistema" in pie
+    assert 'href="tel:' in pie
+    assert "Todos los derechos reservados." in pie
+    assert "Trabajo de tesis de" not in leer(HTML)
 
 
 def test_no_aparecen_los_identificadores_que_solo_sirven_para_escribir():
