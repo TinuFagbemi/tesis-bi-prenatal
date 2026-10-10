@@ -312,8 +312,37 @@
         </label>
       </div>
 
+      <!-- Resumen imprimible del embarazo elegido aquí. Solo se habilita con
+           sus lecturas ya cargadas: nunca mientras cambia la selección. -->
+      <div class="resumen-accion">
+        <button type="button" class="btn-secundario" id="btn-guardar-resumen" disabled>
+          <svg class="icono" aria-hidden="true" focusable="false"><use href="#i-documento"/></svg>
+          Guardar mi resumen
+        </button>
+        <p class="texto-ayuda" id="resumen-mensaje" role="status" hidden></p>
+      </div>
+
       <!-- Se construye en app.js con lo que entrega el adaptador. -->
       <div id="historial-lista" class="historial-lista"></div>
+    </section>
+
+    <!-- =================================================================
+         VISTA 6 — MI RESUMEN (imprimible)
+         Una instantánea de UN embarazo de UNA cuenta, construida en app.js
+         con los datos ya consultados en «Mi historial». Se imprime o se
+         guarda como PDF con el navegador; no se envía a ningún servicio.
+         ================================================================= -->
+    <section id="vista-resumen" class="vista" hidden>
+      <div class="resumen-controles tarjeta">
+        <p class="texto-apoyo">
+          En las opciones de impresión, selecciona “Guardar como PDF”.
+        </p>
+        <div class="dialogo-acciones">
+          <button type="button" class="btn-secundario" id="btn-volver-historial">Volver a «Mi historial»</button>
+          <button type="button" class="btn-primario" id="btn-imprimir-resumen">Imprimir o guardar como PDF</button>
+        </div>
+      </div>
+      <article id="resumen-documento" class="resumen-documento" aria-labelledby="resumen-titulo"></article>
     </section>
 
     <!-- =================================================================
