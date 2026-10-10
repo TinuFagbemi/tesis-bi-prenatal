@@ -22,39 +22,70 @@ Todos los datos son simulados y ficticios.
 2. Elegir el embarazo (y, si se quiere, el «Período de las gráficas»).
 3. Pulsar **«Guardar mi resumen»**. El botón solo se habilita cuando las
    lecturas de ese embarazo terminaron de cargarse.
-4. Se abre la vista del resumen con la indicación «En las opciones de
-   impresión, selecciona “Guardar como PDF”.» y dos botones: «Volver a
-   «Mi historial»» e «Imprimir o guardar como PDF».
-5. «Imprimir o guardar como PDF» abre el diálogo de impresión del navegador.
-   El nombre propuesto para el archivo es el título de la página,
-   «FetalAlert — Mi resumen». La interfaz no anuncia «archivo guardado»: la
-   persona puede haber cancelado y la página no puede saberlo.
+4. Se abre la vista previa del documento. Arriba, **«Contenido del PDF»**:
+   - **Resumen**: últimos valores y hasta 10 lecturas recientes (opción por
+     omisión cada vez que se abre).
+   - **Historial completo**: todas las lecturas del período elegido.
+   La vista previa cambia al elegir.
+5. **«Descargar PDF»** descarga el archivo directamente, sin diálogo de
+   impresión: `FetalAlert-resumen-AAAA-MM-DD.pdf` o
+   `FetalAlert-historial-AAAA-MM-DD.pdf` (fecha de Panamá; sin nombres ni
+   identificadores). La página dice «Descarga iniciada: «…». Búscalo en la
+   carpeta de descargas.»: el navegador decide dónde lo guarda y la página no
+   puede confirmarlo.
+
+### Decisiones (cambio sobre el planteamiento inicial del ticket)
+
+El ticket pedía no presentarlo como descarga en un clic y evitar dependencias
+nuevas. A petición de la usuaria (2026-10-10) se cambió a **descarga directa**
+de un PDF **con la estética de la interfaz**, eligiendo entre resumen e
+historial completo. Consecuencias aceptadas:
+
+- **Dependencia nueva:** pdfmake 0.2.23 (MIT) con fuentes Roboto 3.014
+  (SIL OFL 1.1), copiado sin modificar en `frontend/gestante/vendor/`
+  (≈ 2,2 MB; detalle y sumas SHA-256 en `vendor/LICENCIAS.md`). Genera un PDF
+  con **texto real** (seleccionable), no una imagen de la pantalla.
+- **Ruta nueva en el adaptador** (`app/gestante/rutas.py`): `/resumen_pdf.js`,
+  `/vendor/pdfmake.min.js` y `/vendor/vfs_fonts.js`, como rutas explícitas
+  (no un directorio montado). Sin CDN: funciona sin internet.
+- **Carga diferida:** el motor (≈ 2,2 MB) se pide al portal solo la primera
+  vez que se pulsa «Descargar PDF», no en cada visita. Si falla, se dice
+  («No se pudo preparar el PDF. Inténtalo de nuevo.») y se puede reintentar.
+- **Papel Carta** fijo (el habitual en Panamá): una descarga no pregunta el
+  tamaño. Con la vista abierta, Ctrl+P sigue imprimiendo solo el documento
+  (`@media print`), en el papel que se elija.
+- Sin motor de PDF en backend: el PDF se genera en el navegador.
 
 ### Cómo está hecho
 
-- Vista `vista-resumen` dentro de la propia página (`index.html`), sin
-  ventana emergente: no hay bloqueo de pop-ups ni ventana que cerrar.
-- El documento se construye en `app.js` con `createElement` y `textContent`
-  (nunca `innerHTML`), a partir de una **instantánea** del monitoreo que ya
-  cargó «Mi historial»: no hace peticiones nuevas, no usa servicios externos,
-  no añade dependencias y no guarda nada en el navegador.
-- `styles.css`: estilos de pantalla y un bloque `@media print` que, solo con
-  la vista del resumen abierta (`body.con-resumen`), oculta cabecera, menú,
-  pie, avisos y controles. Sin tamaño de papel fijo (`@page` solo fija
-  márgenes), así que A4 y Carta usan el que elija la persona. Cabecera de la
-  tabla repetida en cada página y filas sin cortes.
+- `app.js` arma un **modelo** del documento (`modeloDelResumen`): solo textos
+  ya formateados, con las reglas de siempre (fechas en Panamá, cero frente a
+  ausencia, semáforo de una sola lectura). Con ese modelo se pinta la vista
+  previa (`createElement` + `textContent`, nunca `innerHTML`) y se genera el
+  PDF: lo que se ve es lo que se descarga.
+- `resumen_pdf.js` (nuevo, sin DOM) convierte el modelo en la definición de
+  pdfmake con la estética de la interfaz: banda oscura con el degradado del
+  encabezado y el logotipo en la primera página, franja morada y rosa,
+  iconos del sprite en círculos de color, tarjetas con franja superior,
+  bloque del semáforo con los colores del aviso (y siempre su nombre),
+  tabla con cabecera lila repetida en cada página, filas alternas y filas que
+  no se parten; cabecera discreta y «Página n de m» en todas las páginas.
+- El documento sale de la **instantánea** del monitoreo que ya cargó «Mi
+  historial»: no hace peticiones de datos nuevas ni guarda nada en el
+  navegador. Si se cierra la sesión mientras se prepara el PDF, no se
+  descarga nada.
 
 ### Qué contiene
 
 | Bloque | Alcance |
 |---|---|
-| Marca FetalAlert, «Resumen de mis registros» y el embarazo («Embarazo desde 6 ene 2025 — Finalizado») | El embarazo elegido en «Mi historial». Nunca el de Inicio si son distintos. |
-| Datos consultados el / Resumen generado el | Consulta = cuándo llegó al navegador el monitoreo usado. Generación = cuándo se pulsó el botón. Son fechas distintas. |
+| Marca FetalAlert, título y el embarazo («Embarazo desde 6 ene 2025 — Finalizado») | El embarazo elegido en «Mi historial». Nunca el de Inicio si son distintos. Título: «Resumen de mis registros» o «Historial de mis registros». |
+| Datos consultados el / Resumen (o Historial) generado el | Consulta = cuándo llegó al navegador el monitoreo usado. Generación = cuándo se armó el documento. Son fechas distintas. |
 | Embarazo: estado, inicio, FPP y fecha de cierre (solo si existen) | Del episodio. |
 | «Semana actual (al <hoy>)» | Solo para el embarazo en curso y solo si el adaptador publica `semana_actual`. En cualquier otro caso (finalizado, ambiguo, FPP vencida): «Semana en el último registro», con su fecha. |
 | Últimos valores registrados (FC, SpO₂, movimientos) | De **todo el embarazo**, uno por variable, cada uno con su fecha, hora y semana. Pueden venir de lecturas distintas, y así se dice. Sin semáforo propio. |
-| Clasificación de la lectura más reciente | El `codigo_semaforo` de la fuente autorizada para **una** lectura, con su fecha y lo que midió. Texto explícito: no se aplica a cada medición ni a los últimos valores. Un código desconocido es «Sin clasificación disponible». |
-| Lecturas recientes | Hasta **10** del período elegido, de la más reciente a la más antigua, cada una con su clasificación (color + nombre). Se indica el período con sus fechas, cuántas se incluyen y de cuántas. |
+| Clasificación de la lectura más reciente | El `codigo_semaforo` de la fuente autorizada para **una** lectura, con su fecha y lo que midió. Texto explícito: no se aplica a cada medición ni a los últimos valores. Un código desconocido es «Sin clasificación disponible», sin color. |
+| Lecturas recientes / Todas las lecturas del período | Resumen: hasta **10**; historial completo: todas. Del período elegido, de la más reciente a la más antigua, cada una con su clasificación (color + nombre). Se indica el período con sus fechas, cuántas se incluyen y de cuántas. |
 | Pie | Horas de Panamá; «—» = valor no registrado, el cero sí es un valor; datos simulados; no sustituye la valoración del personal de salud. |
 
 ### Límites
@@ -62,105 +93,105 @@ Todos los datos son simulados y ficticios.
 - **Cobertura de los datos.** El servidor central no limita ni pagina
   `/embarazos/{id}/sesiones` ni `/sesiones/{id}/lecturas`
   (`services/consulta_clinica.py`), y el adaptador responde error en vez de
-  un historial parcial si falla cualquier sesión. Por eso el resumen puede
-  hablar de «las N lecturas más recientes de las M del período». El límite de
-  10 es solo del documento; «Mi historial» sigue mostrando todas.
+  un historial parcial si falla cualquier sesión. Por eso el documento puede
+  hablar de «las N lecturas más recientes de las M del período» o de todas.
 - **«Últimos 30 días con registros»** se cuenta hacia atrás desde la lectura
   más reciente del embarazo (la misma idea que las gráficas, que lo cuentan
   por variable desde el último registro de cada serie). El documento escribe
-  las fechas del período, así que no hay ambigüedad sobre qué cubre.
-- **Sin conexión.** Si el monitoreo ya estaba cargado, se puede generar; si
-  la última comprobación no confirmó la conexión, el resumen lo dice: «Los
-  datos son los de la última consulta y podrían no incluir registros
-  posteriores». No se puede generar tras recargar sin API (no hay datos en
+  las fechas del período.
+- **Sin conexión.** Si el monitoreo ya estaba cargado, se puede generar y
+  descargar; si la última comprobación no confirmó la conexión, el documento
+  lo dice: «Los datos son los de la última consulta y podrían no incluir
+  registros posteriores». No se puede tras recargar sin API (no hay datos en
   memoria ni almacenamiento persistente, por diseño).
-- **Sin lecturas** no se genera un documento: se muestra «Este embarazo
-  todavía no tiene lecturas registradas, así que no hay un resumen que
-  guardar.»
+- **Sin lecturas** no se genera un documento: «Este embarazo todavía no tiene
+  lecturas registradas, así que no hay un resumen que guardar.»
 - **No se muestran** identificadores (de lectura, sesión, embarazo o
   dispositivo), códigos internos (`OK`, `WARNING`…), claves de idempotencia
-  ni tokens.
+  ni tokens; tampoco en el nombre del archivo ni en los metadatos del PDF.
 - Sin gráficas en el documento: el texto debe poder seleccionarse y leerse
   sin color.
 
 ### Pruebas ejecutadas
 
-Pruebas de comportamiento (Node, `frontend/gestante/pruebas/`), 16 nuevas en
-`app.comportamiento.test.js` sobre el `app.js` real con DOM mínimo:
+Node (`frontend/gestante/pruebas/`):
 
-- habilitación solo con lecturas cargadas; deshabilitado al cambiar de
-  embarazo y con error del servidor;
-- correspondencia con el embarazo de Historial y no con el de Inicio;
-- semana actual solo en el embarazo en curso; finalizado y FPP vencida usan
-  la del último registro;
-- variables con fechas distintas y semáforo de una sola lectura, con su
-  alcance; código de semáforo desconocido;
-- cero frente a «Sin registros» y «No disponible»;
-- sin lecturas: mensaje y ningún documento;
-- límite de 10, orden y cobertura; período «Últimos 30 días con registros»;
-- fecha de consulta frente a fecha de generación; aviso sin conexión;
-- respuesta tardía de otra selección; cierre de sesión con una carga de la
-  cuenta A pendiente y entrada de la cuenta B;
-- foco al título, «Volver» devuelve el foco al botón, imprimir solo llama a
-  `window.print()` y no se anuncia «guardado»;
-- escape de contenido (`<img onerror>` llega como texto) y ausencia de
-  identificadores internos.
+- `app.comportamiento.test.js`, sobre el `app.js` real con DOM mínimo y un
+  pdfmake falso que guarda la definición:
+  - habilitación solo con lecturas cargadas; deshabilitado al cambiar de
+    embarazo y con error del servidor;
+  - correspondencia con el embarazo de Historial y no con el de Inicio;
+  - semana actual solo en el embarazo en curso; finalizado y FPP vencida
+    usan la del último registro;
+  - variables con fechas distintas y semáforo de una sola lectura, con su
+    alcance; código desconocido;
+  - cero frente a «Sin registros» y «No disponible»; sin lecturas;
+  - límite de 10, orden y cobertura; período de 30 días;
+  - fecha de consulta frente a generación; aviso sin conexión;
+  - respuesta tardía de otra selección; cierre de sesión y cambio de cuenta;
+  - foco al título y vuelta al botón;
+  - **descarga**: nombre del archivo, mismos textos y filas que la vista
+    previa, sin identificadores; «Historial completo»; el motor se pide al
+    portal la primera vez y en orden; cerrar sesión durante la carga no
+    descarga nada; error de carga y reintento; marcado como texto.
+- `resumen_pdf.test.js` (nuevo): papel Carta y metadatos; todos los textos
+  del modelo llegan tal cual; tabla con cabecera repetida, filas sin partir y
+  6 columnas; semáforo siempre con nombre y sin color si es desconocido;
+  aviso solo si existe; banda solo en la primera página y numeración en
+  todas; el título de la tabla no queda solo al pie; ningún dato entra en un
+  SVG.
 
-Resultados al cerrar la rama:
+pytest: `test_gestante_rutas.py` comprueba que se sirven `/resumen_pdf.js` y
+los dos archivos de `/vendor/`, y que cualquier otra ruta (por ejemplo
+`/vendor/LICENCIAS.md`) da 404.
 
 | Suite | Base `029fe50` | Rama |
 |---|---|---|
-| `node --test frontend/gestante/pruebas/*.test.js` | 73 pass, 1 skip | 89 pass, 1 skip; con `data/generated` generado, 90 pass, 0 skip |
-| `pytest -k gestante` (sin PostgreSQL) | — | 370 passed, 1 skipped |
-| `pytest` sin PostgreSQL (los mismos `--ignore` del primer paso del CI) | 2449 passed | 2449 passed |
+| `node --test frontend/gestante/pruebas/*.test.js` | 73 pass, 1 skip | 103 pass, 0 skip (con `data/generated` generado; sin él, la prueba del dataset se omite como antes) |
+| `pytest` sin PostgreSQL (los mismos `--ignore` del primer paso del CI) | 2449 passed | 2455 passed |
 
-El *skip* de Node es preexistente («data/generated no está generado»). Las
-suites `*_postgresql.py` no se ejecutaron: el cambio no toca backend.
+Las suites `*_postgresql.py` no se ejecutaron: el único cambio de backend son
+rutas de archivos estáticos.
 
 `test_gestante_frontend.py` prohíbe cifras de umbral clínico en `app.js`; la
 constante del día se escribe como `86400000` por eso.
 
 ### Revisión visual (Chrome headless)
 
-Con Chrome headless y `playwright-core` instalado **fuera** del
-repositorio, contra un servidor local con datos ficticios (32 lecturas en el
-embarazo finalizado) y contra el portal real del entorno aislado de la parte B:
+Con Chrome headless y `playwright-core` instalado **fuera** del repositorio,
+contra un servidor local que sirve los archivos del frontend y responde
+`/adaptador/*` con datos ficticios (32 lecturas en el embarazo finalizado).
+La versión anterior (impresión del navegador) se probó además contra el
+portal real de la parte B; la descarga directa, solo contra el servidor
+local:
 
 - Inicio idéntico **píxel a píxel** a la versión base en 1366 px y 390 px;
   Historial igual salvo el botón nuevo.
 - Botón alcanzable con Tab y activable con Enter; el foco pasa al título del
-  resumen; al volver, al botón.
+  documento; al volver, al botón.
 - Sin desplazamiento horizontal a 1366 y 390 px; en pantallas estrechas la
-  tabla se apila como la del historial.
-- Al imprimir solo se ve el documento.
-- PDF generado por Chrome headless: **2 páginas en A4 y en Carta**, con y sin
-  fondos; texto extraíble/seleccionable; fuentes incrustadas y sin recursos
-  externos (se abre sin conexión). Sin filas cortadas ni páginas vacías.
+  tabla de la vista previa se apila como la del historial.
+- **Descarga real** con pdfmake en Chrome (evento de descarga del navegador):
+  Carta; resumen en **2 páginas** y historial completo (32 lecturas) en
+  **3 páginas**; fuentes Roboto incrustadas; texto extraíble, incluido
+  «SpO₂»; cabecera de la tabla repetida; ninguna fila partida ni cabecera
+  sola al pie; el cero como «0»; cada color con su nombre.
 
 ### Comprobaciones manuales pendientes
 
-El PDF anterior lo genera Chrome headless (`page.pdf`), que usa el mismo motor
-de impresión pero **no** es el diálogo «Guardar como PDF». Falta hacerlo a mano:
-
-1. Abrir el portal de demostración, entrar con una cuenta de demo, ir a
-   «Mi historial», elegir el embarazo finalizado.
-2. «Guardar mi resumen» → «Imprimir o guardar como PDF».
-3. En el diálogo: Destino «Guardar como PDF»; tamaño A4; márgenes
-   «Predeterminados»; escala 100 %. Guardar.
-4. Repetir con tamaño Carta.
-5. Desconectar la red y abrir ambos PDF: comprobar fechas, unidades, 1–2
-   páginas, texto seleccionable y que no falte ninguna fila de la tabla.
-6. Probar Cancelar en el diálogo: la página no debe mostrar ningún mensaje de
-   archivo guardado.
-7. Si se quiere declarar compatibilidad, repetir en Edge y Firefox y en un
-   móvil real (no probado).
+1. En el portal de demostración, «Mi historial» → embarazo finalizado →
+   «Guardar mi resumen» → «Descargar PDF», con **Resumen** y con **Historial
+   completo**.
+2. Abrir ambos PDF **sin red**: fechas, unidades, número de páginas, texto
+   seleccionable, que no falte ninguna fila.
+3. Repetir en **Edge y Firefox** y en un **móvil real** si se quiere declarar
+   compatibilidad (solo se probó Chrome de escritorio, en modo headless).
+4. Mirar el PDF impreso en papel (los colores de la banda gastan tinta; el
+   texto sigue siendo legible en blanco y negro).
 
 No se declara conformidad completa de accesibilidad: solo se comprobó
-teclado, foco, etiquetas de texto junto al color y HTML semántico.
-
-Además, con el portal real de la parte B (datos del dataset canónico,
-embarazo finalizado de `paciente01`), el resumen se generó desde la interfaz
-y salió en 2 páginas en A4 y en Carta.
+teclado, foco, etiquetas de texto junto al color y HTML semántico. El PDF no
+lleva etiquetas de accesibilidad (PDF/UA): pdfmake no las genera.
 
 ---
 

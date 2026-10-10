@@ -312,7 +312,7 @@
         </label>
       </div>
 
-      <!-- Resumen imprimible del embarazo elegido aquí. Solo se habilita con
+      <!-- Resumen en PDF del embarazo elegido aquí. Solo se habilita con
            sus lecturas ya cargadas: nunca mientras cambia la selección. -->
       <div class="resumen-accion">
         <button type="button" class="btn-secundario" id="btn-guardar-resumen" disabled>
@@ -327,20 +327,30 @@
     </section>
 
     <!-- =================================================================
-         VISTA 6 — MI RESUMEN (imprimible)
+         VISTA 6 — MI RESUMEN
          Una instantánea de UN embarazo de UNA cuenta, construida en app.js
-         con los datos ya consultados en «Mi historial». Se imprime o se
-         guarda como PDF con el navegador; no se envía a ningún servicio.
+         con los datos ya consultados en «Mi historial». La vista previa y el
+         PDF salen del mismo modelo; el PDF se genera en este dispositivo
+         (resumen_pdf.js + pdfmake) y no se envía a ningún servicio.
          ================================================================= -->
     <section id="vista-resumen" class="vista" hidden>
       <div class="resumen-controles tarjeta">
-        <p class="texto-apoyo">
-          En las opciones de impresión, selecciona “Guardar como PDF”.
-        </p>
+        <fieldset class="resumen-alcance">
+          <legend class="campo-etiqueta">Contenido del PDF</legend>
+          <label class="resumen-opcion">
+            <input type="radio" name="resumen-alcance" id="resumen-alcance-resumen" value="resumen" checked>
+            <span><strong>Resumen</strong> — últimos valores y hasta 10 lecturas recientes</span>
+          </label>
+          <label class="resumen-opcion">
+            <input type="radio" name="resumen-alcance" id="resumen-alcance-completo" value="completo">
+            <span><strong>Historial completo</strong> — todas las lecturas del período</span>
+          </label>
+        </fieldset>
         <div class="dialogo-acciones">
           <button type="button" class="btn-secundario" id="btn-volver-historial">Volver a «Mi historial»</button>
-          <button type="button" class="btn-primario" id="btn-imprimir-resumen">Imprimir o guardar como PDF</button>
+          <button type="button" class="btn-primario" id="btn-descargar-pdf">Descargar PDF</button>
         </div>
+        <p class="texto-ayuda" id="resumen-descarga-estado" role="status" hidden></p>
       </div>
       <article id="resumen-documento" class="resumen-documento" aria-labelledby="resumen-titulo"></article>
     </section>
@@ -540,6 +550,7 @@
   </footer>
 
   <script src="graficas.js"></script>
+  <script src="resumen_pdf.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

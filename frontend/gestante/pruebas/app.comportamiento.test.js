@@ -38,6 +38,7 @@ const vm = require('node:vm');
 const DIRECTORIO = path.resolve(__dirname, '..');
 const HTML = fs.readFileSync(path.join(DIRECTORIO, 'index.html'), 'utf8');
 const JS = fs.readFileSync(path.join(DIRECTORIO, 'app.js'), 'utf8');
+const PDF_JS = fs.readFileSync(path.join(DIRECTORIO, 'resumen_pdf.js'), 'utf8');
 
 // ---------------------------------------------------------------------------
 // DOM mínimo
@@ -271,20 +272,32 @@ async function arrancar(rutas) {
   const adaptador = crearAdaptador(rutas);
   const reloj = { ms: Date.UTC(2026, 8, 25, 15, 0, 0) };
   const intervalos = new Map();
-  const impresiones = { veces: 0 };
+  // pdfmake falso: guarda cada definición y el nombre con que se descargó.
+  const descargas = [];
+  const pdfMake = {
+    createPdf(definicion) {
+      const descarga = { definicion, nombre: null };
+      descargas.push(descarga);
+      return { download(nombre) { descarga.nombre = nombre; } };
+    }
+  };
   let siguiente = 0;
   const contexto = vm.createContext({
     document: documento,
     window: {
       setInterval: (fn) => { siguiente += 1; intervalos.set(siguiente, fn); return siguiente; },
       clearInterval: (id) => { intervalos.delete(id); },
-      print: () => { impresiones.veces += 1; }
+      pdfMake
     },
+    // Lo que «carga» un <script>: aquí, al instante y sin error.
+    __cargarScript: (script) => setImmediate(() => script.onload()),
     fetch: adaptador.fetch,
     console,
     __reloj: () => reloj.ms
   });
   vm.runInContext('Date.now = function () { return __reloj(); };', contexto);
+  documento.head = { appendChild(script) { contexto.__cargarScript(script); } };
+  vm.runInContext(PDF_JS, contexto, { filename: 'resumen_pdf.js' });
   vm.runInContext(JS, contexto, { filename: 'app.js' });
   documento.disparar('DOMContentLoaded');
   await asentar();
@@ -293,7 +306,7 @@ async function arrancar(rutas) {
     Array.from(intervalos.values()).forEach((fn) => fn());
     await asentar();
   };
-  return { $, adaptador, documento, reloj, intervalos, tic, impresiones };
+  return { $, adaptador, documento, reloj, intervalos, tic, descargas, contexto };
 }
 
 // ---------------------------------------------------------------------------
@@ -1256,7 +1269,13 @@ async function generarResumen($) {
 
 test('Resumen: el botón está en «Mi historial» y solo se habilita con las lecturas cargadas', async () => {
   assert.match(HTML.split('id="vista-historial"')[1].split('</section>')[0], /id="btn-guardar-resumen"/);
-  assert.match(HTML, /En las opciones de impresión, selecciona “Guardar como PDF”\./);
+  // La vista ofrece descargar el PDF y elegir su contenido.
+  assert.match(HTML, /id="btn-descargar-pdf"[^>]*>Descargar PDF</);
+  assert.match(HTML, /id="resumen-alcance-resumen"[^>]*checked/);
+  assert.match(HTML, /id="resumen-alcance-completo"/);
+  // El motor de PDF no se carga en cada visita: solo resumen_pdf.js.
+  assert.match(HTML, /<script src="resumen_pdf\.js"><\/script>/);
+  assert.doesNotMatch(HTML, /<script[^>]+vendor\//);
 
   const { $, adaptador } = await arrancar(rutasBase());
   assert.equal($('btn-guardar-resumen').disabled, false, 'el 130 ya está cargado en Historial');
@@ -1540,8 +1559,8 @@ test('Resumen: al cerrar sesión se descarta, y otra cuenta no hereda nada', asy
   assert.doesNotMatch(doc, /95 BPM|6 ene 2025/);
 });
 
-test('Resumen: salir de la vista lo descarta; imprimir solo abre el diálogo del navegador', async () => {
-  const { $, impresiones } = await arrancar(rutasBase());
+test('Resumen: foco, menú y salida de la vista', async () => {
+  const { $ } = await arrancar(rutasBase());
   $('main-menu').hijos.find((a) => a.dataset.vista === 'historial').disparar('click');
   await asentar();
   await generarResumen($);
@@ -1554,11 +1573,7 @@ test('Resumen: salir de la vista lo descarta; imprimir solo abre el diálogo del
   const activo = $('main-menu').hijos.filter((a) => a.classList.contains('activo'));
   assert.deepEqual(activo.map((a) => a.dataset.vista), ['historial']);
 
-  $('btn-imprimir-resumen').click();
-  assert.equal(impresiones.veces, 1);
-  // No se afirma que se guardó: la persona pudo cancelar.
-  assert.doesNotMatch($('resumen-mensaje').textContent + $('resumen-documento').textContent,
-    /guardado|descargado/i);
+  assert.equal($('btn-imprimir-resumen'), undefined, 'la descarga sustituye a imprimir');
 
   $('btn-volver-historial').click();
   assert.equal($('vista-historial').hidden, false);
@@ -1587,4 +1602,155 @@ test('Resumen: sin identificadores ni nombres internos, y sin interpretar marcad
   assert.match(doc, /Información simulada con fines académicos/);
   assert.match(doc, /no sustituye la valoración de tu personal de salud/);
   assert.match(doc, /Horas de Panamá/);
+});
+
+// ---------------------------------------------------------------------------
+// «Guardar mi resumen»: descarga del PDF
+// ---------------------------------------------------------------------------
+
+/** Todos los textos de una definición de pdfmake, en orden. */
+function textosDelPdf(definicion) {
+  const textos = [];
+  const recorrer = (nodo) => {
+    if (typeof nodo === 'string') { textos.push(nodo); return; }
+    if (Array.isArray(nodo)) { nodo.forEach(recorrer); return; }
+    if (!nodo || typeof nodo !== 'object') return;
+    if (nodo.svg) return;   // iconos: no llevan datos
+    ['text', 'stack', 'columns', 'content'].forEach((k) => { if (k in nodo) recorrer(nodo[k]); });
+    if (nodo.table) recorrer(nodo.table.body);
+  };
+  recorrer(definicion.content);
+  return textos;
+}
+
+/** La tabla de lecturas del PDF: la que tiene cabecera repetida. */
+function tablaDeLecturasDelPdf(definicion) {
+  return definicion.content.find((n) => n.table && n.table.headerRows === 1).table;
+}
+
+async function descargar($) {
+  $('btn-descargar-pdf').click();
+  await asentar();
+}
+
+test('Descarga: el PDF lleva lo mismo que la vista previa, con un nombre sin datos personales', async () => {
+  const { $, descargas } = await arrancar(rutasBase());
+  elegirEnHistorial($, 100);
+  await asentar();
+  await generarResumen($);
+  await descargar($);
+
+  assert.equal(descargas.length, 1);
+  const { definicion, nombre } = descargas[0];
+  assert.equal(nombre, 'FetalAlert-resumen-2026-09-25.pdf');
+  assert.equal(definicion.pageSize, 'LETTER');
+  const textos = textosDelPdf(definicion).join('\n');
+  for (const esperado of ['Resumen de mis registros', 'Embarazo desde 6 ene 2025 — Finalizado',
+    '95 BPM', '99 %', '7 movimientos', 'Registrado el 1 oct 2025, 11:04', 'Amarillo',
+    ' — Conviene repetir la medición', 'Datos consultados el', '25 sept 2026, 10:00',
+    'Semana en el último registro', '39 (1 oct 2025)', 'Información simulada con fines académicos']) {
+    assert.ok(textos.includes(esperado), 'falta en el PDF: ' + esperado);
+  }
+  // Sin identificadores ni códigos internos.
+  assert.doesNotMatch(textos, /\b(110|111|679|102|231|130)\b|WARNING|id_|codigo_semaforo/);
+  // Las filas de la tabla son las de la vista previa.
+  const tabla = tablaDeLecturasDelPdf(definicion);
+  assert.equal(tabla.body.length - 1, $('resumen-documento').filas().length);
+  assert.deepEqual(Array.from(tabla.body[1].slice(0, 5), (c) => c.text), $('resumen-documento').filas()[0].slice(0, 5));
+  assert.match($('resumen-descarga-estado').textContent,
+    /^Descarga iniciada: «FetalAlert-resumen-2026-09-25\.pdf»/);
+});
+
+test('Descarga: «Historial completo» lleva todas las lecturas del período', async () => {
+  const { $, descargas } = await arrancar(rutasPaciente30({
+    'GET /adaptador/embarazos/129/monitoreo': embarazoConLecturas(15, 4)
+  }));
+  await generarResumen($);
+  assert.equal($('resumen-documento').filas().length, 10, 'empieza en «Resumen»');
+
+  $('resumen-alcance-resumen').checked = false;
+  $('resumen-alcance-completo').checked = true;
+  $('resumen-alcance-completo').disparar('change');
+  assert.equal($('resumen-documento').filas().length, 15);
+  const doc = $('resumen-documento').textContent;
+  assert.match(doc, /Historial de mis registros/);
+  assert.match(doc, /Todas las lecturas del período/);
+  assert.match(doc, /Se incluyen las 15 lecturas del período\./);
+  assert.match(doc, /Historial generado el/);
+
+  await descargar($);
+  assert.equal(descargas[0].nombre, 'FetalAlert-historial-2026-09-25.pdf');
+  assert.equal(tablaDeLecturasDelPdf(descargas[0].definicion).body.length, 16);
+
+  // Volver a abrir el resumen empieza otra vez en «Resumen».
+  $('btn-volver-historial').click();
+  await generarResumen($);
+  assert.equal($('resumen-alcance-resumen').checked, true);
+  assert.equal($('resumen-documento').filas().length, 10);
+});
+
+test('Descarga: el motor se pide al portal la primera vez, en orden, y no si se cerró sesión', async () => {
+  const { $, contexto, documento, descargas } = await arrancar(rutasBase());
+  const motor = contexto.window.pdfMake;
+  contexto.window.pdfMake = undefined;
+  const scripts = [];
+  documento.head = { appendChild(s) { scripts.push(s); } };
+
+  await generarResumen($);
+  await descargar($);
+  assert.equal($('btn-descargar-pdf').disabled, true, 'mientras se prepara');
+  assert.equal($('resumen-descarga-estado').textContent, 'Preparando el PDF…');
+  assert.deepEqual(scripts.map((s) => s.src), ['/vendor/pdfmake.min.js']);
+  scripts[0].onload();
+  await asentar();
+  assert.deepEqual(scripts.map((s) => s.src), ['/vendor/pdfmake.min.js', '/vendor/vfs_fonts.js']);
+
+  // Se cierra sesión antes de que termine: no se descarga nada.
+  $('btn-cerrar-sesion').click();
+  $('btn-confirmar-cierre').click();
+  await asentar();
+  contexto.window.pdfMake = motor;
+  scripts[1].onload();
+  await asentar();
+  assert.equal(descargas.length, 0);
+  assert.equal($('resumen-documento').textContent, '');
+});
+
+test('Descarga: si el motor no carga, se dice y se puede reintentar', async () => {
+  const { $, contexto, documento, descargas } = await arrancar(rutasBase());
+  const motor = contexto.window.pdfMake;
+  contexto.window.pdfMake = undefined;
+  const scripts = [];
+  documento.head = { appendChild(s) { scripts.push(s); } };
+
+  await generarResumen($);
+  await descargar($);
+  scripts[0].onerror();
+  await asentar();
+  assert.equal($('resumen-descarga-estado').textContent, 'No se pudo preparar el PDF. Inténtalo de nuevo.');
+  assert.equal($('btn-descargar-pdf').disabled, false);
+  assert.equal(descargas.length, 0);
+
+  // Vuelve a cargar con normalidad: el reintento pide otra vez los archivos.
+  contexto.window.pdfMake = motor;
+  documento.head = { appendChild(s) { scripts.push(s); setImmediate(() => s.onload()); } };
+  await descargar($);
+  await asentar();
+  assert.equal(descargas.length, 1);
+});
+
+test('Descarga: el marcado de un dato llega al PDF como texto', async () => {
+  const malicioso = Object.assign({}, EMBARAZO_ANTERIOR, { estado_embarazo: '<img src=x onerror=alert(1)>' });
+  const { $, descargas } = await arrancar(rutasBase({
+    'GET /adaptador/embarazos': embarazos({ anteriores: [malicioso], todos: [EMBARAZO_ACTUAL, malicioso] })
+  }));
+  elegirEnHistorial($, 100);
+  await asentar();
+  await generarResumen($);
+  await descargar($);
+  const textos = textosDelPdf(descargas[0].definicion);
+  assert.ok(textos.includes('<img src=x onerror=alert(1)>'));
+  // pdfmake no interpreta HTML; y ningún dato entra en un SVG.
+  const svgs = JSON.stringify(descargas[0].definicion.content).match(/<svg[^"]*/g) || [];
+  svgs.forEach((s) => assert.doesNotMatch(s, /img|onerror/));
 });

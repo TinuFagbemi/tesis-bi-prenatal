@@ -297,7 +297,10 @@
 
     botonGuardarResumen: document.getElementById('btn-guardar-resumen'),
     mensajeResumen: document.getElementById('resumen-mensaje'),
-    botonImprimirResumen: document.getElementById('btn-imprimir-resumen'),
+    botonDescargarPdf: document.getElementById('btn-descargar-pdf'),
+    estadoDescarga: document.getElementById('resumen-descarga-estado'),
+    alcanceResumen: document.getElementById('resumen-alcance-resumen'),
+    alcanceCompleto: document.getElementById('resumen-alcance-completo'),
     botonVolverHistorial: document.getElementById('btn-volver-historial'),
     resumenDocumento: document.getElementById('resumen-documento')
   };
@@ -1625,19 +1628,24 @@
   // =======================================================================
   // «Guardar mi resumen»
   //
-  // Una vista imprimible de UN embarazo de UNA cuenta, armada con la
-  // instantánea de «Mi historial». El navegador la imprime o la guarda como
-  // PDF: aquí no se genera ningún archivo, no se envía nada a otro servicio y
-  // no se guarda nada en el navegador. Todo se construye con `textContent`,
-  // así que ningún dato puede convertirse en marcado.
+  // Un documento de UN embarazo de UNA cuenta, armado con la instantánea de
+  // «Mi historial». Primero se construye un **modelo** --solo textos ya
+  // formateados, con las mismas reglas que el resto de la pantalla-- y de él
+  // salen las dos presentaciones: la vista previa en la página y el PDF que
+  // se descarga (resumen_pdf.js + pdfmake, servidos por el propio portal).
+  // Así, lo que se ve es exactamente lo que se descarga.
   //
-  // Las mismas reglas que el resto de la pantalla: el semáforo es el de la
-  // fuente autorizada y de UNA lectura; cada variable lleva su propia fecha;
-  // el cero es un valor y la ausencia no lo es.
+  // No se envía nada a ningún servicio y no se guarda nada en el navegador.
+  // La vista previa se construye con `textContent`, así que ningún dato puede
+  // convertirse en marcado; el PDF recibe los mismos textos como texto.
+  //
+  // Las reglas: el semáforo es el de la fuente autorizada y de UNA lectura;
+  // cada variable lleva su propia fecha; el cero es un valor y la ausencia no
+  // lo es.
   // =======================================================================
 
-  // Lecturas de la tabla del resumen, como máximo: el documento debe caber en
-  // una o dos páginas. No limita nada de la aplicación.
+  // Lecturas de la tabla en el modo «Resumen», como máximo: el documento debe
+  // caber en una o dos páginas. No limita nada de la aplicación.
   const LECTURAS_EN_RESUMEN = 10;
 
   // Un día en milisegundos, escrito entero: test_gestante_frontend.py vigila
@@ -1650,6 +1658,14 @@
     ultimos30: 'Últimos 30 días con registros'
   };
 
+  // Qué lleva el documento: el resumen breve o todas las lecturas del período.
+  const ALCANCE = { RESUMEN: 'resumen', COMPLETO: 'completo' };
+
+  const TITULOS_DEL_DOCUMENTO = {
+    resumen: 'Resumen de mis registros',
+    completo: 'Historial de mis registros'
+  };
+
   const TITULO_RESUMEN = 'FetalAlert — Mi resumen';
   const TITULO_PAGINA = typeof document.title === 'string' ? document.title : null;
 
@@ -1657,14 +1673,39 @@
     cargando: 'Espera a que terminen de cargarse las lecturas de este embarazo.',
     sinLecturas:
       'Este embarazo todavía no tiene lecturas registradas, así que no hay un ' +
-      'resumen que guardar.'
+      'resumen que guardar.',
+    preparando: 'Preparando el PDF…',
+    fallo: 'No se pudo preparar el PDF. Inténtalo de nuevo.'
   };
+
+  // El motor de PDF pesa unos 2 MB: se pide al propio portal la primera vez
+  // que alguien descarga, no en cada visita. Nunca a una CDN: tiene que
+  // funcionar sin internet.
+  const MOTOR_PDF = ['/vendor/pdfmake.min.js', '/vendor/vfs_fonts.js'];
 
   const MEDICIONES_RESUMEN = [
     { clave: 'frecuencia_cardiaca', titulo: 'Frecuencia cardíaca materna', unidad: 'BPM' },
     { clave: 'saturacion_oxigeno', titulo: 'Saturación de oxígeno (SpO₂)', unidad: '%' },
     { clave: 'movimientos_fetales', titulo: 'Movimientos fetales', unidad: 'movimientos' }
   ];
+
+  const COLUMNAS_DE_LECTURAS = [
+    'Fecha y hora', 'Frecuencia cardíaca', 'SpO₂', 'Movimientos fetales', 'Semana', 'Clasificación'
+  ];
+
+  // Fecha del día en Panamá como AAAA-MM-DD, para el nombre del archivo.
+  const FORMATO_FECHA_ARCHIVO = new Intl.DateTimeFormat('en-CA', {
+    timeZone: ZONA_HORARIA, year: 'numeric', month: '2-digit', day: '2-digit'
+  });
+
+  // El resumen abierto en pantalla: su instantánea, su período, su alcance y
+  // el modelo que se ve y se descarga. null fuera de la vista del resumen.
+  let resumenAbierto = null;
+
+  // La carga del motor de PDF, compartida entre clics. Se reinicia si falla.
+  // pdfmake registra sus fuentes por dentro (`addVirtualFileSystem`), así que
+  // «listo» es haber cargado los dos archivos, en orden, sin error.
+  let motorPdf = null;
 
   /** ¿Es este el embarazo que Inicio llama «en curso»? Con ambigüedad, ninguno. */
   function esEmbarazoEnCurso(id) {
@@ -1695,17 +1736,25 @@
     }
   }
 
-  /** Vacía el documento del resumen. Nada de él sobrevive a una salida. */
-  function limpiarResumen() {
-    if (ui.resumenDocumento) {
-      ui.resumenDocumento.textContent = '';
+  function mostrarEstadoDescarga(mensaje) {
+    if (ui.estadoDescarga) {
+      mostrarNota(ui.estadoDescarga, mensaje);
     }
   }
 
+  /** Vacía el documento del resumen. Nada de él sobrevive a una salida. */
+  function limpiarResumen() {
+    resumenAbierto = null;
+    if (ui.resumenDocumento) {
+      ui.resumenDocumento.textContent = '';
+    }
+    mostrarEstadoDescarga(null);
+  }
+
   /**
-   * Con la vista del resumen abierta, la impresión muestra solo el documento
-   * (styles.css, `body.con-resumen`) y el título de la página propone el
-   * nombre del PDF. Fuera de ella, todo queda como estaba.
+   * Con la vista del resumen abierta, una impresión (Ctrl+P) muestra solo el
+   * documento (styles.css, `body.con-resumen`). Fuera de ella, todo queda como
+   * estaba.
    */
   function marcarVistaDeResumen(activa) {
     if (document.body && document.body.classList) {
@@ -1714,25 +1763,6 @@
     if (TITULO_PAGINA !== null) {
       document.title = activa ? TITULO_RESUMEN : TITULO_PAGINA;
     }
-  }
-
-  function nodo(etiqueta, clase, contenido) {
-    const elemento = document.createElement(etiqueta);
-    if (clase) {
-      elemento.className = clase;
-    }
-    if (contenido !== undefined && contenido !== null) {
-      elemento.textContent = contenido;
-    }
-    return elemento;
-  }
-
-  /** Un par «etiqueta: valor» de una lista de definiciones. */
-  function filaDeDatos(lista, etiqueta, valor) {
-    const fila = nodo('div', 'resumen-fila');
-    fila.appendChild(nodo('dt', null, etiqueta));
-    fila.appendChild(nodo('dd', null, valor));
-    lista.appendChild(fila);
   }
 
   /** Fecha y hora legibles de un instante en milisegundos. */
@@ -1803,46 +1833,41 @@
       fechaCortaLegible(masReciente) + ')';
   }
 
-  function seccionDelResumen(titulo) {
-    const seccion = nodo('section', 'resumen-seccion');
-    seccion.appendChild(nodo('h3', null, titulo));
-    return seccion;
+  /** Código de semáforo que se sabe pintar, o null: uno desconocido no se adivina. */
+  function codigoConocido(codigo) {
+    return CLASES_DE_SEMAFORO[codigo] ? codigo : null;
   }
 
-  /** Embarazo: lo que se sabe del episodio, sin inventar semanas. */
-  function seccionEmbarazo(inst) {
-    const seccion = seccionDelResumen('Embarazo');
-    const lista = nodo('dl', 'resumen-datos');
-    const episodio = inst.episodio;
+  // -- El modelo -----------------------------------------------------------
 
-    filaDeDatos(lista, 'Estado', estadoLegible(episodio.estado_embarazo));
-    filaDeDatos(lista, 'Inicio del embarazo', fechaCortaLegible(episodio.fecha_inicio));
+  /** Embarazo: lo que se sabe del episodio, sin inventar semanas. */
+  function datosDelEmbarazo(inst) {
+    const filas = [];
+    const episodio = inst.episodio;
+    filas.push({ etiqueta: 'Estado', valor: estadoLegible(episodio.estado_embarazo) });
+    filas.push({ etiqueta: 'Inicio del embarazo', valor: fechaCortaLegible(episodio.fecha_inicio) });
     if (!ausente(episodio.fecha_probable_parto)) {
-      filaDeDatos(lista, 'Fecha probable de parto', fechaCortaLegible(episodio.fecha_probable_parto));
+      filas.push({ etiqueta: 'Fecha probable de parto', valor: fechaCortaLegible(episodio.fecha_probable_parto) });
     }
     if (!ausente(episodio.fecha_cierre)) {
-      filaDeDatos(lista, 'Fecha de cierre', fechaCortaLegible(episodio.fecha_cierre));
+      filas.push({ etiqueta: 'Fecha de cierre', valor: fechaCortaLegible(episodio.fecha_cierre) });
     }
-
     // «Semana actual» solo para el embarazo en curso con semana publicada por
     // el adaptador. En cualquier otro caso, la del último registro, rotulada
     // así y con su fecha: nunca una semana «actual» de un embarazo cerrado.
     const ultima = inst.datos.ultima_lectura;
     if (!ausente(inst.semanaActual)) {
-      filaDeDatos(
-        lista,
-        'Semana actual',
-        String(inst.semanaActual) + (inst.hoy ? ' (al ' + fechaCortaLegible(inst.hoy) + ')' : '')
-      );
+      filas.push({
+        etiqueta: 'Semana actual',
+        valor: String(inst.semanaActual) + (inst.hoy ? ' (al ' + fechaCortaLegible(inst.hoy) + ')' : '')
+      });
     } else if (ultima && !ausente(ultima.semana_gestacion)) {
-      filaDeDatos(
-        lista,
-        'Semana en el último registro',
-        ultima.semana_gestacion + ' (' + fechaCortaLegible(ultima.fecha_hora_captura) + ')'
-      );
+      filas.push({
+        etiqueta: 'Semana en el último registro',
+        valor: ultima.semana_gestacion + ' (' + fechaCortaLegible(ultima.fecha_hora_captura) + ')'
+      });
     }
-    seccion.appendChild(lista);
-    return seccion;
+    return filas;
   }
 
   /**
@@ -1850,166 +1875,264 @@
    * fecha. `undefined` (no llegó) y `null` (nunca se registró) se dicen con
    * frases distintas, como en Inicio.
    */
-  function seccionUltimosValores(datos) {
-    const seccion = seccionDelResumen('Últimos valores registrados');
-    seccion.appendChild(nodo('p', 'resumen-nota',
-      'El último valor de cada medición en todo este embarazo. Pueden ser de ' +
-      'lecturas y fechas distintas.'));
-    const lista = nodo('ul', 'resumen-valores');
+  function ultimosValores(datos) {
     const ultimosRegistros = datos.ultimos_registros;
-
-    MEDICIONES_RESUMEN.forEach(function (m) {
+    return MEDICIONES_RESUMEN.map(function (m) {
       const registro = ultimosRegistros &&
         Object.prototype.hasOwnProperty.call(ultimosRegistros, m.clave)
         ? ultimosRegistros[m.clave]
         : undefined;
-      const item = nodo('li', 'resumen-valor');
-      item.appendChild(nodo('span', 'resumen-valor-nombre', m.titulo));
       if (registro === undefined || registro === null) {
-        item.appendChild(nodo('span', 'resumen-valor-cifra', SIN_DATO));
-        item.appendChild(nodo('span', 'resumen-valor-detalle',
-          registro === null ? 'Sin registros' : NO_DISPONIBLE));
-      } else {
-        item.appendChild(nodo('span', 'resumen-valor-cifra', conUnidad(registro.valor, m.unidad)));
-        item.appendChild(nodo('span', 'resumen-valor-detalle',
-          'Registrado el ' + fechaLegible(registro.fecha_hora_captura)));
-        if (!ausente(registro.semana_gestacion_lectura)) {
-          item.appendChild(nodo('span', 'resumen-valor-detalle',
-            'Semana ' + registro.semana_gestacion_lectura + ' en esa lectura'));
-        }
+        return { clave: m.clave, titulo: m.titulo, cifra: SIN_DATO,
+          detalles: [registro === null ? 'Sin registros' : NO_DISPONIBLE] };
       }
-      lista.appendChild(item);
+      const detalles = ['Registrado el ' + fechaLegible(registro.fecha_hora_captura)];
+      if (!ausente(registro.semana_gestacion_lectura)) {
+        detalles.push('Semana ' + registro.semana_gestacion_lectura + ' en esa lectura');
+      }
+      return { clave: m.clave, titulo: m.titulo, cifra: conUnidad(registro.valor, m.unidad), detalles: detalles };
     });
-    seccion.appendChild(lista);
-    return seccion;
   }
 
   /** La clasificación de la lectura más reciente, con su alcance escrito. */
-  function seccionClasificacion(lectura) {
-    const seccion = seccionDelResumen('Clasificación de la lectura más reciente');
-    const lista = nodo('dl', 'resumen-datos');
-    filaDeDatos(lista, 'Lectura del', fechaLegible(lectura.fecha_hora_captura));
+  function clasificacionDe(lectura) {
+    const filas = [{ etiqueta: 'Lectura del', valor: fechaLegible(lectura.fecha_hora_captura) }];
     const midio = queMidio(lectura);
     if (midio) {
-      filaDeDatos(lista, 'Midió', midio);
+      filas.push({ etiqueta: 'Midió', valor: midio });
     }
-    const fila = nodo('div', 'resumen-fila');
-    fila.appendChild(nodo('dt', null, 'Clasificación'));
-    const valor = nodo('dd');
-    // El color nunca va solo: el nombre y su significado lo acompañan. Un
-    // código desconocido no se adivina.
-    if (CLASES_DE_SEMAFORO[lectura.codigo_semaforo]) {
-      valor.appendChild(marcaDeSemaforo(lectura.codigo_semaforo));
-      valor.appendChild(nodo('span', 'resumen-semaforo-texto',
-        ' — ' + mensajeDeSemaforo(lectura.codigo_semaforo)));
-    } else {
-      valor.textContent = SIN_CLASIFICACION;
-    }
-    fila.appendChild(valor);
-    lista.appendChild(fila);
-    seccion.appendChild(lista);
-    seccion.appendChild(nodo('p', 'resumen-nota',
-      'La clasificación la asignó el sistema a esta lectura completa, no a cada ' +
-      'medición por separado ni a los últimos valores de arriba.'));
-    return seccion;
+    const codigo = codigoConocido(lectura.codigo_semaforo);
+    return {
+      filas: filas,
+      codigo: codigo,
+      nombre: codigo ? ETIQUETAS_DE_SEMAFORO[codigo] : null,
+      mensaje: codigo ? mensajeDeSemaforo(codigo) : SIN_CLASIFICACION,
+      nota: 'La clasificación la asignó el sistema a esta lectura completa, no a ' +
+        'cada medición por separado ni a los últimos valores de arriba.'
+    };
   }
 
-  /** Hasta diez lecturas del período elegido, de la más reciente a la más antigua. */
-  function seccionLecturasRecientes(lecturas, periodo) {
+  /** Las lecturas de la tabla: hasta diez, o todas las del período. */
+  function lecturasDelDocumento(lecturas, periodo, alcance) {
     const delPeriodo = lecturasDelPeriodo(lecturas, periodo);
-    const incluidas = delPeriodo.slice(0, LECTURAS_EN_RESUMEN);
-
-    const seccion = seccionDelResumen('Lecturas recientes');
-    // Esta sección sí puede partirse entre páginas; sus filas, no.
-    seccion.className = 'resumen-seccion resumen-seccion-tabla';
-    const lista = nodo('dl', 'resumen-datos');
-    filaDeDatos(lista, 'Período', textoDePeriodo(periodo, delPeriodo));
-    filaDeDatos(lista, 'Lecturas incluidas', String(incluidas.length));
-    seccion.appendChild(lista);
-    seccion.appendChild(nodo('p', 'resumen-nota',
-      textoCobertura(incluidas.length, delPeriodo.length, lecturas.length, periodo) +
-      ' Cada fila es una lectura con su propia clasificación.'));
-
-    const tabla = nodo('table', 'resumen-tabla');
-    const cabecera = nodo('thead');
-    const filaCabecera = nodo('tr');
-    ['Fecha y hora', 'Frecuencia cardíaca', 'SpO₂', 'Movimientos fetales', 'Semana', 'Clasificación']
-      .forEach(function (nombre) {
-        const th = nodo('th', null, nombre);
-        th.setAttribute('scope', 'col');
-        filaCabecera.appendChild(th);
-      });
-    cabecera.appendChild(filaCabecera);
-    tabla.appendChild(cabecera);
-
-    const cuerpo = nodo('tbody');
-    incluidas.forEach(function (lectura) {
-      const fila = nodo('tr');
-      celda(fila, 'Fecha y hora', fechaLegible(lectura.fecha_hora_captura));
-      celda(fila, 'Frecuencia cardíaca', conUnidad(lectura.hr_valor, 'BPM'));
-      celda(fila, 'SpO₂', conUnidad(lectura.spo2_valor, '%'));
-      celda(fila, 'Movimientos fetales', texto(lectura.mov_valor));
-      celda(fila, 'Semana', texto(lectura.semana_gestacion));
-      celda(fila, 'Clasificación', marcaDeSemaforo(lectura.codigo_semaforo));
-      cuerpo.appendChild(fila);
-    });
-    tabla.appendChild(cuerpo);
-    seccion.appendChild(tabla);
-    return seccion;
+    const incluidas = alcance === ALCANCE.COMPLETO
+      ? delPeriodo
+      : delPeriodo.slice(0, LECTURAS_EN_RESUMEN);
+    return {
+      titulo: alcance === ALCANCE.COMPLETO ? 'Todas las lecturas del período' : 'Lecturas recientes',
+      filas: [
+        { etiqueta: 'Período', valor: textoDePeriodo(periodo, delPeriodo) },
+        { etiqueta: 'Lecturas incluidas', valor: String(incluidas.length) }
+      ],
+      nota: textoCobertura(incluidas.length, delPeriodo.length, lecturas.length, periodo) +
+        ' Cada fila es una lectura con su propia clasificación.',
+      columnas: COLUMNAS_DE_LECTURAS.slice(),
+      filasDeTabla: incluidas.map(function (lectura) {
+        const codigo = codigoConocido(lectura.codigo_semaforo);
+        return {
+          celdas: [
+            fechaLegible(lectura.fecha_hora_captura),
+            conUnidad(lectura.hr_valor, 'BPM'),
+            conUnidad(lectura.spo2_valor, '%'),
+            texto(lectura.mov_valor),
+            texto(lectura.semana_gestacion)
+          ],
+          codigo: codigo,
+          semaforo: codigo ? ETIQUETAS_DE_SEMAFORO[codigo] : SIN_DATO
+        };
+      })
+    };
   }
 
   /**
-   * Construye el documento del resumen y devuelve su título, para llevar el
-   * foco allí. Devuelve null, sin tocar nada, si la instantánea no permite un
-   * resumen útil.
+   * El documento entero, en textos. null si la instantánea no permite un
+   * resumen útil (sin lecturas): no se produce un documento engañoso.
    */
-  function construirResumen(inst, periodo, generadoEn) {
+  function modeloDelResumen(inst, periodo, alcance, generadoEn) {
     const lecturas = lecturasDe(inst.datos);
     if (!lecturas.length || !inst.datos.ultima_lectura) {
       return null;
     }
+    const completo = alcance === ALCANCE.COMPLETO;
+    return {
+      alcance: completo ? ALCANCE.COMPLETO : ALCANCE.RESUMEN,
+      marca: 'FetalAlert',
+      lema: 'Tecnología al cuidado de tu embarazo',
+      titulo: TITULOS_DEL_DOCUMENTO[completo ? 'completo' : 'resumen'],
+      embarazo: etiquetaDeEpisodio(inst.episodio),
+      fechas: [
+        { etiqueta: 'Datos consultados el', valor: momentoLegible(inst.consultadoEn) },
+        { etiqueta: (completo ? 'Historial' : 'Resumen') + ' generado el', valor: momentoLegible(generadoEn) }
+      ],
+      // La fecha de generación no es la de los datos: si no se pudo confirmar
+      // la conexión, se dice que son los de la última consulta.
+      aviso: operativa(estadoConexion)
+        ? null
+        : 'Al generar este documento no se pudo confirmar la conexión con el ' +
+          'servidor. Los datos son los de la última consulta y podrían no incluir ' +
+          'registros posteriores.',
+      datosEmbarazo: datosDelEmbarazo(inst),
+      notaValores: 'El último valor de cada medición en todo este embarazo. Pueden ' +
+        'ser de lecturas y fechas distintas.',
+      valores: ultimosValores(inst.datos),
+      clasificacion: clasificacionDe(inst.datos.ultima_lectura),
+      lecturas: lecturasDelDocumento(lecturas, periodo, alcance),
+      pie: [
+        'Horas de Panamá. «—» indica un valor no registrado; el cero sí es un valor.',
+        'Información simulada con fines académicos: no corresponde a pacientes ' +
+          'reales. Este documento no sustituye la valoración de tu personal de salud.'
+      ],
+      // Sin nombres ni identificadores: solo el tipo y el día.
+      nombreArchivo: 'FetalAlert-' + (completo ? 'historial' : 'resumen') + '-' +
+        FORMATO_FECHA_ARCHIVO.format(new Date(generadoEn)) + '.pdf'
+    };
+  }
 
+  // -- Vista previa en la página -------------------------------------------
+
+  function nodo(etiqueta, clase, contenido) {
+    const elemento = document.createElement(etiqueta);
+    if (clase) {
+      elemento.className = clase;
+    }
+    if (contenido !== undefined && contenido !== null) {
+      elemento.textContent = contenido;
+    }
+    return elemento;
+  }
+
+  /** Una lista de definiciones con pares «etiqueta: valor». */
+  function listaDeDatos(clase, filas) {
+    const lista = nodo('dl', clase);
+    filas.forEach(function (f) {
+      const fila = nodo('div', 'resumen-fila');
+      fila.appendChild(nodo('dt', null, f.etiqueta));
+      fila.appendChild(nodo('dd', null, f.valor));
+      lista.appendChild(fila);
+    });
+    return lista;
+  }
+
+  function seccionDelResumen(titulo) {
+    const seccion = nodo('section', 'resumen-seccion');
+    seccion.appendChild(nodo('h3', null, titulo));
+    return seccion;
+  }
+
+  /** Pinta el modelo y devuelve el título, para llevar el foco allí. */
+  function pintarResumen(modelo) {
     const doc = ui.resumenDocumento;
     doc.textContent = '';
 
     const encabezado = nodo('header', 'resumen-encabezado');
     const marca = nodo('div', 'resumen-marca');
-    marca.appendChild(nodo('p', 'resumen-marca-nombre', 'FetalAlert'));
-    marca.appendChild(nodo('p', 'resumen-marca-lema', 'Tecnología al cuidado de tu embarazo'));
+    marca.appendChild(nodo('p', 'resumen-marca-nombre', modelo.marca));
+    marca.appendChild(nodo('p', 'resumen-marca-lema', modelo.lema));
     encabezado.appendChild(marca);
-    const titulo = nodo('h2', 'resumen-titulo', 'Resumen de mis registros');
+    const titulo = nodo('h2', 'resumen-titulo', modelo.titulo);
     titulo.setAttribute('id', 'resumen-titulo');
     titulo.setAttribute('tabindex', '-1');
     encabezado.appendChild(titulo);
-    encabezado.appendChild(nodo('p', 'resumen-subtitulo', etiquetaDeEpisodio(inst.episodio)));
-
-    const fechas = nodo('dl', 'resumen-datos resumen-fechas');
-    filaDeDatos(fechas, 'Datos consultados el', momentoLegible(inst.consultadoEn));
-    filaDeDatos(fechas, 'Resumen generado el', momentoLegible(generadoEn));
-    encabezado.appendChild(fechas);
-    if (!operativa(estadoConexion)) {
-      // La fecha de generación no es la de los datos: si no se pudo confirmar
-      // la conexión, se dice que son los de la última consulta.
-      encabezado.appendChild(nodo('p', 'resumen-aviso',
-        'Al generar este resumen no se pudo confirmar la conexión con el ' +
-        'servidor. Los datos son los de la última consulta y podrían no incluir ' +
-        'registros posteriores.'));
+    encabezado.appendChild(nodo('p', 'resumen-subtitulo', modelo.embarazo));
+    encabezado.appendChild(listaDeDatos('resumen-datos resumen-fechas', modelo.fechas));
+    if (modelo.aviso) {
+      encabezado.appendChild(nodo('p', 'resumen-aviso', modelo.aviso));
     }
     doc.appendChild(encabezado);
 
-    doc.appendChild(seccionEmbarazo(inst));
-    doc.appendChild(seccionUltimosValores(inst.datos));
-    doc.appendChild(seccionClasificacion(inst.datos.ultima_lectura));
-    doc.appendChild(seccionLecturasRecientes(lecturas, periodo));
+    const embarazo = seccionDelResumen('Embarazo');
+    embarazo.appendChild(listaDeDatos('resumen-datos', modelo.datosEmbarazo));
+    doc.appendChild(embarazo);
+
+    const valores = seccionDelResumen('Últimos valores registrados');
+    valores.appendChild(nodo('p', 'resumen-nota', modelo.notaValores));
+    const lista = nodo('ul', 'resumen-valores');
+    modelo.valores.forEach(function (v) {
+      const item = nodo('li', 'resumen-valor');
+      item.appendChild(nodo('span', 'resumen-valor-nombre', v.titulo));
+      item.appendChild(nodo('span', 'resumen-valor-cifra', v.cifra));
+      v.detalles.forEach(function (d) {
+        item.appendChild(nodo('span', 'resumen-valor-detalle', d));
+      });
+      lista.appendChild(item);
+    });
+    valores.appendChild(lista);
+    doc.appendChild(valores);
+
+    const c = modelo.clasificacion;
+    const clasificacion = seccionDelResumen('Clasificación de la lectura más reciente');
+    const datosClasificacion = listaDeDatos('resumen-datos', c.filas);
+    const fila = nodo('div', 'resumen-fila');
+    fila.appendChild(nodo('dt', null, 'Clasificación'));
+    const valor = nodo('dd');
+    // El color nunca va solo: el nombre y su significado lo acompañan.
+    if (c.codigo) {
+      valor.appendChild(marcaDeSemaforo(c.codigo));
+      valor.appendChild(nodo('span', 'resumen-semaforo-texto', ' — ' + c.mensaje));
+    } else {
+      valor.textContent = c.mensaje;
+    }
+    fila.appendChild(valor);
+    datosClasificacion.appendChild(fila);
+    clasificacion.appendChild(datosClasificacion);
+    clasificacion.appendChild(nodo('p', 'resumen-nota', c.nota));
+    doc.appendChild(clasificacion);
+
+    const l = modelo.lecturas;
+    const seccionLecturas = seccionDelResumen(l.titulo);
+    // Esta sección sí puede partirse entre páginas; sus filas, no.
+    seccionLecturas.className = 'resumen-seccion resumen-seccion-tabla';
+    seccionLecturas.appendChild(listaDeDatos('resumen-datos', l.filas));
+    seccionLecturas.appendChild(nodo('p', 'resumen-nota', l.nota));
+    const tabla = nodo('table', 'resumen-tabla');
+    const cabecera = nodo('thead');
+    const filaCabecera = nodo('tr');
+    l.columnas.forEach(function (nombre) {
+      const th = nodo('th', null, nombre);
+      th.setAttribute('scope', 'col');
+      filaCabecera.appendChild(th);
+    });
+    cabecera.appendChild(filaCabecera);
+    tabla.appendChild(cabecera);
+    const cuerpo = nodo('tbody');
+    l.filasDeTabla.forEach(function (f) {
+      const tr = nodo('tr');
+      f.celdas.forEach(function (contenido, i) {
+        celda(tr, l.columnas[i], contenido);
+      });
+      celda(tr, l.columnas[5], marcaDeSemaforo(f.codigo));
+      cuerpo.appendChild(tr);
+    });
+    tabla.appendChild(cuerpo);
+    seccionLecturas.appendChild(tabla);
+    doc.appendChild(seccionLecturas);
 
     const pie = nodo('footer', 'resumen-pie');
-    pie.appendChild(nodo('p', null,
-      'Horas de Panamá. «—» indica un valor no registrado; el cero sí es un valor.'));
-    pie.appendChild(nodo('p', null,
-      'Información simulada con fines académicos: no corresponde a pacientes ' +
-      'reales. Este resumen no sustituye la valoración de tu personal de salud.'));
+    modelo.pie.forEach(function (p) {
+      pie.appendChild(nodo('p', null, p));
+    });
     doc.appendChild(pie);
     return titulo;
+  }
+
+  function alcanceElegido() {
+    return ui.alcanceCompleto && ui.alcanceCompleto.checked === true
+      ? ALCANCE.COMPLETO
+      : ALCANCE.RESUMEN;
+  }
+
+  /**
+   * Arma el modelo con la instantánea y lo pinta. Devuelve el título, o null
+   * si no hay un resumen útil.
+   */
+  function abrirResumen(inst, periodo, alcance) {
+    const modelo = modeloDelResumen(inst, periodo, alcance, Date.now());
+    if (!modelo) {
+      return null;
+    }
+    resumenAbierto = { inst: inst, periodo: periodo, modelo: modelo };
+    mostrarEstadoDescarga(null);
+    return pintarResumen(modelo);
   }
 
   /** El botón «Guardar mi resumen». */
@@ -2019,7 +2142,14 @@
       mostrarMensajeResumen(MENSAJES_RESUMEN.cargando);
       return;
     }
-    const titulo = construirResumen(inst, periodoElegido(ui.periodoHistorial), Date.now());
+    // Cada apertura empieza en «Resumen».
+    if (ui.alcanceResumen) {
+      ui.alcanceResumen.checked = true;
+    }
+    if (ui.alcanceCompleto) {
+      ui.alcanceCompleto.checked = false;
+    }
+    const titulo = abrirResumen(inst, periodoElegido(ui.periodoHistorial), ALCANCE.RESUMEN);
     if (!titulo) {
       mostrarMensajeResumen(MENSAJES_RESUMEN.sinLecturas);
       return;
@@ -2031,14 +2161,78 @@
     titulo.focus();
   }
 
-  /**
-   * Abre el diálogo de impresión del navegador. No se anuncia nada al
-   * cerrarlo: la persona pudo cancelar, y desde aquí no se sabe.
-   */
-  function imprimirResumen() {
-    if (typeof window.print === 'function') {
-      window.print();
+  /** Cambiar entre «Resumen» e «Historial completo»: la misma instantánea. */
+  function cambiarAlcance() {
+    if (!resumenAbierto) {
+      return;
     }
+    abrirResumen(resumenAbierto.inst, resumenAbierto.periodo, alcanceElegido());
+  }
+
+  // -- Descarga del PDF ----------------------------------------------------
+
+  function cargarScript(ruta) {
+    return new Promise(function (resolver, rechazar) {
+      const script = document.createElement('script');
+      script.src = ruta;
+      script.onload = resolver;
+      script.onerror = rechazar;
+      (document.head || document.body).appendChild(script);
+    });
+  }
+
+  /** pdfmake y sus fuentes, una sola vez por página. */
+  function cargarMotorPdf() {
+    if (motorPdf === null) {
+      motorPdf = MOTOR_PDF.reduce(function (anterior, ruta) {
+        return anterior.then(function () { return cargarScript(ruta); });
+      }, Promise.resolve())
+        .then(function () {
+          if (!window.pdfMake || typeof window.pdfMake.createPdf !== 'function') {
+            throw new Error('motor de PDF incompleto');
+          }
+          return window.pdfMake;
+        })
+        .catch(function (error) {
+          motorPdf = null;
+          throw error;
+        });
+    }
+    return motorPdf;
+  }
+
+  /**
+   * «Descargar PDF»: el mismo modelo que se ve, en un archivo. Si se cierra la
+   * sesión o se sale del resumen mientras se prepara, no se descarga nada.
+   */
+  function descargarPdf() {
+    if (!resumenAbierto) {
+      return Promise.resolve();
+    }
+    const epoca = epocaSesion;
+    const boton = ui.botonDescargarPdf;
+    boton.disabled = true;
+    mostrarEstadoDescarga(MENSAJES_RESUMEN.preparando);
+    return cargarMotorPdf()
+      .then(function (pdfMake) {
+        const abierto = resumenAbierto;
+        if (epoca !== epocaSesion || !abierto) {
+          return;
+        }
+        const definicion = window.FetalAlertResumenPdf.definicion(abierto.modelo);
+        pdfMake.createPdf(definicion).download(abierto.modelo.nombreArchivo);
+        // El navegador decide dónde lo guarda; aquí solo se sabe que empezó.
+        mostrarEstadoDescarga('Descarga iniciada: «' + abierto.modelo.nombreArchivo +
+          '». Búscalo en la carpeta de descargas.');
+      })
+      .catch(function () {
+        if (epoca === epocaSesion && resumenAbierto) {
+          mostrarEstadoDescarga(MENSAJES_RESUMEN.fallo);
+        }
+      })
+      .then(function () {
+        boton.disabled = false;
+      });
   }
 
   function volverAlHistorial() {
@@ -2188,7 +2382,9 @@
     ui.botonConfirmarCierre.addEventListener('click', manejarLogout);
     ui.botonVerAnteriores.addEventListener('click', verEmbarazosAnteriores);
     ui.botonGuardarResumen.addEventListener('click', generarResumen);
-    ui.botonImprimirResumen.addEventListener('click', imprimirResumen);
+    ui.botonDescargarPdf.addEventListener('click', descargarPdf);
+    ui.alcanceResumen.addEventListener('change', cambiarAlcance);
+    ui.alcanceCompleto.addEventListener('change', cambiarAlcance);
     ui.botonVolverHistorial.addEventListener('click', volverAlHistorial);
 
     // El período solo cambia el dibujo de lo ya recibido: no pide nada.

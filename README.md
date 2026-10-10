@@ -1895,12 +1895,14 @@ y en hora de Panamá, sea cual sea el navegador; las fechas de calendario
 
 ### Guardar mi resumen
 
-En «Mi historial», **Guardar mi resumen** abre una vista imprimible del
-embarazo elegido allí y el diálogo de impresión del navegador («Guardar como
-PDF»). No hay servicios externos ni almacenamiento en el navegador: se arma
-con lo ya consultado y se descarta al salir o al cerrar sesión. Contenido,
-límites, pruebas y comprobaciones manuales pendientes en
-`docs/gestante_guardar_resumen.md`.
+En «Mi historial», **Guardar mi resumen** abre una vista previa del embarazo
+elegido allí y **Descargar PDF** descarga el documento con la estética de la
+interfaz: el resumen (últimos valores y hasta 10 lecturas) o el historial
+completo del período. El PDF se genera en el dispositivo con pdfmake, que el
+portal sirve desde `frontend/gestante/vendor/` (sin CDN ni servicios
+externos) y solo carga al descargar. Se arma con lo ya consultado y no se
+guarda nada en el navegador. Contenido, límites, pruebas y comprobaciones
+manuales pendientes en `docs/gestante_guardar_resumen.md`.
 
 ### Estado de conexión y sesión con el servidor
 
