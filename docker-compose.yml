@@ -49,5 +49,32 @@ services:
       db:
         condition: service_healthy
 
+  # Herramienta auxiliar de inspeccion visual para la sustentacion (SCRUM-103).
+  # No es un componente de FetalAlert: ningun servicio depende de ella y el
+  # sistema funciona igual con ella apagada. Pertenece al perfil "demo", asi que
+  # un arranque ordinario sin perfiles ("docker compose up -d") no la inicia.
+  # Compose si la inicia si se nombra el servicio explicitamente; el
+  # procedimiento del proyecto usa siempre "--profile demo". Ver
+  # docs/demo_adminer.md.
+  #
+  # - Imagen oficial con version fija, sin plugins ni tema.
+  # - Publicada solo en la interfaz local de la computadora.
+  # - Llega a PostgreSQL por la red interna (db:5432), no por el puerto publicado.
+  # - No recibe ninguna credencial: usuario y contrasena se escriben en el
+  #   formulario de inicio de sesion de Adminer.
+  # - PGOPTIONS abre cada sesion de Adminer con transacciones de solo lectura por
+  #   omision. Es una proteccion contra escrituras accidentales, no un limite de
+  #   privilegios: los privilegios son los del rol con el que se inicia sesion.
+  adminer:
+    image: adminer:6.1.1-standalone
+    profiles: ["demo"]
+    environment:
+      PGOPTIONS: "-c default_transaction_read_only=on"
+    ports:
+      - "127.0.0.1:8090:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+
 volumes:
   fetalalert_pgdata:
