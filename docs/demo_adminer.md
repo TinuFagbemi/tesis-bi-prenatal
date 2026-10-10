@@ -19,14 +19,19 @@ Todos los datos son simulados y completamente ficticios.
 Desde la raíz del repositorio:
 
 ```powershell
-# 0. Antes de encender: db debe estar sana y ser la de este proyecto.
-docker compose ps db
-#    Esperado: STATUS "running (healthy)".
-docker inspect tesis-bi-prenatal-db-1 --format '{{index .Config.Labels "com.docker.compose.project"}} {{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}'
-#    Esperado: tesis-bi-prenatal tesis-bi-prenatal_default
-
-# 1. Encender solo Adminer. --no-deps: no arranca, recrea ni detiene db ni api.
-docker compose --profile demo up -d --no-deps adminer
+# 0 y 1. Comprobar db y, solo si es conforme, encender Adminer. El bloque se
+# pega entero: cualquier fallo lo detiene antes de arrancar nada.
+& {
+  $db = @(docker compose ps -a --format '{{.ID}}|{{.Project}}|{{.State}}|{{.Health}}' db)
+  if ($LASTEXITCODE -ne 0 -or $db.Count -ne 1) { throw 'No hay exactamente un contenedor del servicio db.' }
+  $id, $proyecto, $estado, $salud = $db[0].Split('|')
+  if ($estado -ne 'running' -or $salud -ne 'healthy') { throw "db no está en ejecución y sana ($estado/$salud)." }
+  $redes = docker inspect $id --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}'
+  if ($LASTEXITCODE -ne 0 -or (-split $redes) -notcontains "${proyecto}_default") { throw "db no está en la red ${proyecto}_default." }
+  "db conforme: proyecto $proyecto, red ${proyecto}_default."
+  # --no-deps: no arranca, recrea ni detiene db ni api.
+  docker compose --profile demo up -d --no-deps adminer
+}
 
 # 2. Comprobar el estado de los tres servicios, incluidos los detenidos.
 docker compose --profile demo ps -a
@@ -36,9 +41,11 @@ docker compose --profile demo stop adminer
 ```
 
 - Con `--no-deps`, Compose no comprueba ni arranca `db`. Si `db` no estuviera
-  sana, Adminer abriría pero no podría conectarse; por eso el paso 0 va antes.
-  Poner en marcha `db` es preparación del entorno, no parte de este
-  procedimiento.
+  sana, Adminer abriría pero no podría conectarse; por eso la comprobación va
+  antes, en el mismo bloque. Resuelve el contenedor por el servicio `db` del
+  proyecto de esta carpeta, sin depender de su nombre, y solo lee el estado y
+  las redes del contenedor. Poner en marcha `db` es preparación del entorno, no
+  parte de este procedimiento.
 - Dirección: **<http://127.0.0.1:8090>**. Solo se publica en la interfaz local
   de la computadora.
 - Adminer pertenece al perfil `demo`: un arranque ordinario sin perfiles
@@ -65,6 +72,8 @@ omisión, o el `POSTGRES_PORT` del `.env` local). Adminer corre dentro de Docker
 y llega a PostgreSQL por la red interna, así que no le afecta qué puerto use la
 computadora.
 
+Compose no inyecta credenciales de PostgreSQL en el servicio Adminer. El
+operador las introduce en el formulario y Adminer las utiliza para conectarse.
 **La contraseña nunca va en una URL, en este documento, en una captura de
 pantalla ni en el repositorio.** Solo se escribe en el formulario.
 
@@ -463,8 +472,9 @@ Variables del `.env` local, que no se versiona:
 
 Docker Compose pasa al contenedor de la API `DATABASE_URL`, la configuración JWT
 y `APP_NAME`/`APP_ENV`, y ninguna credencial de mantenimiento, ETL ni Power BI.
-La contraseña de `fetalalert_powerbi` se guarda únicamente en el `.env` local,
-para iniciar sesión a mano; ningún servicio la recibe.
+La contraseña de `fetalalert_powerbi` se guarda únicamente en el `.env` local.
+Compose no la inyecta en ningún servicio: el operador la introduce en el
+formulario de Adminer, que la utiliza para conectarse.
 
 Cada ensayo deja su captura en esta base. Antes de repetirlo hay que rehacer la
 preparación de la sección 4.

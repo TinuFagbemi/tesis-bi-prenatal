@@ -60,8 +60,9 @@ services:
   # - Imagen oficial con version fija, sin plugins ni tema.
   # - Publicada solo en la interfaz local de la computadora.
   # - Llega a PostgreSQL por la red interna (db:5432), no por el puerto publicado.
-  # - No recibe ninguna credencial: usuario y contrasena se escriben en el
-  #   formulario de inicio de sesion de Adminer.
+  # - Compose no inyecta credenciales de PostgreSQL en este servicio. El
+  #   operador las introduce en el formulario de Adminer y Adminer las utiliza
+  #   para conectarse.
   # - PGOPTIONS abre cada sesion de Adminer con transacciones de solo lectura por
   #   omision. Es una proteccion contra escrituras accidentales, no un limite de
   #   privilegios: los privilegios son los del rol con el que se inicia sesion.
