@@ -55,7 +55,7 @@ docker compose --profile demo stop adminer
 | Campo | Valor |
 |---|---|
 | Sistema | PostgreSQL |
-| Servidor | `db` (ya viene rellenado) |
+| Servidor | Escribir `db` manualmente |
 | Usuario | según la pestaña, ver la tabla siguiente |
 | Contraseña | se escribe a mano |
 | Base de datos | la base de la demostración |
