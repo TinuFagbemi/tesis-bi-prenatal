@@ -1893,6 +1893,15 @@ consulta. Las fechas se muestran en español
 y en hora de Panamá, sea cual sea el navegador; las fechas de calendario
 (`fecha_inicio`) no cambian de día por la zona horaria.
 
+### Guardar mi resumen
+
+En «Mi historial», **Guardar mi resumen** abre una vista imprimible del
+embarazo elegido allí y el diálogo de impresión del navegador («Guardar como
+PDF»). No hay servicios externos ni almacenamiento en el navegador: se arma
+con lo ya consultado y se descarta al salir o al cerrar sesión. Contenido,
+límites, pruebas y comprobaciones manuales pendientes en
+`docs/gestante_guardar_resumen.md`.
+
 ### Estado de conexión y sesión con el servidor
 
 No hay indicador permanente en el encabezado (la píldora «Conectada al
