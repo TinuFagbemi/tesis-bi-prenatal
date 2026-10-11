@@ -165,6 +165,8 @@ tesis-bi-prenatal/
 └── README.md
 ```
 
+Para la sustentación, `docker-compose.yml` incluye además Adminer como herramienta auxiliar y opcional de inspección visual, en el perfil `demo`: un arranque ordinario sin perfiles no lo inicia, y no es un componente de FetalAlert. Ver [Adminer para la demostración](docs/demo_adminer.md).
+
 ## Estado actual del proyecto
 
 El repositorio se encuentra en una etapa temprana. Lo que ya existe y funciona es el esquema operacional en PostgreSQL con sus migraciones, el generador del dataset simulado, su carga idempotente, el endpoint que recibe una sesión de monitoreo con sus lecturas biométricas —con su contrato de idempotencia—, el nodo edge simulado, que captura paquetes sin conexión y los entrega después sin duplicarlos, con reintentos de espera incremental, agotamiento controlado y trazabilidad de extremo a extremo, y el esquema analítico (Star Schema) con su ETL reproducible, idempotente e incremental. A partir de SCRUM-70 existen además autenticación con JWT, autorización por rol y auditoría de accesos: el endpoint de ingesta ya no es público. SCRUM-97 añade el aprovisionamiento administrativo de cuentas para perfiles clínicos existentes y su desactivación y reactivación. SCRUM-98 añade el aislamiento por fila (RLS) sobre las tablas clínicas, las rutas mínimas de lectura para gestante y médico, la auditoría de los accesos clínicos concedidos y denegados, y la capa publicada y seudonimizada que Power BI consultará. **Aún no existen un servicio permanente o demonio que dispare la sincronización del nodo edge de clínica o el ETL por sí solo** (el portal de la gestante sí envía automáticamente la cola local de cada cuenta con sesión iniciada; ver «Captura simulada, operación sin conexión y envío automático»)**, HTTPS/TLS, el cifrado en reposo, los dashboards ni la configuración del workspace de Power BI.** El desarrollo activo continúa en el Capítulo IV, centrado en seguridad, interfaces, aislamiento de datos y analítica del MVP, y todo el trabajo se desarrolla y prueba en un entorno controlado/local, no en comunidades rurales reales.
@@ -1970,9 +1972,13 @@ dataset haría pasar un dato antiguo por una medición nueva.
 **Dataset canónico frente a base de demostración.** El dataset de la tesis es
 `data/generated`: 30 embarazos, 732 sesiones y 1180 lecturas. El embarazo 130,
 su dispositivo y las sesiones registradas desde el portal solo existen en las
-bases de demostración (`scrum72_demo_gestante`, `scrum72_prueba_offline`) y no
-deben usarse para estadísticas del dataset, ETL, Power BI ni resultados
-cuantitativos. Esas cifras salen de una base cargada solo con
+bases de demostración (`scrum72_demo_gestante`, `scrum72_prueba_offline` y
+`fetalalert_demo_sustentacion`) y no deben usarse para estadísticas del
+dataset, ETL, Power BI ni resultados cuantitativos. En particular, el ETL que se
+ejecuta y lo que se publica para Power BI durante el ensayo de la sustentación
+([Adminer para la demostración](docs/demo_adminer.md)) muestran el recorrido de
+una captura, no las cifras de la tesis: incluyen el embarazo de demostración y
+sus capturas. Esas cifras salen de una base cargada solo con
 `data/generated`, sin ejecutar `provisionar_demo.py`. Detalle y verificación
 en `docs/scrum72_etapa2_resumen.md`.
 
