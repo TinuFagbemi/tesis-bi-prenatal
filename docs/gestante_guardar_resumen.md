@@ -1,8 +1,9 @@
 # Gestante: «Guardar mi resumen» y diagnóstico de desconexiones
 
-Estado al 2026-10-10. Rama `feature/gestante-guardar-resumen-demo`, creada
+Estado al 2026-10-11. Rama `feature/gestante-guardar-resumen-demo`, creada
 desde `origin/main` en `029fe50` (merge del PR #20, interfaz gestante
-aprobada). Sin push, PR ni merge.
+aprobada) y actualizada con un merge de `origin/main` en `ccc209f` (PR #21,
+SCRUM-103). Se publica para revisión; sin merge.
 
 Dos entregas independientes:
 
@@ -155,13 +156,24 @@ pytest: `test_gestante_rutas.py` comprueba que se sirven `/resumen_pdf.js` y
 los dos archivos de `/vendor/`, y que cualquier otra ruta (por ejemplo
 `/vendor/LICENCIAS.md`) da 404.
 
-| Suite | Base `029fe50` | Rama |
-|---|---|---|
-| `node --test frontend/gestante/pruebas/*.test.js` | 73 pass, 1 skip | 105 pass, 0 skip (con `data/generated` generado; sin él, la prueba del dataset se omite como antes) |
-| `pytest` sin PostgreSQL (los mismos `--ignore` del primer paso del CI) | 2449 passed | 2455 passed |
+Resultados sobre el código final (commit `6265886`, que integra
+`origin/main`; el commit posterior solo cambia documentación y muestras), en
+un checkout limpio sin `.env` y sin `data/generated`, como el CI:
 
-Las suites `*_postgresql.py` no se ejecutaron: el único cambio de backend son
-rutas de archivos estáticos.
+| Suite | Base `029fe50` | Rama (`6265886`) |
+|---|---|---|
+| `node --test frontend/gestante/pruebas/*.test.js` | 73 pass, 1 skip | 104 pass, 1 skip |
+| `cd backend; python -m pytest -q` con los mismos `--ignore=tests/*_postgresql.py` del primer paso del CI | 2449 passed | 2469 passed, 0 skipped |
+
+- La única omisión de Node es preexistente: la prueba del dataset se omite si
+  `data/generated` no está generado (con él generado: 105 pass, 0 skip).
+- La base y la rama no son comparables uno a uno: la rama incluye ya las
+  pruebas que trajo `origin/main` (SCRUM-103).
+- En el worktree de trabajo, que tiene un `.env` local, pytest omite 53
+  pruebas de `test_config_secretos.py` que exigen que no exista: por eso la
+  medida válida es la del checkout limpio.
+- Las suites `*_postgresql.py` no se ejecutaron localmente (el único cambio de
+  backend son rutas de archivos estáticos); las ejecuta el CI del PR.
 
 `test_gestante_frontend.py` prohíbe cifras de umbral clínico en `app.js`; la
 constante del día se escribe como `86400000` por eso.
@@ -187,17 +199,24 @@ local:
   «SpO₂»; cabecera de la tabla repetida; ninguna fila partida ni cabecera
   sola al pie; el cero como «0»; cada color con su nombre.
 
-### Comprobaciones manuales pendientes
+Muestras versionadas en `docs/evidencias/gestante-guardar-resumen/` (datos
+ficticios del servidor local de prueba, generadas desde `6265886`):
+`muestra-resumen.pdf`, `pdf-resumen-p1.png`,
+`pdf-historial-completo-p2.png` y `vista-previa-escritorio.png`.
 
-1. En el portal de demostración, «Mi historial» → embarazo finalizado →
-   «Guardar mi resumen» → «Descargar PDF», con **Resumen** y con **Historial
-   completo**.
-2. Abrir ambos PDF **sin red**: fechas, unidades, número de páginas, texto
-   seleccionable, que no falte ninguna fila.
-3. Repetir en **Edge y Firefox** y en un **móvil real** si se quiere declarar
-   compatibilidad (solo se probó Chrome de escritorio, en modo headless).
-4. Mirar el PDF impreso en papel (los colores de la banda gastan tinta; el
-   texto sigue siendo legible en blanco y negro).
+### Verificación manual (Viviana, 2026-10-11)
+
+Confirmado por Viviana en el portal de demostración:
+
+- La descarga funciona en **Google Chrome**.
+- El PDF descargado **abre sin internet**.
+
+No se declara ninguna otra comprobación manual.
+
+### Pendientes
+
+- Otros navegadores (Edge, Firefox) y móvil real: no probados.
+- Impresión en papel del PDF descargado: no comprobada.
 
 No se declara conformidad completa de accesibilidad: solo se comprobó
 teclado, foco, etiquetas de texto junto al color y HTML semántico. El PDF no
@@ -252,12 +271,12 @@ no tiene) ni los puertos 5433/8010/8100.
 
 | Pieza | Valor |
 |---|---|
-| PostgreSQL | 16.2 (binarios del paquete `pgserver`, en un venv del scratchpad), clúster nuevo con `initdb`, `127.0.0.1:55433`, base `diag_desconexion_tmp` |
+| PostgreSQL | 16.2 (binarios del paquete `pgserver`, en un entorno virtual temporal), clúster nuevo con `initdb`, `127.0.0.1:55433`, base `diag_desconexion_tmp` |
 | Roles | migrador sin SUPERUSER ni BYPASSRLS, `fetalalert_api/etl/powerbi`, todos con claves ficticias; `bootstrap_roles.py aplicar`, `alembic upgrade head` |
 | Datos | `generate_mock_data.py` + `load_mock_data.py` (1180 lecturas, `APP_ENV=test`); `provisionar_demo.py provisionar` → cuenta 107, embarazo 130, dispositivo 130 |
 | API | `uvicorn app.main:app` en `127.0.0.1:8031`, `JWT_EXPIRATION_MINUTES=1` (para observar el vencimiento) |
 | Portal | `scripts/gestante_web.py` en `127.0.0.1:8131`, `GESTANTE_ENVIO_AUTOMATICO_SEGUNDOS=5` (por omisión, 30) |
-| Cola y sesión local | SQLite en el scratchpad (`GESTANTE_MOVIMIENTOS_DIR`, `GESTANTE_SQLITE_PATH`, `GESTANTE_PROVISION_PATH`) |
+| Cola y sesión local | SQLite en una carpeta temporal (`GESTANTE_MOVIMIENTOS_DIR`, `GESTANTE_SQLITE_PATH`, `GESTANTE_PROVISION_PATH`) |
 
 ### Procedimiento reproducible
 
@@ -269,7 +288,7 @@ no tiene) ni los puertos 5433/8010/8100.
 3. `python scripts/generate_mock_data.py`, `python scripts/load_mock_data.py`
    (`APP_ENV=test`) y `python scripts/provisionar_demo.py provisionar`.
 4. Arrancar API y portal con las variables de la tabla. Un guion
-   (`escenarios.py`, guardado fuera del repositorio) los arranca y detiene,
+   (`escenarios.py`, en la copia local de evidencias) los arranca y detiene,
    inicia sesión en el portal como lo haría el navegador, ejecuta
    `python scripts/dispositivo_gestante.py capturar`, lee la cola en solo
    lectura (`?mode=ro`) y consulta PostgreSQL con el administrador del
@@ -353,11 +372,17 @@ consultada» sin mostrar ninguna información.**
 - **Propuesta:** ticket aparte para que el aviso de conexión elija el texto
   según haya o no contexto clínico cargado, con una prueba de los dos órdenes.
 
-### Evidencia conservada (fuera del repositorio)
+### Evidencia conservada
 
-En el scratchpad de la sesión: `diag/evidencia.json` y `diag/evidencia.log`
-(cada escenario con sus datos), los registros de API y portal, la cola SQLite
-y el clúster (detenido), las capturas y PDF de `visual/salida*`, y la
-reproducción del defecto (`base_frontend/pruebas/repro_nota_sin_conexion.test.js`).
-No se versionan: contienen bases y datos temporales. Las claves usadas son
-ficticias y no corresponden a ningún entorno.
+- **En el repositorio** (accesible para todo el equipo): esta nota y las
+  muestras de `docs/evidencias/gestante-guardar-resumen/`.
+- **Copia local**, solo en la computadora de Viviana y **no accesible para
+  otras colaboradoras**: `C:\GitHub\TESIS\evidencias\gestante-guardar-resumen-2026-10-10\`,
+  con su propio `README.md`. Contiene los resultados de los 7 escenarios
+  (`diagnostico/evidencia.json` y `evidencia.log`), los guiones
+  (`escenarios.py`, `crear_roles.py`, `entorno.ejemplo.sh` con marcadores en
+  lugar de claves, `portal_real.js`, `secuencia_recarga.js`,
+  `revision_resumen.js`), las capturas, los PDF de muestra y la reproducción
+  del defecto preexistente (`defecto-preexistente/repro_nota_sin_conexion.test.js`).
+- No se conservan el clúster PostgreSQL ni las colas SQLite, ni ningún
+  `.env`. Las claves del entorno aislado eran ficticias y desechables.
