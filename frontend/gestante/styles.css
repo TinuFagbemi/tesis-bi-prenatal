@@ -466,6 +466,76 @@ summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--clr-purpl
 .tabla-lecturas .semaforo-item{color:var(--clr-text-main);}
 
 /* =========================================================
+   MI RESUMEN
+   Un documento sencillo y legible, en pantalla y en papel. Mismas piezas
+   que el resto (tarjeta, semaforo con su nombre), sin graficas: el texto
+   tiene que poder seleccionarse y leerse sin color.
+   ========================================================= */
+.resumen-accion{display:flex;flex-direction:column;align-items:center;gap:.3rem;margin:0 0 1.4rem;}
+.resumen-accion .btn-secundario{display:inline-flex;align-items:center;gap:.5rem;}
+.resumen-accion .texto-ayuda{margin-top:0;text-align:center;}
+
+.resumen-controles{max-width:820px;margin:0 auto 1.2rem;padding:1.1rem 1.4rem;text-align:center;}
+.resumen-controles .dialogo-acciones{margin-top:.8rem;}
+.resumen-alcance{border:none;display:flex;flex-direction:column;gap:.45rem;text-align:left;max-width:560px;margin:0 auto;}
+.resumen-alcance legend{margin-bottom:.35rem;}
+.resumen-opcion{display:flex;align-items:flex-start;gap:.6rem;padding:.55rem .8rem;border:1px solid var(--clr-borde);
+  border-radius:12px;cursor:pointer;color:var(--clr-text-main);font-size:.95rem;line-height:1.4;}
+.resumen-opcion input{margin-top:.2rem;accent-color:var(--clr-purple-1);width:1.05rem;height:1.05rem;flex-shrink:0;}
+.resumen-opcion:has(input:checked){border-color:var(--clr-purple-2);background:var(--clr-lila-suave);}
+.resumen-controles #resumen-descarga-estado{margin-top:.8rem;}
+
+.resumen-documento{
+  max-width:820px;margin:0 auto;padding:2rem 2.2rem;
+  background:var(--clr-tarjeta);border-radius:var(--radio);
+  border:1px solid var(--clr-borde);box-shadow:var(--sombra);
+  color:var(--clr-text-main);font-size:1rem;line-height:1.5;
+}
+.resumen-encabezado{border-bottom:2px solid var(--clr-morado-suave);padding-bottom:1rem;margin-bottom:1rem;}
+.resumen-marca{display:flex;flex-wrap:wrap;align-items:baseline;gap:.2rem .8rem;margin-bottom:.4rem;}
+/* Color liso y no el degradado del logotipo: un texto recortado sobre un
+   fondo desaparece cuando el navegador no imprime fondos. */
+.resumen-marca-nombre{font-size:1.6rem;font-weight:800;color:#6d28d9;letter-spacing:-.3px;}
+.resumen-marca-lema{font-style:italic;color:var(--clr-text-sub);}
+.resumen-titulo{font-size:1.5rem;font-weight:800;color:var(--clr-header-grad-1);}
+.resumen-titulo:focus{outline:none;}
+.resumen-titulo:focus-visible{outline:3px solid var(--clr-purple-1);outline-offset:3px;}
+.resumen-subtitulo{font-weight:600;color:var(--clr-header-grad-3);margin-bottom:.6rem;}
+.resumen-aviso{
+  margin-top:.6rem;padding:.5rem .8rem;border-left:4px solid var(--clr-count-start);
+  background:var(--clr-rosa-suave);border-radius:8px;font-size:.92rem;
+}
+
+.resumen-seccion{margin-top:1.1rem;}
+.resumen-seccion h3{font-size:1.1rem;color:var(--clr-header-grad-1);margin-bottom:.4rem;}
+.resumen-nota{color:var(--clr-text-sub);font-size:.9rem;margin:.3rem 0 .5rem;}
+
+.resumen-datos{display:grid;grid-template-columns:repeat(auto-fit,minmax(13rem,1fr));gap:.3rem 1.2rem;}
+.resumen-fila{display:flex;flex-direction:column;padding:.15rem 0 .15rem .6rem;border-left:2px solid var(--clr-borde);}
+.resumen-fila dt{font-size:.82rem;font-weight:600;color:var(--clr-text-sub);}
+.resumen-fila dd{font-weight:700;color:var(--clr-header-grad-1);}
+.resumen-fila dd .semaforo-item{display:inline-flex;font-size:inherit;color:inherit;}
+.resumen-semaforo-texto{font-weight:600;}
+
+.resumen-valores{list-style:none;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.6rem;}
+.resumen-valor{
+  display:flex;flex-direction:column;gap:.1rem;padding:.6rem .8rem;
+  border:1px solid var(--clr-borde);border-radius:12px;
+}
+.resumen-valor-nombre{font-size:.85rem;font-weight:600;color:var(--clr-text-sub);}
+.resumen-valor-cifra{font-size:1.25rem;font-weight:800;color:var(--clr-header-grad-1);}
+.resumen-valor-detalle{font-size:.85rem;color:var(--clr-text-sub);}
+
+.resumen-tabla{width:100%;border-collapse:collapse;font-size:.9rem;margin-top:.3rem;}
+.resumen-tabla th,
+.resumen-tabla td{padding:.35rem .5rem;text-align:left;vertical-align:middle;border-bottom:1px solid #e5e7eb;}
+.resumen-tabla th{font-size:.78rem;font-weight:700;color:var(--clr-header-grad-4);background:#f5f3ff;}
+.resumen-tabla .semaforo-item{color:var(--clr-text-main);font-size:inherit;}
+
+.resumen-pie{margin-top:1.2rem;padding-top:.7rem;border-top:1px solid var(--clr-borde);
+  color:var(--clr-text-sub);font-size:.85rem;display:flex;flex-direction:column;gap:.2rem;}
+
+/* =========================================================
    MANUAL DE USO
    Una accion por paso, con un recorte de la interfaz.
    ========================================================= */
@@ -600,6 +670,24 @@ summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--clr-purpl
   .tabla-lecturas td::before{content:attr(data-etiqueta);font-weight:600;color:var(--clr-header-grad-4);}
 }
 
+/* El resumen en pantallas estrechas: una columna y la tabla con
+   desplazamiento propio. Solo en pantalla: en papel manda el bloque de
+   impresion de abajo. */
+@media screen and (max-width:768px){
+  .resumen-documento{padding:1.2rem 1rem;}
+  .resumen-valores{grid-template-columns:1fr;}
+  /* Como la tabla del historial: una tarjeta por lectura, con la etiqueta
+     de cada columna delante de su valor. */
+  .resumen-tabla thead{display:none;}
+  .resumen-tabla,
+  .resumen-tabla tbody,
+  .resumen-tabla tr,
+  .resumen-tabla td{display:block;width:100%;}
+  .resumen-tabla tr{padding:.4rem 0;border-bottom:2px solid rgba(139,92,246,.15);}
+  .resumen-tabla td{display:flex;justify-content:space-between;gap:1rem;padding:.2rem .2rem;border-bottom:none;}
+  .resumen-tabla td::before{content:attr(data-etiqueta);font-weight:600;color:var(--clr-header-grad-4);}
+}
+
 @media screen and (max-width:414px){
   .cabecera{grid-template-columns:1fr;}
   .cabecera-estado{flex-direction:row;flex-wrap:wrap;align-items:center;justify-content:space-between;}
@@ -620,4 +708,45 @@ summary:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--clr-purpl
 
 @media screen and (max-width:320px){
   .main-menu{grid-template-columns:1fr;}
+}
+
+/* =========================================================
+   IMPRESION DEL RESUMEN
+   Solo con la vista del resumen abierta (`body.con-resumen`, que pone
+   app.js): se imprime el documento y nada mas. Sin tamaño de papel fijo,
+   para que A4 y Carta usen el que elija la persona.
+   ========================================================= */
+@page{margin:14mm 13mm;}
+
+@media print{
+  body.con-resumen{background:#fff;min-height:0;display:block;}
+  body.con-resumen .cabecera,
+  body.con-resumen .footer,
+  body.con-resumen .aviso-sesion-central,
+  body.con-resumen .dialogo,
+  body.con-resumen .resumen-controles{display:none !important;}
+  body.con-resumen main{max-width:none;padding:0;}
+  body.con-resumen .vista{animation:none;}
+
+  .resumen-documento{
+    max-width:none;padding:0;border:none;border-radius:0;box-shadow:none;
+    font-size:10.5pt;color:#111827;
+  }
+  /* El titulo recibe el foco al abrirse el resumen: su anillo no se imprime. */
+  .resumen-titulo{font-size:15pt;outline:none !important;}
+  .resumen-marca-nombre{font-size:16pt;}
+  .resumen-seccion{margin-top:9pt;}
+  .resumen-seccion h3{font-size:11.5pt;break-after:avoid;}
+  .resumen-encabezado,
+  .resumen-valor,
+  .resumen-fila{break-inside:avoid;}
+  .resumen-seccion:not(.resumen-seccion-tabla){break-inside:avoid;}
+  .resumen-valores{grid-template-columns:repeat(3,minmax(0,1fr));}
+  .resumen-tabla{font-size:9.5pt;}
+  .resumen-tabla thead{display:table-header-group;}
+  .resumen-tabla tr{break-inside:avoid;}
+  .resumen-pie{break-inside:avoid;}
+  /* Los puntos de color se imprimen aunque el navegador omita fondos; el
+     nombre del color va siempre al lado. */
+  .resumen-documento .alert-light{-webkit-print-color-adjust:exact;print-color-adjust:exact;}
 }
