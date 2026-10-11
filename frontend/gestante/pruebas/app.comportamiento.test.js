@@ -1754,3 +1754,22 @@ test('Descarga: el marcado de un dato llega al PDF como texto', async () => {
   const svgs = JSON.stringify(descargas[0].definicion.content).match(/<svg[^"]*/g) || [];
   svgs.forEach((s) => assert.doesNotMatch(s, /img|onerror/));
 });
+
+test('Descarga: cada descarga lleva en la esquina su propio momento exacto', async () => {
+  const { $, descargas, reloj } = await arrancar(rutasBase());
+  await generarResumen($);
+
+  // 15:00:00 UTC = 10:00:00 en Panamá.
+  await descargar($);
+  reloj.ms += 2 * 60 * 1000 + 17 * 1000;   // dos minutos y 17 segundos después
+  await descargar($);
+
+  assert.equal(descargas.length, 2);
+  const marca = (d) => d.definicion.header(1).text;
+  assert.equal(marca(descargas[0]), 'Descargado el 25 sept 2026, 10:00:00 (hora de Panamá)');
+  assert.equal(marca(descargas[1]), 'Descargado el 25 sept 2026, 10:02:17 (hora de Panamá)');
+  // También en las páginas siguientes, y sin cambiar el contenido del documento.
+  const columnas = descargas[1].definicion.header(2).stack[0].columns;
+  assert.equal(columnas[columnas.length - 1].text, marca(descargas[1]));
+  assert.deepEqual(textosDelPdf(descargas[0].definicion), textosDelPdf(descargas[1].definicion));
+});

@@ -271,8 +271,21 @@
     };
   }
 
-  /** La definición de documento de pdfmake para un modelo de resumen. */
-  function definicion(modelo) {
+  /** La marca de descarga, pequeña, en la esquina superior derecha. */
+  function marcaDeDescarga(texto, color) {
+    return { text: texto, alignment: 'right', fontSize: 7.5, color: color };
+  }
+
+  /**
+   * La definición de documento de pdfmake para un modelo de resumen.
+   *
+   * `opciones.descargadoEn` es el texto del momento exacto de ESTA descarga
+   * («Descargado el 10 oct 2026, 18:05:32 (hora de Panamá)»). Lo calcula
+   * app.js al pulsar «Descargar PDF»: cada descarga lleva el suyo, en la
+   * esquina superior derecha de cada página.
+   */
+  function definicion(modelo, opciones) {
+    const descargadoEn = opciones && opciones.descargadoEn ? opciones.descargadoEn : null;
     const anchoTarjeta = (ANCHO_UTIL - 2 * 10) / 3;
 
     const contenido = [
@@ -404,18 +417,27 @@
         };
       },
       // En las páginas siguientes, una cabecera discreta con la marca.
+      // Primera página: solo la marca de descarga, en claro sobre la banda
+      // (el logotipo va a la izquierda). Las demás: una cabecera discreta con
+      // la marca y el título a la izquierda y la descarga a la derecha.
       header: function (pagina) {
         if (pagina === 1) {
-          return null;
+          return descargadoEn
+            ? Object.assign(marcaDeDescarga(descargadoEn, '#e2e8f0'),
+              { margin: [MARGEN.izquierda, 16, MARGEN.derecha, 0] })
+            : null;
         }
         return {
           margin: [MARGEN.izquierda, 22, MARGEN.derecha, 0],
           stack: [
             {
               columns: [
-                { text: [{ text: 'Fetal', color: COLOR.morado }, { text: 'Alert', color: COLOR.rosa }],
+                { text: [{ text: 'Fetal', color: COLOR.morado }, { text: 'Alert', color: COLOR.rosa },
+                  { text: '  ·  ' + modelo.titulo, color: COLOR.secundario, bold: false, fontSize: 8.5 }],
                   bold: true, fontSize: 11, width: 'auto' },
-                { text: modelo.titulo, alignment: 'right', fontSize: 8.5, color: COLOR.secundario, margin: [0, 2, 0, 0] }
+                descargadoEn
+                  ? Object.assign(marcaDeDescarga(descargadoEn, COLOR.secundario), { margin: [0, 3, 0, 0] })
+                  : { text: '' }
               ]
             },
             { canvas: [{ type: 'line', x1: 0, y1: 4, x2: ANCHO_UTIL, y2: 4, lineWidth: 0.8, lineColor: COLOR.moradoSuave }] }

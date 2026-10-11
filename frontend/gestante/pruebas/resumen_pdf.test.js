@@ -135,7 +135,7 @@ test('Banda de marca solo en la primera página; cabecera discreta y numeración
   const def = definicion(modelo());
   assert.ok(def.background(1).canvas.length >= 1);
   assert.equal(def.background(2), null);
-  assert.equal(def.header(1), null);
+  assert.equal(def.header(1), null, 'sin descarga, nada en la esquina');
   assert.match(JSON.stringify(def.header(2)), /Resumen de mis registros/);
   assert.match(JSON.stringify(def.footer(2, 3)), /Página 2 de 3/);
   assert.match(JSON.stringify(def.footer(1, 1)), /Información simulada con fines académicos/);
@@ -157,4 +157,20 @@ test('Ningún dato entra en un SVG: los iconos son fijos', () => {
   const svgs = JSON.stringify(def.content).match(/"svg":"(?:[^"\\]|\\.)*"/g);
   assert.ok(svgs.length >= 7);
   svgs.forEach((s) => assert.doesNotMatch(s, /img|onerror|Embarazo/));
+});
+
+test('La marca de descarga va arriba a la derecha en todas las páginas', () => {
+  const marca = 'Descargado el 10 oct 2026, 18:05:32 (hora de Panamá)';
+  const def = definicion(modelo(), { descargadoEn: marca });
+  const primera = def.header(1);
+  assert.equal(primera.text, marca);
+  assert.equal(primera.alignment, 'right');
+  assert.ok(primera.fontSize <= 8, 'pequeña');
+  assert.equal(primera.color, '#e2e8f0', 'clara sobre la banda oscura');
+  for (const pagina of [2, 3]) {
+    const columnas = def.header(pagina).stack[0].columns;
+    const derecha = columnas[columnas.length - 1];
+    assert.equal(derecha.text, marca);
+    assert.equal(derecha.alignment, 'right');
+  }
 });

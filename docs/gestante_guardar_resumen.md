@@ -33,6 +33,12 @@ Todos los datos son simulados y ficticios.
    identificadores). La página dice «Descarga iniciada: «…». Búscalo en la
    carpeta de descargas.»: el navegador decide dónde lo guarda y la página no
    puede confirmarlo.
+6. Cada página del PDF lleva, pequeño, en la **esquina superior derecha**,
+   el momento exacto de **esa** descarga, con segundos: «Descargado el
+   10 oct 2026, 18:05:32 (hora de Panamá)». Se toma al pulsar «Descargar
+   PDF»: dos descargas del mismo resumen llevan marcas distintas y el resto
+   del documento es idéntico. En la primera página va en claro sobre la
+   banda; en las siguientes, a la derecha de la cabecera.
 
 ### Decisiones (cambio sobre el planteamiento inicial del ticket)
 
@@ -86,6 +92,7 @@ historial completo. Consecuencias aceptadas:
 | Últimos valores registrados (FC, SpO₂, movimientos) | De **todo el embarazo**, uno por variable, cada uno con su fecha, hora y semana. Pueden venir de lecturas distintas, y así se dice. Sin semáforo propio. |
 | Clasificación de la lectura más reciente | El `codigo_semaforo` de la fuente autorizada para **una** lectura, con su fecha y lo que midió. Texto explícito: no se aplica a cada medición ni a los últimos valores. Un código desconocido es «Sin clasificación disponible», sin color. |
 | Lecturas recientes / Todas las lecturas del período | Resumen: hasta **10**; historial completo: todas. Del período elegido, de la más reciente a la más antigua, cada una con su clasificación (color + nombre). Se indica el período con sus fechas, cuántas se incluyen y de cuántas. |
+| Marca de descarga (esquina superior derecha, todas las páginas) | El instante en que se pulsó «Descargar PDF», en hora de Panamá y con segundos. Distinto de «generado el», que es cuándo se armó la vista previa. |
 | Pie | Horas de Panamá; «—» = valor no registrado, el cero sí es un valor; datos simulados; no sustituye la valoración del personal de salud. |
 
 ### Límites
@@ -133,13 +140,16 @@ Node (`frontend/gestante/pruebas/`):
   - **descarga**: nombre del archivo, mismos textos y filas que la vista
     previa, sin identificadores; «Historial completo»; el motor se pide al
     portal la primera vez y en orden; cerrar sesión durante la carga no
-    descarga nada; error de carga y reintento; marcado como texto.
+    descarga nada; error de carga y reintento; marcado como texto; cada
+    descarga lleva su propio momento exacto (dos descargas con el reloj
+    adelantado 2 min 17 s dan «10:00:00» y «10:02:17») en todas las páginas.
 - `resumen_pdf.test.js` (nuevo): papel Carta y metadatos; todos los textos
   del modelo llegan tal cual; tabla con cabecera repetida, filas sin partir y
   6 columnas; semáforo siempre con nombre y sin color si es desconocido;
   aviso solo si existe; banda solo en la primera página y numeración en
   todas; el título de la tabla no queda solo al pie; ningún dato entra en un
-  SVG.
+  SVG; la marca de descarga va arriba a la derecha, pequeña y clara sobre
+  la banda.
 
 pytest: `test_gestante_rutas.py` comprueba que se sirven `/resumen_pdf.js` y
 los dos archivos de `/vendor/`, y que cualquier otra ruta (por ejemplo
@@ -147,7 +157,7 @@ los dos archivos de `/vendor/`, y que cualquier otra ruta (por ejemplo
 
 | Suite | Base `029fe50` | Rama |
 |---|---|---|
-| `node --test frontend/gestante/pruebas/*.test.js` | 73 pass, 1 skip | 103 pass, 0 skip (con `data/generated` generado; sin él, la prueba del dataset se omite como antes) |
+| `node --test frontend/gestante/pruebas/*.test.js` | 73 pass, 1 skip | 105 pass, 0 skip (con `data/generated` generado; sin él, la prueba del dataset se omite como antes) |
 | `pytest` sin PostgreSQL (los mismos `--ignore` del primer paso del CI) | 2449 passed | 2455 passed |
 
 Las suites `*_postgresql.py` no se ejecutaron: el único cambio de backend son

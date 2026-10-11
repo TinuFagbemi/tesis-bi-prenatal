@@ -1693,6 +1693,12 @@
     'Fecha y hora', 'Frecuencia cardíaca', 'SpO₂', 'Movimientos fetales', 'Semana', 'Clasificación'
   ];
 
+  // El instante exacto de una descarga, con segundos, en hora de Panamá.
+  const FORMATO_DESCARGA = new Intl.DateTimeFormat(IDIOMA, {
+    timeZone: ZONA_HORARIA, day: 'numeric', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'
+  });
+
   // Fecha del día en Panamá como AAAA-MM-DD, para el nombre del archivo.
   const FORMATO_FECHA_ARCHIVO = new Intl.DateTimeFormat('en-CA', {
     timeZone: ZONA_HORARIA, year: 'numeric', month: '2-digit', day: '2-digit'
@@ -2210,6 +2216,10 @@
       return Promise.resolve();
     }
     const epoca = epocaSesion;
+    // El momento en que la paciente pulsa «Descargar PDF»: cada descarga
+    // queda marcada con el suyo en todas las páginas.
+    const descargadoEn = 'Descargado el ' + FORMATO_DESCARGA.format(new Date(Date.now())) +
+      ' (hora de Panamá)';
     const boton = ui.botonDescargarPdf;
     boton.disabled = true;
     mostrarEstadoDescarga(MENSAJES_RESUMEN.preparando);
@@ -2219,7 +2229,8 @@
         if (epoca !== epocaSesion || !abierto) {
           return;
         }
-        const definicion = window.FetalAlertResumenPdf.definicion(abierto.modelo);
+        const definicion = window.FetalAlertResumenPdf.definicion(abierto.modelo,
+          { descargadoEn: descargadoEn });
         pdfMake.createPdf(definicion).download(abierto.modelo.nombreArchivo);
         // El navegador decide dónde lo guarda; aquí solo se sabe que empezó.
         mostrarEstadoDescarga('Descarga iniciada: «' + abierto.modelo.nombreArchivo +
