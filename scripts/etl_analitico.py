@@ -4,6 +4,7 @@ Uso desde la raíz del repositorio::
 
     python scripts/etl_analitico.py ejecutar     # carga incremental + conciliación
     python scripts/etl_analitico.py conciliar    # solo conciliación, sin escribir
+    python scripts/etl_analitico.py previsualizar  # qué cargaría, sin escribir
 
 ``ejecutar`` es el proceso *batch* del Capítulo III: extrae de ``operacional``,
 clasifica cada métrica con los umbrales SIM-1.0, deriva el semáforo global, lo
@@ -15,6 +16,14 @@ futura invocaría este mismo comando.
 ``conciliar`` repite la conciliación completa en una transacción de solo
 lectura y termina.
 
+``previsualizar`` (SCRUM-104) recorre la misma extracción y la misma
+transformación que ``ejecutar`` --las mismas funciones, las mismas reglas
+SIM-1.0-- en una transacción REPEATABLE READ de solo lectura, sin tomar el
+candado, y se detiene antes de cargar. Informa qué lecturas serían candidatas
+a hecho, con su contexto y su clasificación por métrica, pero nunca un valor
+biométrico. Una candidata no es un hecho confirmado: la ejecución real todavía
+puede revertirse en la carga o en la conciliación.
+
 La conexión sale de ``ETL_DATABASE_URL``, que es la credencial del rol técnico
 del ETL y no la de la API: el ETL lee el universo operacional completo, y la API
 no debe poder hacerlo. No hay respaldo a ``DATABASE_URL``; si la variable falta,
@@ -25,12 +34,14 @@ valor biométrico: solo identificadores técnicos, conteos y códigos.
 
 Códigos de salida:
 
-    0  éxito (en ``conciliar``: conciliación sin diferencias)
+    0  éxito (en ``conciliar``: conciliación sin diferencias; en
+       ``previsualizar``: previsualización completa, aunque no haya candidatas)
     1  error de configuración, de precondición o de base de datos
     2  el origen contiene algo que las reglas no permiten cargar sin inventar
-       (valor sin regla, derivación ambigua, semáforo distinto del de origen)
-    3  la conciliación encontró diferencias
-    4  otra ejecución tiene el candado
+       (valor sin regla, derivación ambigua, semáforo distinto del de origen);
+       en ``previsualizar``: la ejecución real lo rechazaría
+    3  la conciliación encontró diferencias, u otra inconsistencia del ETL
+    4  otra ejecución tiene el candado (``previsualizar`` nunca lo pide)
 
 Todos los datos son simulados y completamente ficticios.
 """
@@ -62,7 +73,9 @@ from app.etl import (  # noqa: E402
     describir_error_de_base,
     ejecutar_etl,
     formatear_conciliacion,
+    formatear_previsualizacion,
     formatear_resumen,
+    previsualizar_sin_escribir,
 )
 from app.loader import (  # noqa: E402
     ErrorDeCarga,
@@ -96,6 +109,13 @@ def construir_parser() -> argparse.ArgumentParser:
         "conciliar",
         help="solo conciliación, en una transacción de solo lectura",
     )
+    ordenes.add_parser(
+        "previsualizar",
+        help=(
+            "qué cargaría la próxima ejecución, en una transacción de solo "
+            "lectura y sin tomar el candado"
+        ),
+    )
     return parser
 
 
@@ -124,6 +144,10 @@ def main(argv: list[str] | None = None) -> int:
                 print(formatear_resumen(resultado))
                 return CODIGO_DE_EXITO
 
+            if argumentos.orden == "previsualizar":
+                print(formatear_previsualizacion(previsualizar_sin_escribir(engine)))
+                return CODIGO_DE_EXITO
+
             informe = conciliar_sin_escribir(engine)
             print(formatear_conciliacion(informe))
             return (
@@ -138,6 +162,12 @@ def main(argv: list[str] | None = None) -> int:
         print(formatear_conciliacion(error.informe), file=sys.stderr)
         return _fallo(error.detalle, CODIGO_CONCILIACION_FALLIDA)
     except ErrorDeDatos as error:
+        if argumentos.orden == "previsualizar":
+            return _fallo(
+                f"{error.detalle} La ejecución real rechazaría este origen; la "
+                "previsualización no escribió nada.",
+                CODIGO_ORIGEN_RECHAZADO,
+            )
         return _fallo(
             f"{error.detalle} No se conservó ningún cambio.", CODIGO_ORIGEN_RECHAZADO
         )
