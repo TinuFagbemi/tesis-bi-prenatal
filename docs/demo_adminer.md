@@ -130,9 +130,14 @@ N filas».
 
 ### 4.1 Precondiciones
 
-Ningún mecanismo del sistema las impone: se comprueban a mano antes de empezar.
-Si alguna no se cumple, las consultas pueden mostrar filas ajenas a la captura de
+Ningún mecanismo del sistema las impone: se comprueban antes de empezar. Si
+alguna no se cumple, las consultas pueden mostrar filas ajenas a la captura de
 la demostración.
+
+La opción 1 de [Demo Control](demo_control.md) comprueba en solo lectura las
+precondiciones 1 a 5 y las resume en un estado general. No toma los valores de
+referencia: esos siguen saliendo de la consulta de la sección 4.2, que se
+ejecuta **después** de que la verificación diga `LISTO PARA DEMO`.
 
 1. **Entorno aprovisionado.** La base de la demostración está en la última
    migración, con los roles de conexión creados y el dataset cargado. `E`, el
@@ -145,10 +150,16 @@ la demostración.
 3. **ETL al día para `E`.** `lecturas_e_sin_etl` debe ser `0`. Si no lo es,
    ejecutar el ETL y repetir la preparación.
 4. **Ninguna captura anterior pendiente para `E`.** La cola local de la cuenta de
-   la gestante no tiene eventos `PENDIENTE`; por ejemplo,
-   `python scripts/edge_node.py --base <cola SQLite de la cuenta> estado`. Una
-   captura vieja que se sincronizara durante la demo aparecería junto a la
-   nueva.
+   la gestante no tiene eventos `PENDIENTE`. Se comprueba con la opción 1 de
+   [Demo Control](demo_control.md), línea «Cola local», que abre el archivo
+   en solo lectura y no lo crea si no existe. Una captura vieja que se
+   sincronizara durante la demo aparecería junto a la nueva.
+
+   `python scripts/edge_node.py --base <cola> estado` y `… traza` **no son
+   comandos de solo lectura garantizada**: abren el almacenamiento pasando
+   por su inicialización, que crea la carpeta y crearía o migraría el archivo
+   si faltara o fuera de una versión anterior. No se usan para una inspección
+   que deba dejar la cola intacta.
 5. **Ninguna captura de `E` posterior al momento de la demo.**
    `ultima_captura_e` debe ser anterior a la hora de la defensa, para que la
    sesión nueva reciba la siguiente `secuencia_sesion`.
@@ -156,7 +167,9 @@ la demostración.
    preparación hasta el final, solo se hace la captura de la demostración: ningún
    otro dispositivo, portal, nodo edge, ETL, aprovisionamiento ni inicio de
    sesión ajeno. Cualquier acción así aparecería en la pestaña D y podría
-   aparecer en A, B o C.
+   aparecer en A, B o C. La verificación y la previsualización de Demo
+   Control no cuentan como actividad: solo leen, y ninguna escribe una fila
+   ni un evento de auditoría.
 7. **Después de un ensayo, la preparación se repite.** Los valores de referencia
    cambian con cada captura.
 
@@ -323,6 +336,10 @@ docker compose --profile demo ps -a # db y adminer en marcha; api detenida
 docker compose start api
 ```
 
+Las opciones 3 y 4 de [Demo Control](demo_control.md) ejecutan esos mismos dos
+comandos y además comprueban su efecto: que `db` sigue sano, que Adminer queda
+como estaba y que la API del portal dejó de responder, o volvió a hacerlo.
+
 `docker compose stop api` detiene solo el contenedor de la API (puerto 8000).
 Adminer depende únicamente de `db`, así que las cuatro pestañas siguen
 funcionando. Para que ese comando corte de verdad la comunicación de la
@@ -485,6 +502,11 @@ Desde la raíz del repositorio, con el entorno de la sección 10. Los comandos d
 Python usan `backend\.venv\Scripts\python.exe`. `E` e `<id_usuario>` son los que
 imprime `scripts/provisionar_demo.py verificar`.
 
+Los pasos de terminal pueden hacerse desde [Demo Control](demo_control.md)
+(`scripts\demo_control.py`): la opción 1 antes del paso 3, la 3 en el paso 6, la
+4 en el paso 9, y la 5 seguida de la 6 en el paso 11. Lo que se observa en
+Adminer no cambia.
+
 1. **Arrancar.** `docker compose start api`; Adminer según la sección 1; el
    portal con `python scripts\gestante_web.py` (`http://127.0.0.1:8100`).
 2. **Adminer, en el navegador.** Pestañas 1, 2 y 4 con la sesión
@@ -502,8 +524,11 @@ imprime `scripts/provisionar_demo.py verificar`.
 7. **Captura.** `python scripts\dispositivo_gestante.py capturar --tipo SIGNOS_MATERNOS`.
    Anotar el `Idempotency-Key` que imprime.
 8. **Con la API detenida, comprobar:**
-   - el evento sigue **`PENDIENTE`**:
-     `python scripts\edge_node.py --base data\gestante\movimientos\cuenta-<id_usuario>.sqlite3 traza <Idempotency-Key>`;
+   - el evento sigue **`PENDIENTE`**: opción 1 de Demo Control, línea «Cola
+     local» (`PENDIENTE=1`), que lee la cola en solo lectura. El detalle de un
+     evento concreto lo da
+     `python scripts\edge_node.py --base data\gestante\movimientos\cuenta-<id_usuario>.sqlite3 traza <Idempotency-Key>`,
+     que no es de solo lectura garantizada (precondición 4);
    - A sigue vacía: la captura no está en el servidor central;
    - `docker compose --profile demo ps -a` muestra `db` y `adminer` en marcha y
      `api` detenida, y las pestañas siguen respondiendo.
@@ -512,9 +537,10 @@ imprime `scripts/provisionar_demo.py verificar`.
    comprueba primero la credencial contra la API y solo entonces reclama lo
    elegible. Mientras la API estuvo detenida no reclamó nada, así que no gastó
    intentos. Si algún intento llegó a fallar, se respeta la espera incremental
-   que dejó programada, dentro de los reintentos existentes. Repetir la `traza`
-   del paso 8 hasta ver el cambio **`PENDIENTE` → `ENVIADO`**. Si el token de la
-   gestante caducó, volver a iniciar sesión en el portal.
+   que dejó programada, dentro de los reintentos existentes. Repetir la
+   comprobación del paso 8 hasta ver el cambio **`PENDIENTE` → `ENVIADO`** (en
+   la opción 1, «Sin pendientes»). Si el token de la gestante caducó, volver a
+   iniciar sesión en el portal.
 10. **Llegada.** Ejecutar A: aparece la sesión, con `clave` igual al
     `Idempotency-Key` del paso 7. En el portal, el registro nuevo aparece en
     Inicio y en el Historial.

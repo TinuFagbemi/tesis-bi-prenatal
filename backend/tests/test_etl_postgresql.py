@@ -37,7 +37,7 @@ import uuid
 from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -49,6 +49,7 @@ from fastapi import Depends
 from fastapi.testclient import TestClient
 from sqlalchemy import CheckConstraint, create_engine, event, func, inspect, select, text
 from sqlalchemy.engine import Engine, make_url
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import NullPool
 
@@ -68,9 +69,13 @@ from app.etl import (
     DiscrepanciaDeSemaforo,
     LecturaInvalida,
     VersionDeReglasDesconocida,
+    carga as carga_del_etl,
+    conciliacion as conciliacion_del_etl,
     conciliar_sin_escribir,
     ejecutar_etl,
     extraccion,
+    formatear_previsualizacion,
+    previsualizar_sin_escribir,
 )
 from app.loader import (
     MotorNoSoportado,
@@ -90,6 +95,7 @@ from tests.conftest import (
     clausula_owner,
     url_del_migrador,
 )
+from tests.test_demo_control import control_con_postgresql_real, dc  # noqa: F401
 from tests.test_etl_cli import cli  # noqa: F401  -- fixture del script
 from tests.test_etl_esquema import REVISION_ANALITICA
 from tests.test_generate_mock_data import cargar_generador
@@ -1748,3 +1754,518 @@ def identidad_de_la_suite():
         yield cache
     finally:
         app.dependency_overrides.pop(usuario_actual, None)
+
+
+# ---------------------------------------------------------------------------
+# Previsualización de la próxima carga (SCRUM-104)
+# ---------------------------------------------------------------------------
+#
+# Lo que estas pruebas tienen que demostrar es una sola cosa, vista desde
+# varios lados: la previsualización recorre la extracción y la transformación
+# reales, predice lo que el ETL cargaría, y **no escribe nada** -- ni un hecho,
+# ni una dimensión, ni un seudónimo, ni el valor de una secuencia -- ni toma el
+# candado del ETL.
+
+TABLAS_VIGILADAS = (
+    f"{O}.lectura_biometrica",
+    f"{O}.sesion_monitoreo",
+    f"{O}.embarazo",
+    f"{O}.paciente",
+    f"{O}.seguimiento_clinico",
+    f"{O}.auditoria_log",
+    f"{O}.idempotencia_solicitud",
+    "privado.seudonimo_paciente",
+    "privado.seudonimo_embarazo",
+)
+
+
+# Las lecturas del dataset canonico: la misma cifra que el propio CLI informa
+# como ``hechos_nuevos`` en la carga base.
+LECTURAS_DEL_DATASET = 1180
+
+
+def estado_completo(base: BaseTemporal) -> dict[str, Any]:
+    """Todo lo que una escritura podría mover, resumido para comparar.
+
+    El contenido completo de las nueve tablas analíticas, de las dos del mapa
+    privado y de las operacionales que el ETL lee, más el valor de **todas** las
+    secuencias de la base: un ``nextval`` no cambia ninguna fila, y aquí se ve.
+    """
+    estado: dict[str, Any] = dict(huella(base))
+    for tabla in TABLAS_VIGILADAS:
+        estado[tabla] = base.escalar(
+            "SELECT md5(coalesce(string_agg(t::text, '|' ORDER BY t::text), '')) "
+            f"FROM {tabla} t"
+        )
+    estado["secuencias"] = tuple(
+        tuple(fila)
+        for fila in base.filas(
+            "SELECT schemaname, sequencename, last_value FROM pg_sequences ORDER BY 1, 2"
+        )
+    )
+    return estado
+
+
+def transacciones_abiertas(base: BaseTemporal) -> int:
+    return base.escalar(
+        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
+        "AND pid <> pg_backend_pid() AND state LIKE 'idle in transaction%'"
+    )
+
+
+def lectura_tardia(
+    base: BaseTemporal, *, hr: str = "80", spo2: str = "97", semaforo: int = ID_OK
+) -> int:
+    sesion = nueva_sesion(base, "2025-02-25T15:00:00+00:00", "2025-02-25T15:05:00+00:00")
+    return nueva_lectura(
+        base, sesion, "2025-02-25T15:01:00+00:00", semana=SEMANA_8, hr=hr, spo2=spo2,
+        semaforo=semaforo,
+    )
+
+
+def test_previsualizar_no_escribe_nada_y_predice_lo_que_el_etl_carga(clon):
+    ejecutar_etl(clon.engine)
+    # FC 104.25 es WARNING con SIM-1.0 y SpO2 96.75 es OK: el global es WARNING.
+    id_lectura = lectura_tardia(clon, hr="104.25", spo2="96.75", semaforo=ID_WARNING)
+    antes = estado_completo(clon)
+
+    primera = previsualizar_sin_escribir(clon.engine)
+    segunda = previsualizar_sin_escribir(clon.engine)
+
+    # 1. Cero escrituras, dos veces seguidas.
+    assert estado_completo(clon) == antes
+    assert transacciones_abiertas(clon) == 0
+
+    # 2. Detecta exactamente la lectura tardía, y repetirla da lo mismo.
+    assert primera.candidatas == segunda.candidatas
+    assert primera.hechos_existentes == LECTURAS_DEL_DATASET
+    [candidata] = primera.candidatas
+    assert candidata.id_lectura == id_lectura
+    assert candidata.id_embarazo == EMBARAZO_DE_PRUEBA
+    assert (candidata.semana_gestacion, candidata.trimestre) == (8, 1)
+    assert candidata.fecha_clinica == "2025-02-25"
+    assert (candidata.estado_hr, candidata.estado_spo2, candidata.estado_mov) == (
+        "WARNING", "OK", None,
+    )
+    assert candidata.semaforo_derivado == candidata.semaforo_origen == "WARNING"
+    assert candidata.embarazo_en_dimension is True
+
+    # 3. El ETL real carga después exactamente lo previsto.
+    resultado = ejecutar_etl(clon.engine)
+    assert resultado.hechos_nuevos == 1
+    [hecho] = clon.filas(
+        "SELECT f.id_sesion, f.id_embarazo, f.id_clinica, f.id_medico, f.estado_hr, "
+        "f.estado_spo2, f.estado_mov, s.codigo_nivel, t.semana_gestacion, t.trimestre, "
+        "(f.fecha_hora AT TIME ZONE 'America/Panama')::date::text "
+        f"FROM {A}.fact_lectura_biometrica f "
+        f"JOIN {A}.dim_semaforo s USING (id_semaforo) "
+        f"JOIN {A}.dim_tiempo_gestacional t ON t.id_tiempo_gest = f.id_tiempo_gestacional "
+        "WHERE f.id_lectura = :id",
+        id=id_lectura,
+    )
+    assert tuple(hecho) == (
+        candidata.id_sesion,
+        candidata.id_embarazo,
+        candidata.id_clinica,
+        candidata.id_medico,
+        candidata.estado_hr,
+        candidata.estado_spo2,
+        candidata.estado_mov,
+        candidata.semaforo_derivado,
+        candidata.semana_gestacion,
+        candidata.trimestre,
+        candidata.fecha_clinica,
+    )
+
+    # 4. Y ya no queda nada por previsualizar.
+    despues = previsualizar_sin_escribir(clon.engine)
+    assert despues.candidatas == ()
+    assert despues.hechos_existentes == LECTURAS_DEL_DATASET + 1
+
+
+def test_previsualizar_la_carga_base_no_crea_ni_una_fila(clon):
+    antes = estado_completo(clon)
+
+    previsualizacion = previsualizar_sin_escribir(clon.engine)
+
+    assert len(previsualizacion.candidatas) == LECTURAS_DEL_DATASET
+    assert LECTURAS_DEL_DATASET == clon.escalar(
+        f"SELECT count(*) FROM {O}.lectura_biometrica"
+    )
+    assert previsualizacion.hechos_existentes == 0
+    assert not any(c.embarazo_en_dimension for c in previsualizacion.candidatas)
+    assert dict(previsualizacion.filas_de_dimension)["dim_embarazo"] == clon.escalar(
+        f"SELECT count(*) FROM {O}.embarazo"
+    )
+    assert set(conteos_analiticos(clon).values()) == {0}
+    assert clon.escalar("SELECT count(*) FROM privado.seudonimo_embarazo") == 0
+    assert estado_completo(clon) == antes
+
+
+def test_la_previsualizacion_coincide_con_la_carga_base_lectura_por_lectura(clon):
+    previsualizacion = previsualizar_sin_escribir(clon.engine)
+
+    ejecutar_etl(clon.engine)
+
+    cargados = {
+        fila[0]: tuple(fila[1:])
+        for fila in clon.filas(
+            "SELECT f.id_lectura, f.id_medico, f.estado_hr, f.estado_spo2, f.estado_mov, "
+            f"s.codigo_nivel FROM {A}.fact_lectura_biometrica f "
+            f"JOIN {A}.dim_semaforo s USING (id_semaforo)"
+        )
+    }
+    previstos = {
+        c.id_lectura: (
+            c.id_medico, c.estado_hr, c.estado_spo2, c.estado_mov, c.semaforo_derivado
+        )
+        for c in previsualizacion.candidatas
+    }
+    assert previstos == cargados
+
+
+def test_la_previsualizacion_corre_en_repeatable_read_de_solo_lectura(clon, monkeypatch):
+    observado = {}
+    original = extraccion.contar_hechos
+
+    def espiar(conexion):
+        observado["solo_lectura"], observado["aislamiento"] = conexion.execute(
+            text(
+                "SELECT current_setting('transaction_read_only'), "
+                "current_setting('transaction_isolation')"
+            )
+        ).one()
+        return original(conexion)
+
+    monkeypatch.setattr(extraccion, "contar_hechos", espiar)
+
+    previsualizar_sin_escribir(clon.engine)
+
+    assert observado == {"solo_lectura": "on", "aislamiento": "repeatable read"}
+
+
+@pytest.mark.parametrize(
+    "escritura",
+    [
+        f"INSERT INTO {A}.dim_clinica (id_clinica, nombre_clinica, provincia, distrito) "
+        "VALUES (999999, 'x', 'x', 'x')",
+        f"UPDATE {A}.dim_semaforo SET mensaje_app = mensaje_app",
+        f"DELETE FROM {A}.fact_lectura_biometrica",
+        f"SELECT nextval('{O}.lectura_biometrica_id_lectura_seq')",
+        "INSERT INTO privado.seudonimo_embarazo (id_embarazo) VALUES (999999)",
+        "CREATE TABLE public.no_debe_existir (x integer)",
+    ],
+    ids=["insert", "update", "delete", "nextval", "seudonimo", "ddl"],
+)
+def test_postgresql_rechaza_cualquier_escritura_dentro_de_la_previsualizacion(
+    clon, monkeypatch, escritura
+):
+    """No depende de la disciplina del código: lo impide el motor."""
+    ejecutar_etl(clon.engine)
+    antes = estado_completo(clon)
+
+    def intruso(conexion):
+        conexion.execute(text(escritura))
+        raise AssertionError("PostgreSQL aceptó una escritura en una transacción READ ONLY")
+
+    monkeypatch.setattr(extraccion, "contar_hechos", intruso)
+
+    with pytest.raises(DBAPIError) as error:
+        previsualizar_sin_escribir(clon.engine)
+
+    # 25006 = read_only_sql_transaction.
+    assert getattr(error.value.orig, "sqlstate", None) == "25006"
+    assert estado_completo(clon) == antes
+    assert transacciones_abiertas(clon) == 0
+
+
+def test_la_previsualizacion_no_invoca_la_carga_ni_la_conciliacion(clon, monkeypatch):
+    ejecutar_etl(clon.engine)
+    lectura_tardia(clon)
+
+    def prohibido(*_, **__):
+        raise AssertionError("La previsualización no debe cargar ni conciliar.")
+
+    for modulo, nombre in (
+        (carga_del_etl, "upsert_tipo_1"),
+        (carga_del_etl, "insertar_hechos"),
+        (carga_del_etl, "emitir_seudonimos"),
+        (conciliacion_del_etl, "conciliar"),
+    ):
+        monkeypatch.setattr(modulo, nombre, prohibido)
+
+    assert len(previsualizar_sin_escribir(clon.engine).candidatas) == 1
+
+
+def test_la_previsualizacion_solo_emite_select(clon):
+    ejecutar_etl(clon.engine)
+    lectura_tardia(clon)
+    sentencias: list[str] = []
+
+    def registrar(conexion, cursor, sentencia, parametros, contexto, varios):
+        sentencias.append(sentencia)
+
+    event.listen(clon.engine, "before_cursor_execute", registrar)
+    try:
+        previsualizar_sin_escribir(clon.engine)
+    finally:
+        event.remove(clon.engine, "before_cursor_execute", registrar)
+
+    assert sentencias
+    for sentencia in sentencias:
+        normalizada = " ".join(sentencia.split()).upper()
+        assert normalizada.startswith(("SELECT", "WITH", "SHOW")), sentencia
+        for prohibido in (
+            "INSERT ", "UPDATE ", "DELETE ", "ADVISORY_LOCK", "ADVISORY_XACT", "NEXTVAL",
+        ):
+            assert prohibido not in normalizada, sentencia
+
+
+def test_la_previsualizacion_no_toma_ni_espera_el_candado(clon):
+    ejecutar_etl(clon.engine)
+    lectura_tardia(clon)
+
+    with otra_ejecucion_con_el_candado(clon, confirmar=False):
+        inicio = time.perf_counter()
+        previsualizacion = previsualizar_sin_escribir(clon.engine)
+        # No espera a nadie, lo ve ocupado, y el único candado es el ajeno.
+        assert time.perf_counter() - inicio < 30
+        assert previsualizacion.candado_ocupado is True
+        assert len(previsualizacion.candidatas) == 1
+        assert candados_del_etl(clon) == 1
+
+    libre = previsualizar_sin_escribir(clon.engine)
+    assert libre.candado_ocupado is False
+    assert candados_del_etl(clon) == 0
+    assert el_candado_esta_libre(clon)
+    # Y una ejecución real justo después adquiere el candado y carga.
+    assert ejecutar_etl(clon.engine).hechos_nuevos == 1
+
+
+def test_un_origen_que_el_etl_rechazaria_tambien_lo_rechaza_la_previsualizacion(clon):
+    ejecutar_etl(clon.engine)
+    # El origen dice OK, pero FC 104.25 deriva WARNING.
+    id_lectura = lectura_tardia(clon, hr="104.25", semaforo=ID_OK)
+    antes = estado_completo(clon)
+
+    with pytest.raises(DiscrepanciaDeSemaforo) as previsto:
+        previsualizar_sin_escribir(clon.engine)
+    with pytest.raises(DiscrepanciaDeSemaforo) as real:
+        ejecutar_etl(clon.engine)
+
+    assert f"id_lectura=[{id_lectura}]" in previsto.value.detalle
+    assert previsto.value.detalle == real.value.detalle
+    assert estado_completo(clon) == antes
+
+
+def test_una_candidata_no_garantiza_el_commit(clon):
+    """La previsualización acierta lo que se intentaría cargar, no que se confirme."""
+    ejecutar_etl(clon.engine)
+    id_lectura = lectura_tardia(clon)
+    previstas = [c.id_lectura for c in previsualizar_sin_escribir(clon.engine).candidatas]
+    assert previstas == [id_lectura]
+    antes = estado_completo(clon)
+
+    real = conciliacion_del_etl.conciliar
+
+    def conciliacion_con_diferencias(conexion):
+        informe = real(conexion)
+        primera = informe.verificaciones[0]
+        return type(informe)(
+            verificaciones=(type(primera)(primera.nombre, primera.descripcion, 1, True),)
+        )
+
+    with pytest.MonkeyPatch.context() as parche:
+        parche.setattr(conciliacion_del_etl, "conciliar", conciliacion_con_diferencias)
+        with pytest.raises(ConciliacionFallida):
+            ejecutar_etl(clon.engine)
+
+    # La ejecución se revirtió entera: la lectura sigue siendo candidata.
+    assert estado_completo(clon) == antes
+    de_nuevo = [c.id_lectura for c in previsualizar_sin_escribir(clon.engine).candidatas]
+    assert de_nuevo == [id_lectura]
+
+
+def test_previsualizar_lista_todas_las_lecturas_nuevas_sin_escoger(clon):
+    ejecutar_etl(clon.engine)
+    primera = lectura_tardia(clon)
+    sesion = nueva_sesion(clon, "2025-02-26T15:00:00+00:00", "2025-02-26T15:05:00+00:00")
+    id_error = clon.escalar(f"SELECT id_semaforo FROM {O}.semaforo WHERE codigo_nivel = 'ERROR'")
+    segunda = nueva_lectura(
+        clon, sesion, "2025-02-26T15:01:00+00:00", semana=SEMANA_8, hr="120", spo2="90",
+        semaforo=id_error,
+    )
+
+    previsualizacion = previsualizar_sin_escribir(clon.engine)
+
+    assert [c.id_lectura for c in previsualizacion.candidatas] == [primera, segunda]
+    assert [c.semaforo_derivado for c in previsualizacion.candidatas] == ["OK", "ERROR"]
+
+
+def test_la_orden_previsualizar_no_imprime_valores_ni_datos_personales(
+    cli, clon, capsys, monkeypatch
+):
+    monkeypatch.setenv("ETL_DATABASE_URL", clon.url)
+    assert cli.main(["ejecutar"]) == cli.CODIGO_DE_EXITO
+    capsys.readouterr()
+    id_lectura = lectura_tardia(clon, hr="104.25", spo2="96.75", semaforo=ID_WARNING)
+    antes = estado_completo(clon)
+
+    assert cli.main(["previsualizar"]) == cli.CODIGO_DE_EXITO
+    salida = capsys.readouterr()
+
+    assert estado_completo(clon) == antes
+    assert "resultado=PREVIEW" in salida.out
+    assert "candidatas=1" in salida.out
+    assert f"candidata id_lectura={id_lectura} " in salida.out
+    assert "estado_hr=WARNING estado_spo2=OK estado_mov=NA" in salida.out
+    assert "escrituras=0" in salida.out
+    texto = salida.out + salida.err
+    for valor in ("104.25", "96.75"):
+        assert valor not in texto
+    for dato in _datos_personales(clon):
+        assert dato not in texto
+    assert make_url(clon.url).password not in texto
+    # El formateador y el texto impreso son el mismo contrato.
+    assert salida.out.strip().splitlines()[1:3] == ["modo=SOLO_LECTURA", "resultado=PREVIEW"]
+    assert formatear_previsualizacion(previsualizar_sin_escribir(clon.engine)).count(
+        "\ncandidata "
+    ) == 1
+
+    # Un origen rechazable: código 2, el mismo que daría la ejecución.
+    lectura_tardia(clon, hr="104.25", semaforo=ID_OK)
+    assert cli.main(["previsualizar"]) == cli.CODIGO_ORIGEN_RECHAZADO
+    rechazo = capsys.readouterr()
+    assert "La ejecución real rechazaría este origen" in rechazo.err
+    assert "104.25" not in rechazo.out + rechazo.err
+
+
+def test_demo_control_previsualiza_y_ejecuta_el_etl_real_de_extremo_a_extremo(
+    dc, clon, monkeypatch, tmp_path
+):
+    """Las opciones 5 y 6 de Demo Control, con el CLI real y PostgreSQL real.
+
+    Docker y HTTP están simulados; el proceso hijo no: es
+    ``scripts/etl_analitico.py`` de verdad, con la credencial del rol técnico
+    ``fetalalert_etl`` sobre una base temporal de esta suite.
+    """
+    del_entorno = os.environ.get("ETL_DATABASE_URL")
+    if not del_entorno:
+        pytest.fail("Define ETL_DATABASE_URL: se toma de ahí la clave de fetalalert_etl.")
+    url_etl = (
+        make_url(clon.url)
+        .set(username="fetalalert_etl", password=make_url(del_entorno).password)
+        .render_as_string(hide_password=False)
+    )
+
+    # El episodio de demostración, creado por la misma función que usa
+    # ``provisionar``, y la carga base que le da su seudónimo.
+    with clon.engine.begin() as conexion:
+        episodio = dc.provisionar_demo._provisionar(conexion, date.today())
+        catalogos = dc.provisionar_demo.leer_catalogos(conexion)
+    ejecutar_etl(clon.engine)
+
+    control = control_con_postgresql_real(
+        dc,
+        monkeypatch,
+        raiz=dc.RAIZ_DEL_REPOSITORIO,
+        datos=tmp_path / "datos",
+        url_mantenimiento=clon.url,
+        url_etl=url_etl,
+    )
+    dc.provisionar_demo.escribir_provision(control.ajustes.provision_path, episodio, catalogos)
+    monkeypatch.setenv("ETL_DATABASE_URL", url_etl)
+    control.mundo.python_real = dc._ejecutar_proceso
+
+    marca = [0]
+
+    def texto() -> str:
+        """Lo que se imprimió desde la última marca."""
+        return "\n".join(control.salida[marca[0]:])
+
+    # Una captura de hoy del embarazo demo: FC en WARNING, SpO2 en OK.
+    ahora = datetime.now(timezone.utc)
+    semana = dc.semana_gestacional(episodio["fecha_inicio"], ahora)
+    id_semana = next(
+        fila["id_tiempo_gest"]
+        for fila in catalogos["tiempo_gestacional"]
+        if fila["semana"] == semana
+    )
+    sesion = nueva_sesion(
+        clon, ahora.isoformat(), ahora.isoformat(),
+        id_embarazo=episodio["id_embarazo"], id_dispositivo=episodio["id_dispositivo"],
+    )
+    id_lectura = nueva_lectura(
+        clon, sesion, ahora.isoformat(), semana=id_semana, hr="104.25", spo2="96.75",
+        semaforo=ID_WARNING,
+    )
+    antes = estado_completo(clon)
+
+    # -- Opción 5: previsualiza y no escribe --------------------------------
+    dc.opcion_previsualizar(control.dep)
+
+    assert estado_completo(clon) == antes
+    assert "Candidatas a hecho nuevo:        1" in texto()
+    assert f"Lectura #{id_lectura} (sesión #{sesion}) — DEMO" in texto()
+    assert f"Semana / trimestre:         {semana} / " in texto()
+    assert "Frecuencia cardíaca:        WARNING" in texto()
+    assert "SpO₂:                       OK" in texto()
+    assert "Validación:                 COINCIDE" in texto()
+    assert "NO SE REALIZÓ NINGUNA ESCRITURA" in texto()
+    assert control.mundo.del_etl == ["previsualizar"]
+
+    # -- Opción 6: sin la confirmación no se lanza --------------------------
+    control.respuestas.append("s")
+    dc.opcion_ejecutar_etl(control.dep)
+    assert "Cancelado. No se ejecutó el ETL." in texto()
+    assert estado_completo(clon) == antes
+    assert control.mundo.del_etl == ["previsualizar"]
+
+    # -- Opción 6: el ETL real, entero ---------------------------------------
+    control.respuestas.append("EJECUTAR")
+    dc.opcion_ejecutar_etl(control.dep)
+
+    assert "RESULTADO: ETL COMPLETADO: la transacción se confirmó entera." in texto()
+    assert "Hechos nuevos:        1" in texto()
+    assert "Conciliación:         OK" in texto()
+    assert clon.filas(
+        f"SELECT estado_hr, estado_spo2, estado_mov FROM {A}.fact_lectura_biometrica "
+        "WHERE id_lectura = :id",
+        id=id_lectura,
+    ) == [("WARNING", "OK", None)]
+    cargado = estado_completo(clon)
+
+    # -- Una segunda ejecución es idempotente --------------------------------
+    marca[0] = len(control.salida)
+    control.respuestas.append("EJECUTAR")
+    dc.opcion_ejecutar_etl(control.dep)
+    assert "Hechos nuevos:        0" in texto()
+    assert estado_completo(clon) == cargado
+
+    # -- Código 4: otra ejecución tiene el candado ---------------------------
+    marca[0] = len(control.salida)
+    with otra_ejecucion_con_el_candado(clon, confirmar=False):
+        control.respuestas.append("EJECUTAR")
+        dc.opcion_ejecutar_etl(control.dep)
+    assert "RESULTADO: FALLO (código 4)" in texto()
+    assert "Otra ejecución del ETL tiene el candado." in texto()
+    assert estado_completo(clon) == cargado
+
+    # -- Código 2: un origen que las reglas rechazan --------------------------
+    marca[0] = len(control.salida)
+    rechazada = lectura_tardia(clon, hr="104.25", semaforo=ID_OK)
+    con_rechazo = estado_completo(clon)
+    dc.opcion_previsualizar(control.dep)
+    assert "La ejecución real RECHAZARÍA este origen. No se escribió nada." in texto()
+    control.respuestas.append("EJECUTAR")
+    dc.opcion_ejecutar_etl(control.dep)
+    assert "RESULTADO: FALLO (código 2)" in texto()
+    assert f"id_lectura=[{rechazada}]" in texto()
+    assert estado_completo(clon) == con_rechazo
+
+    # Demo Control nunca detuvo ni inició nada, y no mostró ningún secreto ni
+    # valor biométrico en todo el recorrido.
+    assert control.mundo.de_control == []
+    completo = "\n".join(control.salida)
+    for prohibido in (*control.claves, "104.25", "96.75", url_etl, clon.url):
+        assert prohibido not in completo

@@ -27,6 +27,12 @@ rolls back, nothing is duplicated, and running it again succeeds.
 
 There is no checkpoint table: the state of progress *is* the set of keys the
 fact holds, and it only moves when the transaction commits.
+
+**Two read-only companions.** :func:`conciliar_sin_escribir` repeats the
+reconciliation, and :func:`previsualizar_sin_escribir` (SCRUM-104) repeats the
+extraction and the transformation of a run and stops before loading. Both open
+a REPEATABLE READ transaction declared READ ONLY and neither takes the lock, so
+they can run at any time and cannot write: PostgreSQL itself refuses.
 """
 
 from __future__ import annotations
@@ -54,7 +60,7 @@ from app.etl.modelos import (
     DimSemaforo,
     DimTiempoGestacional,
 )
-from app.etl.reglas import VERSION_SIM_1_0, ErrorDeEtl
+from app.etl.reglas import VERSION_SIM_1_0, ErrorDeEtl, fecha_clinica
 from app.loader.postgres import preflight, sanear_mensaje
 
 # Key of the advisory lock that serialises runs. Any bigint works as long as
@@ -68,18 +74,25 @@ RESULTADO_FALLO = "FAILED"
 
 __all__ = [
     "AISLAMIENTO",
+    "AVISO_DE_CANDIDATA",
     "CLAVE_DEL_CANDADO",
     "RESULTADO_EXITO",
     "RESULTADO_FALLO",
+    "RESULTADO_PREVISUALIZACION",
     "CandadoOcupado",
+    "CandidataDeCarga",
     "CargaInconsistente",
     "ConciliacionFallida",
+    "Previsualizacion",
     "ResultadoEjecucion",
+    "candado_ocupado",
     "conciliar_sin_escribir",
     "describir_error_de_base",
     "ejecutar_etl",
     "formatear_conciliacion",
+    "formatear_previsualizacion",
     "formatear_resumen",
+    "previsualizar_sin_escribir",
 ]
 
 
@@ -244,12 +257,39 @@ def _tomar_candado(conexion: Connection) -> None:
         )
 
 
+def _preparar_dimensiones(conexion: Connection, *, version: str) -> tuple:
+    """Extract and transform the dimensions. Reads only; shared with the preview."""
+    origen = extraccion.extraer_dimensiones(conexion)
+    return origen, transformacion.transformar_dimensiones(origen, version=version)
+
+
+def _preparar_hechos(
+    conexion: Connection, origen, dimensiones, *, version: str
+) -> tuple[list, list]:
+    """Select the new readings and transform them into facts. Reads only.
+
+    Shared by the run and the preview, so the two cannot select or classify
+    differently: there is one sequence of extraction and transformation.
+    """
+    lecturas = extraccion.extraer_lecturas_nuevas(conexion)
+    seguimientos = extraccion.extraer_seguimientos_principales(
+        conexion, (lectura["id_embarazo"] for lectura in lecturas)
+    )
+    hechos = transformacion.transformar_hechos(
+        lecturas,
+        seguimientos,
+        origen.afiliaciones_de_medico,
+        dimensiones.id_semaforo_por_codigo,
+        version=version,
+    )
+    return lecturas, hechos
+
+
 def _cargar(conexion: Connection, *, version: str) -> tuple:
     """The body of a run, inside the transaction that already holds the lock."""
     revision = preflight(conexion)
 
-    origen = extraccion.extraer_dimensiones(conexion)
-    dimensiones = transformacion.transformar_dimensiones(origen, version=version)
+    origen, dimensiones = _preparar_dimensiones(conexion, version=version)
     resultados = tuple(
         carga.upsert_tipo_1(conexion, modelo.__table__, filas)
         for modelo, filas in (
@@ -267,17 +307,7 @@ def _cargar(conexion: Connection, *, version: str) -> tuple:
     )
 
     existentes = extraccion.contar_hechos(conexion)
-    lecturas = extraccion.extraer_lecturas_nuevas(conexion)
-    seguimientos = extraccion.extraer_seguimientos_principales(
-        conexion, (lectura["id_embarazo"] for lectura in lecturas)
-    )
-    hechos = transformacion.transformar_hechos(
-        lecturas,
-        seguimientos,
-        origen.afiliaciones_de_medico,
-        dimensiones.id_semaforo_por_codigo,
-        version=version,
-    )
+    lecturas, hechos = _preparar_hechos(conexion, origen, dimensiones, version=version)
     nuevos = carga.insertar_hechos(conexion, hechos)
     if nuevos != len(lecturas):
         raise CargaInconsistente(
@@ -353,6 +383,190 @@ def conciliar_sin_escribir(engine: Engine) -> InformeDeConciliacion:
         with conexion.begin():
             preflight(conexion)
             return conciliacion.conciliar(conexion)
+
+
+# ---------------------------------------------------------------------------
+# Previsualizacion de la proxima carga (SCRUM-104)
+# ---------------------------------------------------------------------------
+
+# Lo que la previsualizacion puede afirmar y lo que no. Una lectura que las
+# reglas transforman sin error es una candidata: el commit de la ejecucion real
+# todavia depende de la carga, de los seudonimos, de la conciliacion completa y
+# de que nada cambie entre esta instantanea y esa ejecucion.
+AVISO_DE_CANDIDATA = (
+    "Una candidata no es un hecho confirmado: la ejecución real todavía puede "
+    "revertirse en la carga, en los seudónimos o en la conciliación, y el origen "
+    "puede cambiar entre esta instantánea y la ejecución."
+)
+
+# El candado del ETL leido de ``pg_locks``, sin pedirlo. Una clave bigint se
+# reparte en ``classid`` (32 bits altos) y ``objid`` (32 bits bajos), con
+# ``objsubid = 1``. El ``CAST`` a bigint no es decorativo: el driver envia un
+# entero pequeno como int4, y en int4 un desplazamiento de 32 bits no desplaza
+# nada.
+_CANDADO_TOMADO = text(
+    """
+    SELECT EXISTS (
+        SELECT 1 FROM pg_catalog.pg_locks
+        WHERE locktype = 'advisory'
+          AND granted
+          AND database = (SELECT oid FROM pg_catalog.pg_database
+                          WHERE datname = current_database())
+          AND classid = (CAST(:clave AS bigint) >> 32)::oid
+          AND objid = (CAST(:clave AS bigint) & 4294967295)::oid
+          AND objsubid = 1
+    )
+    """
+)
+
+
+def candado_ocupado(conexion: Connection) -> bool:
+    """Si otra transaccion tiene ahora el candado del ETL. No lo pide.
+
+    Solo consulta ``pg_locks``: no llama a ninguna funcion ``pg_*advisory*``,
+    asi que no puede retrasar ni bloquear una ejecucion real.
+    """
+    return bool(
+        conexion.execute(_CANDADO_TOMADO, {"clave": CLAVE_DEL_CANDADO}).scalar_one()
+    )
+
+
+@dataclass(frozen=True)
+class CandidataDeCarga:
+    """Una lectura que la proxima ejecucion intentaria cargar.
+
+    Solo identificadores, contexto y clasificaciones: ningun valor biometrico
+    ni dato personal.
+    """
+
+    id_lectura: int
+    id_sesion: int
+    id_embarazo: int
+    id_clinica: int
+    id_medico: int
+    semana_gestacion: int
+    trimestre: int
+    fecha_clinica: str
+    estado_hr: str | None
+    estado_spo2: str | None
+    estado_mov: str | None
+    semaforo_derivado: str
+    semaforo_origen: str
+    embarazo_en_dimension: bool
+
+
+@dataclass(frozen=True)
+class Previsualizacion:
+    """Lo que la proxima ejecucion procesaria, observado sin escribir."""
+
+    revision: str
+    version_umbrales: str
+    instantanea: str
+    candado_ocupado: bool
+    hechos_existentes: int
+    filas_de_dimension: tuple[tuple[str, int], ...]
+    filas_de_bridge: int
+    candidatas: tuple[CandidataDeCarga, ...]
+
+
+def previsualizar_sin_escribir(
+    engine: Engine, *, version: str = VERSION_SIM_1_0
+) -> Previsualizacion:
+    """Extract and transform exactly as a run would, and stop before loading.
+
+    Same transaction shape as :func:`conciliar_sin_escribir`: REPEATABLE READ
+    and READ ONLY, so PostgreSQL itself refuses any write -- an INSERT, an
+    UPDATE, a ``nextval`` -- and the preview takes no lock, so it never delays
+    nor blocks a real run. The extraction and the transformation are the ones
+    the run uses (:func:`_preparar_dimensiones`, :func:`_preparar_hechos`); no
+    rule is restated here.
+
+    A source the rules refuse raises the same :class:`ErrorDeDatos` the run
+    would raise, before anything could have been written.
+    """
+    with engine.connect() as conexion:
+        conexion.execution_options(
+            isolation_level=AISLAMIENTO, postgresql_readonly=True
+        )
+        with conexion.begin():
+            ocupado = candado_ocupado(conexion)
+            instantanea = conexion.execute(
+                text("SELECT transaction_timestamp()")
+            ).scalar_one()
+            verificar_lectura_completa(conexion)
+            revision = preflight(conexion)
+
+            origen, dimensiones = _preparar_dimensiones(conexion, version=version)
+            existentes = extraccion.contar_hechos(conexion)
+            lecturas, hechos = _preparar_hechos(
+                conexion, origen, dimensiones, version=version
+            )
+
+            ids_embarazo = sorted({hecho["id_embarazo"] for hecho in hechos})
+            en_dimension: set[int] = set()
+            if ids_embarazo:
+                tabla = DimEmbarazo.__table__
+                en_dimension = set(
+                    conexion.execute(
+                        select(tabla.c.id_embarazo).where(
+                            tabla.c.id_embarazo.in_(ids_embarazo)
+                        )
+                    ).scalars()
+                )
+
+    codigo_de = {
+        identificador: codigo
+        for codigo, identificador in dimensiones.id_semaforo_por_codigo.items()
+    }
+    lectura_de = {lectura["id_lectura"]: lectura for lectura in lecturas}
+    candidatas = []
+    for hecho in hechos:
+        lectura = lectura_de[hecho["id_lectura"]]
+        candidatas.append(
+            CandidataDeCarga(
+                id_lectura=hecho["id_lectura"],
+                id_sesion=hecho["id_sesion"],
+                id_embarazo=hecho["id_embarazo"],
+                id_clinica=hecho["id_clinica"],
+                id_medico=hecho["id_medico"],
+                semana_gestacion=lectura["semana_gestacion"],
+                trimestre=lectura["trimestre"],
+                fecha_clinica=fecha_clinica(lectura["fecha_hora_captura"]).isoformat(),
+                estado_hr=hecho["estado_hr"],
+                estado_spo2=hecho["estado_spo2"],
+                estado_mov=hecho["estado_mov"],
+                # El derivado es el nivel que la transformacion asigno al hecho;
+                # el de origen, el que la lectura ya trae en operacional. Son
+                # dos fuentes distintas: si no coincidieran, la transformacion
+                # habria rechazado el origen antes de llegar aqui.
+                semaforo_derivado=codigo_de[hecho["id_semaforo"]],
+                semaforo_origen=codigo_de[lectura["id_semaforo"]],
+                embarazo_en_dimension=hecho["id_embarazo"] in en_dimension,
+            )
+        )
+
+    filas_de_dimension = tuple(
+        (modelo.__tablename__, len(filas))
+        for modelo, filas in (
+            (DimClinica, dimensiones.clinicas),
+            (DimSemaforo, dimensiones.semaforos),
+            (DimTiempoGestacional, dimensiones.tiempos_gestacionales),
+            (DimFactorRiesgo, dimensiones.factores_riesgo),
+            (DimMedico, dimensiones.medicos),
+            (DimPaciente, dimensiones.pacientes),
+            (DimEmbarazo, dimensiones.embarazos),
+        )
+    )
+    return Previsualizacion(
+        revision=revision,
+        version_umbrales=version,
+        instantanea=instantanea.isoformat(),
+        candado_ocupado=ocupado,
+        hechos_existentes=existentes,
+        filas_de_dimension=filas_de_dimension,
+        filas_de_bridge=len(dimensiones.bridge),
+        candidatas=tuple(candidatas),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +649,55 @@ def formatear_resumen(resultado: ResultadoEjecucion) -> str:
         for tabla, emitidos in sorted(resultado.seudonimos_emitidos.items())
     ]
     lineas.append(formatear_conciliacion(resultado.informe))
+    return "\n".join(lineas)
+
+
+RESULTADO_PREVISUALIZACION = "PREVIEW"
+
+
+def _estado(valor: str | None) -> str:
+    return "NA" if valor is None else valor
+
+
+def formatear_previsualizacion(previsualizacion: Previsualizacion) -> str:
+    """One ``clave=valor`` line per fact, stable enough to be read by a program.
+
+    Like the run summary, it prints identifiers, counts, codes and dates --
+    never a biometric value, a name or any other personal datum.
+    """
+    p = previsualizacion
+    lineas = [
+        "ETL analítico FetalAlert — previsualización",
+        "modo=SOLO_LECTURA",
+        f"resultado={RESULTADO_PREVISUALIZACION}",
+        f"revision_alembic={p.revision}",
+        f"version_umbrales={p.version_umbrales}",
+        f"instantanea={p.instantanea}",
+        f"candado_etl={'OCUPADO' if p.candado_ocupado else 'LIBRE'}",
+        f"hechos_existentes={p.hechos_existentes}",
+        f"candidatas={len(p.candidatas)}",
+    ]
+    lineas += [
+        f"revalidar tabla={tabla} filas={filas}" for tabla, filas in p.filas_de_dimension
+    ]
+    lineas.append(f"revalidar tabla=bridge_embarazo_factor_riesgo filas={p.filas_de_bridge}")
+    lineas += [
+        "candidata "
+        f"id_lectura={c.id_lectura} id_sesion={c.id_sesion} "
+        f"id_embarazo={c.id_embarazo} id_clinica={c.id_clinica} "
+        f"id_medico={c.id_medico} semana={c.semana_gestacion} "
+        f"trimestre={c.trimestre} fecha_clinica={c.fecha_clinica} "
+        f"estado_hr={_estado(c.estado_hr)} estado_spo2={_estado(c.estado_spo2)} "
+        f"estado_mov={_estado(c.estado_mov)} "
+        f"semaforo_derivado={c.semaforo_derivado} "
+        f"semaforo_origen={c.semaforo_origen} "
+        f"validacion={'COINCIDE' if c.semaforo_derivado == c.semaforo_origen else 'DIFIERE'} "
+        f"en_dim_embarazo={'SI' if c.embarazo_en_dimension else 'NO'} "
+        "destino=fact_lectura_biometrica"
+        for c in p.candidatas
+    ]
+    lineas.append(f"aviso={AVISO_DE_CANDIDATA}")
+    lineas.append("escrituras=0")
     return "\n".join(lineas)
 
 
