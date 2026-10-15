@@ -1,0 +1,24 @@
+{
+  "nombre": "C-varias-gestantes",
+  "concurrente": true,
+  "gestantes": [
+    {
+      "dispositivo": "DEMO-SCRUM72-01",
+      "sesiones": 2,
+      "tipo": "SIGNOS_MATERNOS"
+    },
+    {
+      "dispositivo": "DEMO-GESTANTE-03",
+      "sesiones": 3,
+      "tipo": [
+        "MOVIMIENTOS_FETALES",
+        "SIGNOS_MATERNOS"
+      ]
+    },
+    {
+      "dispositivo": "DEMO-GESTANTE-04",
+      "sesiones": 5,
+      "tipo": "SIGNOS_MATERNOS"
+    }
+  ]
+}

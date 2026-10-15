@@ -60,6 +60,81 @@ El nombre de la base activa no cambia, así que la API, Demo Control y Power BI
 no necesitan otra configuración. Con la opción `--respaldo-de` se aplica a la
 base activa el respaldo de la base limpia construida aparte.
 
+## Escenarios de la sustentación
+
+Están en `scripts/escenarios_demo/`. Se ejecutan con
+`python scripts/escenario_demo.py ejecutar scripts/escenarios_demo/A.json`, y
+después del ETL se comprueban con `verificar <registro>`.
+
+| Escenario | Gestantes | Sesiones | Embarazos |
+|---|---|---|---|
+| A | `DEMO-SCRUM72-01` | 1 | 130 |
+| B | `DEMO-GESTANTE-02` | 4, alternando signos maternos y movimientos fetales | 131 |
+| C | `DEMO-SCRUM72-01`, `-03` y `-04`, a la vez | 2, 3 y 5 | 130, 132 y 133 |
+
+En Power BI, con «Ver como rol Medico», `medico01@example.com` ve los embarazos
+130 a 132 y `medico03@example.com` ve el 133. En `v_resumen_administrativo` las
+lecturas de la demo **no aparecen**, y es lo esperado. Esa vista suprime toda
+celda (provincia × mes × semáforo) con menos de 5 embarazos distintos, y ninguna
+provincia reúne 5 episodios de demostración.
+
+## Equipo de respaldo (contingencia)
+
+Un segundo equipo puede ejecutar una demostración equivalente sin depender del
+principal. Tiene **su propia** instancia de PostgreSQL, su propia API y su propia
+conexión de Power BI, y no hay sincronización entre los dos equipos. Lo único
+que se comparte son el código y el dataset simulado.
+
+### Requisitos
+
+- Windows con Docker Desktop, Git, Python 3.12 y Power BI Desktop.
+- El repositorio en la misma rama o el mismo commit que el equipo principal.
+- Su **propio** `.env`, creado desde `.env.example`, con secretos propios
+  (`POSTGRES_PASSWORD`, `JWT_SECRET_KEY`, claves de `fetalalert_api`,
+  `fetalalert_etl` y `fetalalert_powerbi`). Nunca se copia el `.env` de otro
+  equipo.
+- Un `POSTGRES_PORT` libre. Un PostgreSQL nativo suele ocupar el 5432 o el 5433.
+- **El mismo dataset**: copiar `data/generated/` del equipo principal, que es
+  simulado y no contiene contraseñas en claro, y comprobar su huella:
+  `dataset_fetalalert.json` debe dar
+  `9085651a4b6c0fe850c69ae802d82636e79a0b67bfd6a0026f769c7f99b08823` (SHA-256).
+  Regenerarlo con el generador da los mismos datos clínicos, pero otros
+  `password_hash`.
+
+### Preparación
+
+Se construye desde cero en el propio equipo; no se trasladan respaldos entre
+equipos.
+
+1. `docker compose up -d db` y esperar a que el contenedor esté `healthy`.
+2. Crear como superusuario los roles con LOGIN (`fetalalert_api`, `fetalalert_etl`
+   y `fetalalert_powerbi`), sin SUPERUSER ni BYPASSRLS y con las claves del
+   `.env` local.
+3. `python scripts/bootstrap_roles.py aplicar`, después
+   `cd backend; alembic upgrade head; cd ..` y por último
+   `python scripts/load_mock_data.py`. Debe informar 1180 lecturas.
+4. `python scripts/provisionar_demo.py provisionar --gestantes 4`.
+5. `docker compose up -d api` y `python scripts/etl_analitico.py ejecutar`.
+6. Demo Control, opción 1: `LISTO PARA DEMO`.
+7. Con la API detenida: `python scripts/entorno_demo.py respaldar --carpeta <respaldo>`.
+   Ese respaldo es la base limpia de **ese** equipo.
+8. Power BI Desktop: conectar a `127.0.0.1:<POSTGRES_PORT>`, a la base del `.env`,
+   con `fetalalert_powerbi` y sin cifrado (el servidor tiene `ssl=off`).
+   Importar las vistas de `publicacion` (ver `docs/proteccion_analitica.md` §8).
+
+### Validación antes de darlo por listo
+
+Un recorrido completo:
+
+1. Escenarios A, B y C.
+2. Previsualización y ETL.
+3. `verificar` de los tres registros.
+4. Actualizar Power BI.
+5. `entorno_demo.py restaurar --carpeta <respaldo>` (IDÉNTICO).
+6. Repetir un escenario.
+
+Hasta completar ese recorrido, el equipo de respaldo no se considera preparado.
+
 ## Validación
 
 - `backend/tests/test_entorno_demo.py`, `test_escenario_demo.py` y la sección H de

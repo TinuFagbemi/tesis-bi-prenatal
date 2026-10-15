@@ -55,6 +55,17 @@ def test_un_escenario_valido_se_carga(esc, tmp_path):
     assert [g.dispositivo for g in escenario.gestantes] == ["DEMO-GESTANTE-02", "DEMO-SCRUM72-01"]
 
 
+@pytest.mark.parametrize(
+    "archivo, gestantes, sesiones",
+    [("A.json", 1, 1), ("B.json", 1, 4), ("C.json", 3, 10)],
+)
+def test_los_escenarios_de_la_sustentacion_son_validos(esc, archivo, gestantes, sesiones):
+    escenario = esc.cargar_escenario(RUTA_SCRIPT.parent / "escenarios_demo" / archivo)
+
+    assert len(escenario.gestantes) == gestantes
+    assert sum(g.sesiones for g in escenario.gestantes) == sesiones
+
+
 def test_los_tipos_se_alternan_por_sesion(esc, tmp_path):
     escenario = esc.cargar_escenario(_escenario(tmp_path, {"gestantes": [
         _gestante(sesiones=3, tipo=["SIGNOS_MATERNOS", "MOVIMIENTOS_FETALES"])
