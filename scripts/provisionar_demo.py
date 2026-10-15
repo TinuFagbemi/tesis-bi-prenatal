@@ -15,10 +15,10 @@ coinciden.
 
 La solucion es aprovisionar un episodio de demostracion anclado al reloj real,
 **sin alterar el dataset canonico**: no se modifica ni se borra una sola fila
-suya. Se agregan filas nuevas y se reutiliza lo que ya existe --una cuenta
-PACIENTE sin embarazo en curso, un dispositivo DISPONIBLE de su clinica y un
-medico ya afiliado a esa clinica--, de modo que todas las reglas del dominio se
-cumplan de verdad en vez de esquivarse.
+suya. Se agregan filas nuevas --un dispositivo propio de la demo, el embarazo,
+su asignacion y su seguimiento-- y se reutiliza lo que ya existe --una cuenta
+PACIENTE sin embarazo en curso y un medico ya afiliado a su clinica--, de modo
+que todas las reglas del dominio se cumplan de verdad en vez de esquivarse.
 
 **Idempotente.** Ejecutarlo dos veces no crea dos episodios: reconoce el que ya
 creo por su codigo de dispositivo y lo reutiliza.
@@ -42,7 +42,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import tempfile
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -72,6 +74,29 @@ SEMANA_INICIAL = 28
 # script y lo que distingue sus filas de las del dataset canonico.
 CODIGO_DISPOSITIVO_DEMO = "DEMO-SCRUM72-01"
 
+# Gestantes adicionales del entorno de pruebas restaurable. La numero 1 es
+# siempre el episodio principal, ``CODIGO_DISPOSITIVO_DEMO``, el que usa Demo
+# Control; de la 2 en adelante, ``DEMO-GESTANTE-NN``. El codigo del dispositivo
+# sigue siendo la unica marca que distingue una fila de demostracion de una
+# canonica.
+PREFIJO_DISPOSITIVO_ADICIONAL = "DEMO-GESTANTE-"
+
+# Cota superior de gestantes de demostracion. El dataset canonico tiene ocho
+# pacientes con todos sus embarazos cerrados (FINALIZADO): son las unicas a las
+# que se puede dar un episodio nuevo sin tocar un embarazo canonico en curso.
+MAXIMO_DE_GESTANTES = 8
+
+
+def codigo_de_dispositivo(numero: int) -> str:
+    """El codigo del dispositivo de la gestante de demostracion ``numero``."""
+    if not 1 <= numero <= MAXIMO_DE_GESTANTES:
+        raise ErrorDeAprovisionamiento(
+            f"El numero de gestante debe estar entre 1 y {MAXIMO_DE_GESTANTES}."
+        )
+    if numero == 1:
+        return CODIGO_DISPOSITIVO_DEMO
+    return f"{PREFIJO_DISPOSITIVO_ADICIONAL}{numero:02d}"
+
 DIAS_POR_SEMANA = 7
 
 
@@ -79,6 +104,15 @@ class ErrorDeAprovisionamiento(RuntimeError):
     def __init__(self, detalle: str) -> None:
         self.detalle = detalle
         super().__init__(detalle)
+
+
+class EpisodioDemoNoIdentificable(ErrorDeAprovisionamiento):
+    """El episodio de demostracion no existe o no se identifica sin ambiguedad.
+
+    La lanza :func:`localizar_episodio_demo`, que solo lee: quien la recibe no
+    debe crear nada para «arreglarlo». Crear el episodio es decision de quien
+    opera, con ``provisionar``.
+    """
 
 
 def _url_de_mantenimiento() -> str:
@@ -108,7 +142,7 @@ def _fecha_de_inicio(hoy: date) -> date:
     return hoy - timedelta(days=(SEMANA_INICIAL - 1) * DIAS_POR_SEMANA)
 
 
-def _leer_catalogos(conexion) -> dict:
+def leer_catalogos(conexion) -> dict:
     semaforos = {
         fila.codigo_nivel: fila.id_semaforo
         for fila in conexion.execute(
@@ -137,7 +171,9 @@ def _leer_catalogos(conexion) -> dict:
     return {"semaforo": semaforos, "tiempo_gestacional": semanas}
 
 
-def _buscar_demo_existente(conexion) -> dict | None:
+def _buscar_demo_existente(
+    conexion, codigo: str = CODIGO_DISPOSITIVO_DEMO
+) -> dict | None:
     """El episodio que este comando creo antes, si sigue ahi."""
     fila = conexion.execute(
         text(
@@ -153,7 +189,7 @@ def _buscar_demo_existente(conexion) -> dict | None:
             " ORDER BY ad.id_asignacion DESC"
             " LIMIT 1"
         ),
-        {"codigo": CODIGO_DISPOSITIVO_DEMO},
+        {"codigo": codigo},
     ).one_or_none()
     if fila is None:
         return None
@@ -163,6 +199,80 @@ def _buscar_demo_existente(conexion) -> dict | None:
         "fecha_inicio": fila.fecha_inicio,
         "id_usuario": fila.id_usuario,
         "email": fila.email,
+    }
+
+
+def localizar_episodio_demo(conexion) -> dict:
+    """El episodio de demostracion, exigiendo que sea uno y solo uno. Solo lee.
+
+    A diferencia de :func:`_buscar_demo_existente` --que ``provisionar`` usa
+    para reconocer lo que ya creo y que se queda con la asignacion mas
+    reciente--, aqui cada eslabon tiene que ser unico: un dispositivo con el
+    codigo de la demo, una asignacion suya, un embarazo, una cuenta vinculada a
+    su paciente y esa cuenta con rol PACIENTE. Ante cero o mas de uno no se
+    elige: se lanza :class:`EpisodioDemoNoIdentificable`. Lo usa Demo Control
+    (SCRUM-104) para reconstruir el archivo sin pasar nunca por la ruta que
+    crea filas. No devuelve el correo.
+    """
+
+    def _uno(sql: str, parametros: dict, que: str):
+        filas = conexion.execute(text(sql), parametros).all()
+        if len(filas) != 1:
+            raise EpisodioDemoNoIdentificable(
+                "El episodio de demostracion no se identifica sin ambiguedad: se "
+                f"esperaba exactamente un(a) {que} y hay {len(filas)}. No se crea "
+                "ni se elige nada; revisa el aprovisionamiento."
+            )
+        return filas[0]
+
+    dispositivo = _uno(
+        "SELECT id_dispositivo, estado FROM operacional.dispositivo"
+        " WHERE codigo_dispositivo = :codigo",
+        {"codigo": CODIGO_DISPOSITIVO_DEMO},
+        f"dispositivo {CODIGO_DISPOSITIVO_DEMO}",
+    )
+    asignacion = _uno(
+        "SELECT id_asignacion, id_embarazo, fecha_inicio, fecha_fin, activo"
+        "  FROM operacional.asignacion_dispositivo WHERE id_dispositivo = :d",
+        {"d": dispositivo.id_dispositivo},
+        "asignacion del dispositivo de la demo",
+    )
+    embarazo = _uno(
+        "SELECT id_embarazo, id_paciente, id_clinica, fecha_inicio,"
+        "       fecha_probable_parto, estado_embarazo"
+        "  FROM operacional.embarazo WHERE id_embarazo = :e",
+        {"e": asignacion.id_embarazo},
+        "embarazo asignado",
+    )
+    cuenta = _uno(
+        "SELECT u.id_usuario, r.nombre_rol, u.activo"
+        "  FROM operacional.usuario_paciente up"
+        "  JOIN operacional.usuario u ON u.id_usuario = up.id_usuario"
+        "  JOIN operacional.rol r ON r.id_rol = u.id_rol"
+        " WHERE up.id_paciente = :p",
+        {"p": embarazo.id_paciente},
+        "cuenta vinculada a la paciente",
+    )
+    if cuenta.nombre_rol != "PACIENTE":
+        raise EpisodioDemoNoIdentificable(
+            "La cuenta vinculada al episodio de demostracion no tiene rol "
+            "PACIENTE. No se crea ni se elige nada."
+        )
+    return {
+        "id_dispositivo": dispositivo.id_dispositivo,
+        "estado_dispositivo": dispositivo.estado,
+        "id_asignacion": asignacion.id_asignacion,
+        "asignacion_inicio": asignacion.fecha_inicio,
+        "asignacion_fin": asignacion.fecha_fin,
+        "asignacion_activa": asignacion.activo,
+        "id_embarazo": embarazo.id_embarazo,
+        "id_paciente": embarazo.id_paciente,
+        "id_clinica": embarazo.id_clinica,
+        "fecha_inicio": embarazo.fecha_inicio,
+        "fecha_probable_parto": embarazo.fecha_probable_parto,
+        "estado_embarazo": embarazo.estado_embarazo,
+        "id_usuario": cuenta.id_usuario,
+        "cuenta_activa": cuenta.activo,
     }
 
 
@@ -202,6 +312,42 @@ def _elegir_paciente(conexion) -> dict:
     }
 
 
+def _elegir_paciente_con_embarazos_cerrados(conexion) -> dict:
+    """Para las gestantes adicionales: una cuenta cuyos embarazos estan todos FINALIZADO.
+
+    Mas estricto que :func:`_elegir_paciente`: tampoco admite un embarazo
+    SUSPENDIDO, para no abrir un episodio nuevo junto a uno que el dataset deja
+    en pausa. Una paciente que ya recibio un episodio de demostracion queda
+    excluida por tener uno ACTIVO.
+    """
+    fila = conexion.execute(
+        text(
+            "SELECT p.id_paciente, min(e.id_clinica) AS id_clinica,"
+            "       up.id_usuario, u.email"
+            "  FROM operacional.paciente p"
+            "  JOIN operacional.embarazo e ON e.id_paciente = p.id_paciente"
+            "  JOIN operacional.usuario_paciente up ON up.id_paciente = p.id_paciente"
+            "  JOIN operacional.usuario u ON u.id_usuario = up.id_usuario"
+            " GROUP BY p.id_paciente, up.id_usuario, u.email"
+            " HAVING bool_and(e.estado_embarazo = 'FINALIZADO')"
+            "    AND count(DISTINCT e.id_clinica) = 1"
+            " ORDER BY p.id_paciente"
+            " LIMIT 1"
+        )
+    ).one_or_none()
+    if fila is None:
+        raise ErrorDeAprovisionamiento(
+            "No quedan cuentas PACIENTE con todos sus embarazos finalizados para "
+            "otra gestante de demostracion."
+        )
+    return {
+        "id_paciente": fila.id_paciente,
+        "id_clinica": fila.id_clinica,
+        "id_usuario": fila.id_usuario,
+        "email": fila.email,
+    }
+
+
 def _elegir_medico(conexion, id_clinica: int, dia: date) -> int:
     """Un medico afiliado a esa clinica ese dia, y solo uno.
 
@@ -227,7 +373,9 @@ def _elegir_medico(conexion, id_clinica: int, dia: date) -> int:
     return fila.id_medico
 
 
-def _crear_dispositivo(conexion, id_clinica: int) -> int:
+def _crear_dispositivo(
+    conexion, id_clinica: int, codigo: str = CODIGO_DISPOSITIVO_DEMO
+) -> int:
     """El dispositivo de demostracion, creado una vez y reutilizado despues.
 
     No se toma uno DISPONIBLE del dataset: cambiarle el estado a una fila
@@ -238,7 +386,7 @@ def _crear_dispositivo(conexion, id_clinica: int) -> int:
             "SELECT id_dispositivo FROM operacional.dispositivo"
             " WHERE codigo_dispositivo = :codigo"
         ),
-        {"codigo": CODIGO_DISPOSITIVO_DEMO},
+        {"codigo": codigo},
     ).one_or_none()
     if fila is not None:
         return fila.id_dispositivo
@@ -250,20 +398,22 @@ def _crear_dispositivo(conexion, id_clinica: int) -> int:
             " VALUES (:id_clinica, :codigo, 'Simulado SCRUM-72', '0.0-demo', 'ASIGNADO')"
             " RETURNING id_dispositivo"
         ),
-        {"id_clinica": id_clinica, "codigo": CODIGO_DISPOSITIVO_DEMO},
+        {"id_clinica": id_clinica, "codigo": codigo},
     ).scalar_one()
 
 
-def _provisionar(conexion, hoy: date) -> dict:
+def _provisionar(
+    conexion, hoy: date, codigo: str = CODIGO_DISPOSITIVO_DEMO, elegir=None
+) -> dict:
     """Crea --o reconoce-- el episodio de demostracion. Una sola transaccion."""
-    existente = _buscar_demo_existente(conexion)
+    existente = _buscar_demo_existente(conexion, codigo)
     if existente is not None:
         return existente
 
-    paciente = _elegir_paciente(conexion)
+    paciente = (elegir or _elegir_paciente)(conexion)
     fecha_inicio = _fecha_de_inicio(hoy)
     id_medico = _elegir_medico(conexion, paciente["id_clinica"], fecha_inicio)
-    id_dispositivo = _crear_dispositivo(conexion, paciente["id_clinica"])
+    id_dispositivo = _crear_dispositivo(conexion, paciente["id_clinica"], codigo)
 
     id_embarazo = conexion.execute(
         text(
@@ -317,9 +467,41 @@ def _provisionar(conexion, hoy: date) -> dict:
     }
 
 
-def _escribir_archivo(ruta: Path, demo: dict, catalogos: dict) -> None:
-    ruta.parent.mkdir(parents=True, exist_ok=True)
-    contenido = {
+def provisionar_varias(conexion, hoy: date, gestantes: int) -> list[dict]:
+    """Crea --o reconoce-- los episodios 1..``gestantes``. Idempotente.
+
+    Corre dentro de la transaccion de quien llama: o quedan todos o ninguno. Un
+    episodio que ya existe se reconoce por su codigo de dispositivo y no se
+    vuelve a crear. Reducir ``gestantes`` no borra los episodios que sobran.
+    """
+    codigo_de_dispositivo(gestantes)  # valida la cota antes de escribir nada
+    demos = []
+    for numero in range(1, gestantes + 1):
+        codigo = codigo_de_dispositivo(numero)
+        demo = _provisionar(
+            conexion,
+            hoy,
+            codigo=codigo,
+            elegir=_elegir_paciente if numero == 1 else _elegir_paciente_con_embarazos_cerrados,
+        )
+        demos.append({**demo, "codigo_dispositivo": codigo})
+    cuentas = [demo["id_usuario"] for demo in demos]
+    if len(set(cuentas)) != len(cuentas):
+        raise ErrorDeAprovisionamiento(
+            "Dos dispositivos de demostracion quedarian en la misma cuenta. No se "
+            "confirma nada."
+        )
+    return demos
+
+
+def ruta_de_dispositivo(directorio: Path, codigo: str) -> Path:
+    """Archivo de aprovisionamiento de un dispositivo: ``<directorio>/<codigo>.json``."""
+    return directorio / f"{codigo}.json"
+
+
+def contenido_de_provision(demo: dict, catalogos: dict) -> dict:
+    """Lo que lleva el archivo: identificadores y catalogos, ningun dato personal."""
+    return {
         "version": VERSION_SOPORTADA,
         "generado_en": datetime.now(timezone.utc).isoformat(),
         "cuenta": {"id_usuario": demo["id_usuario"]},
@@ -330,9 +512,37 @@ def _escribir_archivo(ruta: Path, demo: dict, catalogos: dict) -> None:
         "dispositivo": {"id_dispositivo": demo["id_dispositivo"]},
         "catalogos": catalogos,
     }
-    ruta.write_text(
-        json.dumps(contenido, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+
+
+def escribir_provision(ruta: Path, demo: dict, catalogos: dict) -> None:
+    """Escribe el archivo de forma atomica: o queda el anterior, o el nuevo.
+
+    Se escribe en un temporal de la misma carpeta, se fuerza a disco y se
+    sustituye con ``os.replace``, que es atomico dentro de un volumen. Un corte
+    a mitad de escritura no deja nunca un ``provision.json`` truncado. Lo usan
+    ``provisionar`` y la reconstruccion de Demo Control (SCRUM-104).
+    """
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    texto = (
+        json.dumps(contenido_de_provision(demo, catalogos), indent=2, ensure_ascii=False)
+        + "\n"
     )
+    descriptor, temporal = tempfile.mkstemp(
+        prefix=f".{ruta.name}.", suffix=".tmp", dir=ruta.parent
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as archivo:
+            archivo.write(texto)
+            archivo.flush()
+            os.fsync(archivo.fileno())
+        os.replace(temporal, ruta)
+    except BaseException:
+        Path(temporal).unlink(missing_ok=True)
+        raise
+
+
+def _escribir_archivo(ruta: Path, demo: dict, catalogos: dict) -> None:
+    escribir_provision(ruta, demo, catalogos)
 
 
 def _informar(demo: dict, ruta: Path, escrito: bool) -> None:
@@ -349,13 +559,33 @@ def _informar(demo: dict, ruta: Path, escrito: bool) -> None:
     )
 
 
-def orden_provisionar(ruta: Path) -> int:
+def orden_provisionar(
+    ruta: Path, gestantes: int | None = None, dispositivos_dir: Path | None = None
+) -> int:
+    """Sin ``gestantes``, el comportamiento de siempre: un episodio y provision.json.
+
+    Con ``gestantes``, ademas, los episodios 2..N y un archivo por dispositivo en
+    ``dispositivos_dir``, incluido el del episodio principal.
+    """
     motor = create_engine(_url_de_mantenimiento(), future=True)
     with motor.begin() as conexion:
-        catalogos = _leer_catalogos(conexion)
-        demo = _provisionar(conexion, date.today())
-    _escribir_archivo(ruta, demo, catalogos)
-    _informar(demo, ruta, escrito=True)
+        catalogos = leer_catalogos(conexion)
+        demos = provisionar_varias(conexion, date.today(), gestantes or 1)
+    _escribir_archivo(ruta, demos[0], catalogos)
+    _informar(demos[0], ruta, escrito=True)
+    if gestantes is not None:
+        print(f"Dispositivos de demostracion ({len(demos)}), en {dispositivos_dir}:")
+        for demo in demos:
+            escribir_provision(
+                ruta_de_dispositivo(dispositivos_dir, demo["codigo_dispositivo"]),
+                demo,
+                catalogos,
+            )
+            print(
+                f"  {demo['codigo_dispositivo']}: id_usuario={demo['id_usuario']} "
+                f"id_embarazo={demo['id_embarazo']} "
+                f"id_dispositivo={demo['id_dispositivo']}"
+            )
     return CODIGO_DE_EXITO
 
 
@@ -385,15 +615,28 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     ordenes = parser.add_subparsers(dest="orden", required=True)
-    ordenes.add_parser("provisionar", help="prepara el episodio y escribe el archivo")
+    provisionar = ordenes.add_parser(
+        "provisionar", help="prepara el episodio y escribe el archivo"
+    )
+    provisionar.add_argument(
+        "--gestantes",
+        type=int,
+        choices=range(1, MAXIMO_DE_GESTANTES + 1),
+        metavar=f"1-{MAXIMO_DE_GESTANTES}",
+        help=(
+            "cuantas gestantes de demostracion preparar (entorno de pruebas). "
+            "Escribe tambien un archivo por dispositivo en GESTANTE_DISPOSITIVOS_DIR."
+        ),
+    )
     ordenes.add_parser("verificar", help="informa del estado, sin escribir en la base")
 
     argumentos = parser.parse_args(argv)
-    ruta = cargar_settings_gestante().provision_path
+    ajustes = cargar_settings_gestante()
+    ruta = ajustes.provision_path
 
     try:
         if argumentos.orden == "provisionar":
-            return orden_provisionar(ruta)
+            return orden_provisionar(ruta, argumentos.gestantes, ajustes.dispositivos_dir)
         return orden_verificar(ruta)
     except ErrorDeAprovisionamiento as error:
         print(f"Error: {error.detalle}", file=sys.stderr)
