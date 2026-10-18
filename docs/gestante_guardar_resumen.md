@@ -369,9 +369,6 @@ todavía verificación manual.
   sesión, y comprobar en la carpeta de descargas que no aparece el archivo
   de la descarga anterior. Sin red lenta la ventana es breve, así que el
   arnés automático sigue siendo la prueba determinista.
-- El diálogo de cierre deja pulsar «Cancelar» mientras la petición de cierre
-  está pendiente (comportamiento previo, de SCRUM-72): se registra como
-  pendiente aparte. La descarga ya queda invalidada en ese caso.
 - Otros navegadores (Edge, Firefox) y móvil real: no probados.
 - Impresión en papel del PDF descargado: no comprobada.
 
