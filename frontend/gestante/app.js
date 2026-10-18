@@ -371,7 +371,9 @@
 
   // Turnos. Cada peticion anota el turno vigente de su contexto y, al volver,
   // solo se pinta si sigue siendo el vigente. Cerrar sesion avanza todos.
-  const turnos = { clinico: 0, inicio: 0, historial: 0, conexion: 0 };
+  // `resumen` avanza cada vez que el resumen abierto cambia, se cierra o se
+  // sustituye: una descarga del PDF pertenece al turno en que se pidió.
+  const turnos = { clinico: 0, inicio: 0, historial: 0, conexion: 0, resumen: 0 };
 
   function avanzarTurno(contexto) {
     turnos[contexto] += 1;
@@ -1748,13 +1750,26 @@
     }
   }
 
+  /**
+   * Da por terminada cualquier descarga pedida sobre el resumen anterior: no
+   * se entregará, y sus errores o su final no tocan lo que venga después. El
+   * botón queda listo para una descarga nueva.
+   */
+  function invalidarDescarga() {
+    avanzarTurno('resumen');
+    if (ui.botonDescargarPdf) {
+      ui.botonDescargarPdf.disabled = false;
+    }
+    mostrarEstadoDescarga(null);
+  }
+
   /** Vacía el documento del resumen. Nada de él sobrevive a una salida. */
   function limpiarResumen() {
     resumenAbierto = null;
     if (ui.resumenDocumento) {
       ui.resumenDocumento.textContent = '';
     }
-    mostrarEstadoDescarga(null);
+    invalidarDescarga();
   }
 
   /**
@@ -2136,8 +2151,10 @@
     if (!modelo) {
       return null;
     }
+    // Un objeto nuevo en cada apertura y en cada cambio de contenido; nada lo
+    // modifica después, así que una descarga puede quedarse con él tal cual.
     resumenAbierto = { inst: inst, periodo: periodo, modelo: modelo };
-    mostrarEstadoDescarga(null);
+    invalidarDescarga();
     return pintarResumen(modelo);
   }
 
@@ -2208,14 +2225,58 @@
   }
 
   /**
-   * «Descargar PDF»: el mismo modelo que se ve, en un archivo. Si se cierra la
-   * sesión o se sale del resumen mientras se prepara, no se descarga nada.
+   * El PDF completo en memoria, como Blob. `getStream()` sin callback arma el
+   * documento en el acto y lanza aquí mismo si algo falla; `getBlob()` y
+   * `download()` lo hacen dentro de una promesa propia de pdfmake y un error
+   * se pierde sin avisar. Los trozos llegan después, de forma asíncrona.
+   */
+  function generarPdf(pdfMake, definicion) {
+    return new Promise(function (resolver, rechazar) {
+      const documento = pdfMake.createPdf(definicion).getStream();
+      const trozos = [];
+      documento.on('data', function (trozo) { trozos.push(trozo); });
+      documento.on('end', function () {
+        resolver(new Blob(trozos, { type: 'application/pdf' }));
+      });
+      documento.on('error', rechazar);
+      documento.end();
+    });
+  }
+
+  // Lo que tarda en liberarse la dirección temporal del PDF: lo mismo que
+  // espera FileSaver, que es lo que usa `download()` de pdfmake.
+  const LIBERAR_PDF_MS = 40000;
+
+  /** Entrega el PDF ya generado al navegador, como haría `download()`. */
+  function entregarPdf(blob, nombre) {
+    const direccion = URL.createObjectURL(blob);
+    const enlace = document.createElement('a');
+    enlace.href = direccion;
+    enlace.download = nombre;
+    enlace.rel = 'noopener';
+    enlace.click();
+    // Solo vive en memoria de esta página. No se libera enseguida: el
+    // navegador tiene que alcanzar a leerla.
+    window.setTimeout(function () { URL.revokeObjectURL(direccion); }, LIBERAR_PDF_MS);
+  }
+
+  /**
+   * «Descargar PDF»: el resumen que estaba en pantalla al pulsar, en un
+   * archivo. Cambiar el contenido, salir del resumen, abrir otro o confirmar
+   * el cierre de sesión mientras se prepara deja esta descarga sin efecto:
+   * el PDF puede terminar de generarse, pero no se entrega, y nada de esta
+   * descarga cambia la pantalla. Un archivo ya entregado no se puede retirar.
    */
   function descargarPdf() {
-    if (!resumenAbierto) {
+    const abierto = resumenAbierto;
+    if (!abierto) {
       return Promise.resolve();
     }
+    const turno = turnos.resumen;
     const epoca = epocaSesion;
+    function vigente() {
+      return esVigente('resumen', turno) && epoca === epocaSesion;
+    }
     // El momento en que la paciente pulsa «Descargar PDF»: cada descarga
     // queda marcada con el suyo en todas las páginas.
     const descargadoEn = 'Descargado el ' + FORMATO_DESCARGA.format(new Date(Date.now())) +
@@ -2225,24 +2286,35 @@
     mostrarEstadoDescarga(MENSAJES_RESUMEN.preparando);
     return cargarMotorPdf()
       .then(function (pdfMake) {
-        const abierto = resumenAbierto;
-        if (epoca !== epocaSesion || !abierto) {
-          return;
+        if (!vigente()) {
+          return null;
         }
         const definicion = window.FetalAlertResumenPdf.definicion(abierto.modelo,
           { descargadoEn: descargadoEn });
-        pdfMake.createPdf(definicion).download(abierto.modelo.nombreArchivo);
+        return generarPdf(pdfMake, definicion);
+      })
+      .then(function (blob) {
+        // La última comprobación, justo antes de entregarlo y sin nada
+        // asíncrono entre ambas cosas.
+        if (!blob || !vigente()) {
+          return;
+        }
+        entregarPdf(blob, abierto.modelo.nombreArchivo);
         // El navegador decide dónde lo guarda; aquí solo se sabe que empezó.
         mostrarEstadoDescarga('Descarga iniciada: «' + abierto.modelo.nombreArchivo +
           '». Búscalo en la carpeta de descargas.');
       })
       .catch(function () {
-        if (epoca === epocaSesion && resumenAbierto) {
+        if (vigente()) {
           mostrarEstadoDescarga(MENSAJES_RESUMEN.fallo);
         }
       })
       .then(function () {
-        boton.disabled = false;
+        // Una descarga que ya no es la vigente no toca el botón: lo dejó
+        // listo quien la invalidó, y puede haber otra en curso.
+        if (vigente()) {
+          boton.disabled = false;
+        }
       });
   }
 
