@@ -1,9 +1,11 @@
 # Gestante: «Guardar mi resumen» y diagnóstico de desconexiones
 
-Estado al 2026-10-11. Rama `feature/gestante-guardar-resumen-demo`, creada
+Estado al 2026-10-17. Rama `feature/gestante-guardar-resumen-demo`, creada
 desde `origin/main` en `029fe50` (merge del PR #20, interfaz gestante
 aprobada) y actualizada con un merge de `origin/main` en `ccc209f` (PR #21,
-SCRUM-103). Se publica para revisión; sin merge.
+SCRUM-103). Publicada en el PR #22 el 2026-10-11 (`0aab3ac`); el 2026-10-17
+se añade la corrección de las descargas que dejan de ser vigentes, pedida en
+la revisión (sección «Descarga vigente»). Sin merge.
 
 Dos entregas independientes:
 
@@ -79,8 +81,58 @@ historial completo. Consecuencias aceptadas:
   no se parten; cabecera discreta y «Página n de m» en todas las páginas.
 - El documento sale de la **instantánea** del monitoreo que ya cargó «Mi
   historial»: no hace peticiones de datos nuevas ni guarda nada en el
-  navegador. Si se cierra la sesión mientras se prepara el PDF, no se
-  descarga nada.
+  navegador. Una descarga que deja de corresponder a lo que hay en pantalla
+  no se entrega (sección siguiente).
+
+### Descarga vigente
+
+Cada pulsación de «Descargar PDF» pertenece al resumen que estaba en pantalla
+en ese momento: su contenido, su embarazo, su nombre de archivo y su marca de
+descarga. Mientras se prepara (carga del motor y generación), **cualquiera de
+estas acciones la deja sin efecto, en el acto**:
+
+- cambiar entre «Resumen» e «Historial completo»;
+- salir de la vista previa («Volver a «Mi historial»» o el menú), aunque
+  luego se vuelva a abrir el mismo resumen o el de otro embarazo;
+- **confirmar** el cierre de sesión, sin esperar la respuesta del servidor
+  (también si esa petición falla). Pulsar «Cancelar» en el diálogo no la
+  afecta: la descarga sigue.
+
+Al invalidarse, el botón queda libre para pedir el contenido nuevo, y nada de
+la descarga anterior (ni su error ni su final) cambia la pantalla ni los
+controles de otra posterior. Cómo:
+
+- Un turno `resumen` en `turnos` (`app.js`), el mismo mecanismo que ya usan
+  las peticiones. Avanza al abrir, cambiar o cerrar el resumen
+  (`invalidarDescarga`), y al confirmar el cierre de sesión, porque
+  `manejarLogout()` ya avanza todos los turnos antes de llamar al servidor.
+  La descarga anota el turno, la época de la sesión y el resumen abierto al
+  pulsar; el resumen es un objeto nuevo en cada apertura que nada modifica
+  después, así que no hace falta copiarlo.
+- El PDF se genera **en memoria**: `createPdf(...).getStream()` arma el
+  documento y sus trozos se reúnen en un `Blob`. Después, **sin nada
+  asíncrono en medio**, se comprueba otra vez que la solicitud siga vigente
+  y solo entonces se entrega al navegador con un enlace `download` y una
+  dirección `blob:` temporal, que se libera a los 40 s (la misma espera que
+  usa FileSaver dentro de `download()` de pdfmake).
+- Se dejó de usar `download()` / `getBlob()` porque en pdfmake 0.2.23 generan
+  dentro de una promesa propia y, si la generación falla, el error se pierde
+  sin avisar (comprobado con el pdfmake incluido): la página decía
+  «Descarga iniciada» sin descargar nada. Con `getStream()` el error llega y
+  se muestra «No se pudo preparar el PDF. Inténtalo de nuevo.».
+
+Qué se garantiza y qué no:
+
+- **Se cancela la entrega** de un resultado pendiente: si la solicitud ya no
+  es vigente, el PDF generado se descarta y no llega al navegador.
+- **No se detiene** el trabajo interno de pdfmake: una generación ya
+  empezada puede terminar en memoria (y se descarta).
+- **No se retira** un archivo ya entregado al navegador. La comprobación
+  final está inmediatamente antes de entregarlo; lo que ocurra después (la
+  descarga en sí) depende del navegador.
+- La ventana no se limita a la primera descarga: en Chrome, del clic al
+  inicio de la descarga se midieron unos 780 ms con el motor sin cargar y
+  unos 200 ms con el motor ya cargado (generación), en el equipo de prueba.
 
 ### Qué contiene
 
@@ -125,7 +177,11 @@ historial completo. Consecuencias aceptadas:
 Node (`frontend/gestante/pruebas/`):
 
 - `app.comportamiento.test.js`, sobre el `app.js` real con DOM mínimo y un
-  pdfmake falso que guarda la definición:
+  pdfmake falso que guarda la definición. Desde la corrección de «Descarga
+  vigente», el falso genera de forma asíncrona y controlable
+  (`pdf.diferir`/`terminar()`, `pdf.fallar`), y una descarga solo cuenta si
+  se pulsó el enlace `download` con la dirección `blob:` de un PDF generado:
+  se comprueba la **entrega al navegador**, no la llamada a `createPdf()`:
   - habilitación solo con lecturas cargadas; deshabilitado al cambiar de
     embarazo y con error del servidor;
   - correspondencia con el embarazo de Historial y no con el de Inicio;
@@ -144,6 +200,20 @@ Node (`frontend/gestante/pruebas/`):
     descarga nada; error de carga y reintento; marcado como texto; cada
     descarga lleva su propio momento exacto (dos descargas con el reloj
     adelantado 2 min 17 s dan «10:00:00» y «10:02:17») en todas las páginas.
+  - **descarga vigente** (12 pruebas, con la carga del motor y la generación
+    retenidas por promesas que la prueba suelta, sin esperas): entrega desde
+    memoria y dirección liberada a los 40 s, no antes; cambio a «Historial
+    completo», salir y reabrir el mismo resumen, y abrir el de otro
+    embarazo durante la carga: ninguna entrega de la anterior, y la nueva
+    lleva su contenido, nombre y marca; confirmar el cierre con la petición
+    pendiente y con fallo de red: nada se entrega; cancelar el diálogo: la
+    descarga sigue; el error de una descarga anterior no aparece en el
+    resumen nuevo; el final de la anterior no habilita el botón de la que
+    está en curso y ambas comparten una sola carga del motor; con el motor ya
+    cargado, cambiar, salir o confirmar el cierre **después de generado el
+    PDF y antes de entregarlo** impide la entrega; un fallo de generación se
+    dice y se puede reintentar; otra cuenta que entra no recibe la descarga
+    pendiente de la anterior (en el escenario probado).
 - `resumen_pdf.test.js` (nuevo): papel Carta y metadatos; todos los textos
   del modelo llegan tal cual; tabla con cabecera repetida, filas sin partir y
   6 columnas; semáforo siempre con nombre y sin color si es desconocido;
@@ -204,17 +274,104 @@ ficticios del servidor local de prueba, generadas desde `6265886`):
 `muestra-resumen.pdf`, `pdf-resumen-p1.png`,
 `pdf-historial-completo-p2.png` y `vista-previa-escritorio.png`.
 
+### Corrección «Descarga vigente»: resultados (2026-10-17)
+
+**Pruebas automáticas** (Node 22.23.1; pytest con el `.venv` del proyecto),
+en un worktree limpio sin `.env` ni `data/generated`, como el CI:
+
+| Suite | Resultado |
+|---|---|
+| `node --test frontend/gestante/pruebas/*.test.js` | 117: 116 pass, 0 fail, 1 skip (la del dataset, como antes) |
+| `cd backend; python -m pytest -q` con los `--ignore` de la DoD | 2469 passed, 0 failed, 545 skipped |
+
+- Las 545 omitidas son suites de PostgreSQL de SCRUM-98/99 (`test_rls`,
+  `test_publicacion*`, `test_http_como_api`, `test_bootstrap`) que piden
+  variables `SCRUM98_*`/`SCRUM99_*` y no están en la lista de la DoD; las
+  ejecuta el CI. No las toca este cambio, que es solo de frontend.
+- **Las regresiones detectan el defecto:** las mismas pruebas contra el
+  `app.js` de `0aab3ac` (copia aislada; su `download()` simulado con el
+  comportamiento real: genera asíncrono, entrega con un enlace y pierde los
+  errores) dan 105 pass y **11 fail**: entregas indebidas al cambiar de
+  embarazo, al confirmar el cierre (pendiente y con fallo de red) y con el
+  motor ya cargado; el error antiguo en la vista nueva; el final antiguo que
+  libera el botón de otra descarga; «Descarga iniciada» con la generación
+  fallida; el botón bloqueado al cambiar de contenido o reabrir (donde la
+  entrega indebida ya se había reproducido en el diagnóstico); y el botón de
+  otra cuenta bloqueado por la descarga anterior (sin que pasara ningún
+  dato). La undécima (liberar la dirección a los 40 s) solo refleja que esa
+  versión no gestionaba la dirección por sí misma.
+
+**Chrome real** (Chrome 155 headless, perfil propio desechable, conducido
+por CDP; clics de ratón con `Input.dispatchMouseEvent`; descargas
+observadas con los eventos del navegador y leídas después con pypdf).
+pdfmake es **el real** del portal en todos los casos. El portal es un
+servidor local de prueba que sirve los mismos archivos que `rutas.py` y
+simula `/adaptador/*` con datos ficticios; **no** es el adaptador real ni la
+base de la demo. Lo que controla los tiempos está **instrumentado**: [red]
+el servidor retiene la carga de `pdfmake.min.js` o la petición de cierre de
+sesión hasta soltarlas; [gen] en la página se retiene el evento final del
+stream de pdfmake, con el PDF ya generado en memoria.
+
+| Escenario | Instrumentación | Resultado con la corrección |
+|---|---|---|
+| Descarga normal, motor sin cargar y ya cargado; «Historial completo»; embarazo finalizado | ninguna | 4 PDF correctos (`%PDF-`, 2 páginas, texto extraíble): título, embarazo, 10 / 15 / 3 lecturas y marca de cada uno |
+| Cambio a «Historial completo» durante la carga | [red] | 0 entregas de la anterior; botón libre; la nueva: historial, 15 lecturas |
+| Salir y abrir el resumen del embarazo finalizado | [red] | 0 entregas de la anterior; la nueva: «6 ene 2025 — Finalizado» |
+| Salir y reabrir el mismo resumen | [red] | 0 entregas de la anterior |
+| Confirmar el cierre con la petición pendiente | [red] | 0 entregas antes ni después del login; nueva sesión: 1 descarga |
+| Confirmar el cierre y la petición se corta | [red] | 0 entregas; vuelve al login |
+| Cancelar el diálogo de cierre | [red] | la descarga sigue: 1 PDF correcto |
+| Motor cargado; cambio de contenido / otro embarazo / cierre confirmado con el PDF ya generado y aún no entregado | [gen] (+[red] en el cierre) | ese PDF no se entrega; la nueva descarga sí, con su contenido |
+| La carga del motor falla (503) | [red] | «No se pudo preparar el PDF…», botón libre, 0 entregas; el reintento descarga |
+
+La misma batería contra `0aab3ac` mostró en Chrome «Descarga iniciada» en
+los casos de cambio de contenido, de embarazo, de reabrir y de cierre
+confirmado, nada más cargar el motor y antes de pedir nada nuevo. Con el
+corte de la petición de cierre, la descarga ya existía antes de volver al
+login. Cortar la conexión de un `<script>` no basta para simular un fallo
+del motor: Chrome reintenta la petición; por eso se usa un 503. El aspecto
+de la vista previa y del PDF no cambia (este cambio no toca `styles.css`,
+`index.html` ni `resumen_pdf.js`).
+
+Scripts para repetirlo en
+`docs/evidencias/gestante-guardar-resumen/validacion-descarga/`
+(desde esa carpeta, con salida **fuera** del repositorio):
+
+```
+node servidor.js ../../../../frontend/gestante 8765
+node conductor.js http://127.0.0.1:8765 <dir de salida fuera del repo>
+<venv con pypdf>/Scripts/python -I -X utf8 verificar_pdf.py <dir de salida>
+```
+
+Solo escuchan en `127.0.0.1` y no usan la base, el `.env` ni los servicios de
+la demo. Resultados, PDF descargados y capturas de esta ejecución (datos
+ficticios) quedaron fuera del repositorio, en
+`C:\GitHub\TESIS\evidencias\pr22-correccion-descarga-2026-10-17\`.
+
 ### Verificación manual (Viviana, 2026-10-11)
 
-Confirmado por Viviana en el portal de demostración:
+Confirmado por Viviana en el portal de demostración, **sobre `0aab3ac`**,
+antes de la corrección «Descarga vigente»:
 
 - La descarga funciona en **Google Chrome**.
 - El PDF descargado **abre sin internet**.
 
-No se declara ninguna otra comprobación manual.
+No se declara ninguna otra comprobación manual, y esta no cubre la
+corrección: la nueva forma de entregar el archivo (enlace `blob:`) no tiene
+todavía verificación manual.
 
 ### Pendientes
 
+- **Verificación manual de la corrección** en el portal de demostración con
+  Chrome: descargar «Resumen» e «Historial completo» y abrir ambos PDF sin
+  internet; pulsar «Descargar PDF» y, antes de que termine, cambiar a
+  «Historial completo», o volver a «Mi historial», o confirmar el cierre de
+  sesión, y comprobar en la carpeta de descargas que no aparece el archivo
+  de la descarga anterior. Sin red lenta la ventana es breve, así que el
+  arnés automático sigue siendo la prueba determinista.
+- El diálogo de cierre deja pulsar «Cancelar» mientras la petición de cierre
+  está pendiente (comportamiento previo, de SCRUM-72): se registra como
+  pendiente aparte. La descarga ya queda invalidada en ese caso.
 - Otros navegadores (Edge, Firefox) y móvil real: no probados.
 - Impresión en papel del PDF descargado: no comprobada.
 

@@ -1903,8 +1903,10 @@ interfaz: el resumen (últimos valores y hasta 10 lecturas) o el historial
 completo del período. El PDF se genera en el dispositivo con pdfmake, que el
 portal sirve desde `frontend/gestante/vendor/` (sin CDN ni servicios
 externos) y solo carga al descargar. Se arma con lo ya consultado y no se
-guarda nada en el navegador. Contenido, límites, pruebas y comprobaciones
-manuales pendientes en `docs/gestante_guardar_resumen.md`.
+guarda nada en el navegador. Si mientras se prepara se cambia el contenido,
+se sale del resumen o se confirma el cierre de sesión, esa descarga no se
+entrega. Contenido, límites, pruebas y comprobaciones manuales pendientes en
+`docs/gestante_guardar_resumen.md`.
 
 ### Estado de conexión y sesión con el servidor
 
