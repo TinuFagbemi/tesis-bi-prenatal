@@ -1303,9 +1303,11 @@ def opcion_verificar(dep: Dependencias) -> Informe:
         "de la opción 3.",
     )
     _imprimir_informe(dep, informe)
-    _decir(dep, "Antes del ensayo, toma ahora S0/L0/Q0 y el seudónimo con la consulta")
-    _decir(dep, "de preparación de Adminer (docs/demo_adminer.md §4.2). No reutilices")
-    _decir(dep, "valores de un ensayo anterior.")
+    _decir(dep, "Antes del ensayo, toma ahora los valores de referencia con la consulta")
+    _decir(dep, "de preparación de Adminer (docs/demo_adminer.md §4.2):")
+    _decir(dep, "id_ultima_sesion_previa, id_ultimo_log_previo,")
+    _decir(dep, "ultima_secuencia_publicada_previa y seudonimo_embarazo_demo.")
+    _decir(dep, "No reutilices valores de un ensayo anterior.")
     return informe
 
 

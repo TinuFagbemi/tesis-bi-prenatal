@@ -49,8 +49,8 @@ Abrir Demo Control no ejecuta nada: ninguna opción corre hasta que se elige.
 | Adminer ([guía](demo_adminer.md)) | **Muestra el dato**: operacional (A), analítica (B), publicación (C) y auditoría (D). |
 
 Demo Control no muestra la auditoría ni repite las consultas A–D. Tampoco
-calcula los valores de referencia `S0`, `L0`, `Q0` y el seudónimo: se toman con
-la consulta de preparación de Adminer (`demo_adminer.md`, §4.2), **después** de
+calcula los valores de referencia (`id_ultima_sesion_previa`, `id_ultimo_log_previo`,
+`ultima_secuencia_publicada_previa` y `seudonimo_embarazo_demo`): se toman con la consulta de preparación de Adminer (`demo_adminer.md`, §4.2), **después** de
 que la opción 1 diga `LISTO PARA DEMO` y antes de que la gestante inicie
 sesión. Cambian con cada captura, inicio de sesión o acceso, así que no se
 reutilizan los de un ensayo anterior.
