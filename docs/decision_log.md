@@ -2523,3 +2523,51 @@ contra PostgreSQL se añadieron a suites que el CI ya ejecuta.
 El recorrido completo de la demostración con el portal, el nodo, Adminer y
 Power BI (SCRUM-106); el archivado de colas; una interfaz web; cualquier cambio
 en Power BI, en RLS o en la autenticación.
+
+## SCRUM-109 — Escenario sintético reproducible para la demostración integral
+
+Guía de uso: [Escenario de demostración de SCRUM-109](escenario_scrum109.md).
+
+### Decisiones
+
+- **Base de demostración propia, construida antes del aprovisionamiento
+  antiguo.** El escenario se carga sobre el dataset canónico recién cargado y
+  su protagonista recibe `DEMO-SCRUM72-01`, el dispositivo que reconocen
+  `provisionar_demo.py`, Demo Control, el portal y el restaurador. Así esas
+  herramientas funcionan **sin cambios**: `localizar_episodio_demo` encuentra
+  una sola asignación y `provisionar` reconoce el episodio sin crear filas. Si el
+  dispositivo ya existe, la carga se niega en lugar de reasignarlo.
+- **Definición separada de la carga.** `scripts/escenario_scrum109_definicion.py`
+  describe la historia (pacientes, embarazos, alteraciones de valores) y la
+  traduce, columna por columna, a las tablas operacionales existentes; no hay
+  tablas, columnas ni catálogos nuevos. `scripts/cargar_escenario_scrum109.py`
+  resuelve en la base lo que no se inventa —médico de la demo y su clínica, rol
+  PACIENTE, catálogos— y carga.
+- **Reutilizar el motor del cargador canónico, no su validación.**
+  `cargar_dataset` ya hace lo que el ticket pide —insertar lo ausente,
+  conservar lo idéntico, abortar ante una llave con otro contenido y verificar
+  después—; `validar_dataset` exige los metadatos de la muestra aprobada
+  (732/1.180) y no se toca ni se relaja.
+- **Identificadores explícitos en bloques reservados** (10901–10999 y
+  10.900.001–10.999.999), asignados para toda la historia aunque el corte no la
+  cargue entera. Son la marca estable de las filas del escenario, y las
+  secuencias se dejan detrás de cada bloque para que la API no tome un
+  identificador que una observación futura ya tiene.
+- **El corte no mueve la historia.** Fechas fijas; el corte decide hasta dónde
+  se carga. Por omisión, el momento de la ejecución en America/Panama; nunca
+  futuro; un retroceso se rechaza y se resuelve restaurando un respaldo.
+- **Semáforo y semana por las funciones del dominio** (`clasificar_lectura`,
+  `semana_gestacional`, `SEMANA_MINIMA_DE_MOVIMIENTO`). Sin ERROR: el escenario
+  no lo necesita y ERROR no representa la pérdida de un embarazo.
+- **Sin trazabilidad inventada**: `fecha_hora_sincronizacion` en NULL (como en
+  la ruta en vivo), sin filas de idempotencia ni de auditoría.
+- **Contraseñas.** La cuenta usa la contraseña simulada del dataset con un hash
+  Argon2id; en una reejecución se conserva el hash existente si verifica, para
+  que la sal aleatoria no convierta la repetición en un conflicto.
+- **El embarazo anterior de la protagonista cae en 2025** porque la afiliación
+  del médico de la demo empieza el 2025-01-01: antes, el ETL no podría derivar
+  su clínica. Su seguimiento queda cerrado, como el de cualquier embarazo
+  finalizado, y por eso el médico no lo ve: es la regla vigente de
+  `v_entitlement_medico` y de la API, que el escenario no cambia.
+- **Un paso propio en CI** para la suite de PostgreSQL: necesita una base sin el
+  aprovisionamiento antiguo, y las suites existentes lo aplican.
