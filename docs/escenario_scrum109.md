@@ -199,7 +199,8 @@ mientras exista dentro del repositorio. Muévelo fuera o bórralo tras revisarlo
   cuenta y sus identidades (`v_paciente_medico`) y sus cinco embarazos **en
   curso**. **No** ve el embarazo anterior de la protagonista: la regla vigente
   (API y `v_entitlement_medico`) exige un seguimiento activo y vigente hoy, y el
-  de un embarazo finalizado está cerrado. El escenario respeta esa regla.
+  de un embarazo finalizado está cerrado. El escenario respeta esa regla (ver
+  «Por qué el médico no ve el embarazo anterior»).
 - **Otro médico**: `medico02` (misma clínica, sin seguimiento) y `medico03`
   (otra clínica) no ven ninguna paciente del escenario (404 en la API).
 - **Administración** (`v_resumen_administrativo`): sin identidades. Publica
@@ -219,6 +220,37 @@ medidas es el **PBIP del 27/09/2026**
 (`[upn_medico] = LOWER(USERPRINCIPALNAME())`). El archivo vigente puede ser
 posterior: comprueba los nombres antes de aplicar nada. Ver el informe de
 entrega para la lista y las expresiones DAX propuestas.
+
+## Por qué el médico no ve el embarazo anterior (limitación aceptada)
+
+**Causa.** El acceso del médico no depende del estado del embarazo
+(`ACTIVO`/`FINALIZADO`), sino de que tenga **hoy** un `seguimiento_clinico`
+propio vigente: `activo` y `fecha_asignacion <= hoy <= fecha_fin` (o
+`fecha_fin` nula), con «hoy» en America/Panama. La misma condición está escrita
+en dos sitios independientes, ambos de la migración
+`backend/alembic/versions/3b4a352bc39a_enable_row_level_security_and_clinical_.py`:
+
+| Superficie | Dónde | Efecto sobre el embarazo 10901 |
+|---|---|---|
+| API (`/api/v1/clinico/*`) y RLS de `operacional` | `seguridad.embarazo_en_seguimiento_vigente()`, usada por `app/services/consulta_clinica.py` y por las políticas | `GET /clinico/embarazos` no lo lista y `/clinico/embarazos/10901/sesiones` responde 404 (comprobado por HTTP). |
+| Power BI | `publicacion.v_entitlement_medico` (condición `VIGENCIA`); de ella derivan `v_embarazo_medico` y `v_entitlement_paciente_medico` (`9c1d7f2ab4e8_…`) | Sin fila de entitlement ni fila en `v_embarazo_medico`. Sus 56 lecturas sí están en `v_lectura`, que no filtra en la base: las oculta el RLS del PBIX (R1 → `v_embarazo_medico` → R4). |
+
+El seguimiento del embarazo 10901 se cerró con el parto
+(`fecha_fin = 2025-10-13`, `activo = false`), igual que en los embarazos
+finalizados del dataset canónico. Es una decisión de diseño de SCRUM-98/99:
+`docs/proteccion_analitica.md` §14.2 explica que ver a una paciente no debe
+arrastrar «un episodio que el médico no sigue».
+
+**Por qué no se corrige en SCRUM-109.** Con los datos solo se lograría dejando
+abierto un seguimiento de un embarazo cerrado hace un año, que es inventar un
+seguimiento activo para eludir la regla. La alternativa es cambiar el predicado
+de la API/RLS o las vistas de publicación, lo que amplía permisos y queda
+fuera de este ticket. Si se quiere que el médico consulte antecedentes
+obstétricos, es una decisión de autorización para otro ticket.
+
+**Recorrido de la demostración.** El historial del embarazo anterior se muestra
+en el **portal de la paciente** (Mi historial y su PDF); en el **BI médico** se
+muestra el embarazo actual de la protagonista y los de las pacientes de apoyo.
 
 ## Dependencias
 

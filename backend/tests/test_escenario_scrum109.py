@@ -296,6 +296,22 @@ def test_una_sola_asignacion_por_dispositivo_y_un_seguimiento_principal_por_emba
     assert cerrado["fecha_fin"] == _embarazo(d, 10901).fecha_cierre and not cerrado["activo"]
 
 
+def test_ningun_embarazo_finalizado_conserva_un_seguimiento_vigente(d, referencias):
+    """El acceso del medico exige un seguimiento activo y vigente hoy.
+
+    Dejar abierto el de un embarazo cerrado daria al medico el episodio
+    anterior eludiendo esa regla; el escenario no lo hace (ver la seccion
+    «Por que el medico no ve el embarazo anterior» de la guia).
+    """
+    filas = d.filas(referencias, None)
+    cierres = {e.id_embarazo: e.fecha_cierre for e in d.EMBARAZOS if e.cerrado}
+    assert cierres
+    for s in filas["seguimiento_clinico"]:
+        if s["id_embarazo"] in cierres:
+            assert not s["activo"]
+            assert s["fecha_fin"] is not None and s["fecha_fin"] <= cierres[s["id_embarazo"]]
+
+
 def test_la_precarga_no_inventa_trazabilidad_de_sincronizacion(d, referencias):
     filas = d.filas(referencias, None)
     assert all(f["fecha_hora_sincronizacion"] is None for f in filas["lectura_biometrica"])

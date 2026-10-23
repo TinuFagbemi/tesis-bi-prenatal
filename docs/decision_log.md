@@ -2569,5 +2569,10 @@ Guía de uso: [Escenario de demostración de SCRUM-109](escenario_scrum109.md).
   su clínica. Su seguimiento queda cerrado, como el de cualquier embarazo
   finalizado, y por eso el médico no lo ve: es la regla vigente de
   `v_entitlement_medico` y de la API, que el escenario no cambia.
+  Se evaluó resolverlo con datos y se descartó: exigiría un seguimiento
+  activo y vigente sobre un embarazo cerrado en 2025, es decir, inventar un
+  seguimiento para eludir la regla. Ampliar el acceso a antecedentes es una
+  decisión de autorización para otro ticket; en la demo, el embarazo anterior
+  se muestra en el portal de la paciente.
 - **Un paso propio en CI** para la suite de PostgreSQL: necesita una base sin el
   aprovisionamiento antiguo, y las suites existentes lo aplican.
