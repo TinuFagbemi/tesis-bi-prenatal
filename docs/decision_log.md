@@ -2576,3 +2576,22 @@ Guía de uso: [Escenario de demostración de SCRUM-109](escenario_scrum109.md).
   se muestra en el portal de la paciente.
 - **Un paso propio en CI** para la suite de PostgreSQL: necesita una base sin el
   aprovisionamiento antiguo, y las suites existentes lo aplican.
+- **El grupo se ubica en Darién y el médico no se fija en la definición**
+  (versión SCRUM-109.3). La definición declara la provincia
+  (`PROVINCIA_DE_LA_DEMO`); el cargador exige una sola clínica en ella y un solo
+  médico con cuenta MEDICO activa cuya afiliación a esa clínica supere, día a
+  día, `reglas.verificar_afiliacion`. Con cero o varios candidatos se niega: no
+  elige el primero por identificador, como sí hace `provisionar_demo._elegir_medico`
+  para el aprovisionamiento antiguo. En el dataset canónico resultan la clínica
+  102 (Chepigana, Camogantí) y `medico05@example.com` (id_medico 104), afiliado
+  desde el 2025-01-01, de modo que el embarazo de 2025 sigue cubierto.
+- **Cédula por origen, no por residencia.** Residir o atenderse en Darién no
+  cambia una cédula. Para esta demo se define que las seis pacientes son
+  originarias de Darién y llevan el prefijo provincial 5, como las de Darién del
+  generador (`PREFIJO_POR_PROVINCIA`). Son inventadas (provincia-tomo-asiento,
+  tomos 702–716, distintos del 900 del dataset), no coinciden con ninguna de la
+  base y **no se ha verificado si coinciden con las de personas reales**.
+- **La sexta paciente no queda ligada a la clínica en la base.** El modelo solo
+  relaciona paciente y clínica a través del embarazo (`embarazo.id_clinica`);
+  Paula no tiene cuenta ni embarazo (SCRUM-110), y crearle uno para ligarla
+  falsearía su perfil. Su vínculo con Darién es el de origen, por la cédula.
