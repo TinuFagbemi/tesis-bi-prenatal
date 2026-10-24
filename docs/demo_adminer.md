@@ -144,9 +144,9 @@ ejecuta **después** de que la verificación diga `LISTO PARA DEMO`.
    embarazo de la demostración, lo define el aprovisionamiento de la demo: es el
    `id_embarazo` que imprime `python scripts/provisionar_demo.py verificar`. No
    se supone un valor fijo.
-2. **El seudónimo de `E` existe.** Si la consulta de preparación devuelve `seud`
-   vacío, **detenerse**: el ETL todavía no procesó ese embarazo y la pestaña C
-   no tendría con qué filtrar.
+2. **El seudónimo de `E` existe.** Si la consulta de preparación devuelve
+   `seudonimo_embarazo_demo` vacío, **detenerse**: el ETL todavía no procesó
+   ese embarazo y la pestaña C no tendría con qué filtrar.
 3. **ETL al día para `E`.** `lecturas_e_sin_etl` debe ser `0`. Si no lo es,
    ejecutar el ETL y repetir la preparación.
 4. **Ninguna captura anterior pendiente para `E`.** La cola local de la cuenta de
@@ -179,12 +179,12 @@ En la pestaña 1 (sesión administrativa), sustituyendo `{E}`:
 
 ```sql
 SELECT p.e                                                         AS embarazo,
-       COALESCE((SELECT max(id_sesion) FROM operacional.sesion_monitoreo), 0) AS s0,
-       COALESCE((SELECT max(id_log) FROM operacional.auditoria_log), 0)     AS l0,
-       se.seudonimo                                                AS seud,
+       COALESCE((SELECT max(id_sesion) FROM operacional.sesion_monitoreo), 0) AS id_ultima_sesion_previa,
+       COALESCE((SELECT max(id_log) FROM operacional.auditoria_log), 0)     AS id_ultimo_log_previo,
+       se.seudonimo                                                AS seudonimo_embarazo_demo,
        (SELECT COALESCE(max(v.secuencia_sesion), 0)
           FROM publicacion.v_lectura v
-         WHERE v.seudonimo_embarazo = se.seudonimo)                AS q0,
+         WHERE v.seudonimo_embarazo = se.seudonimo)                AS ultima_secuencia_publicada_previa,
        (SELECT max(l.fecha_hora_captura)
           FROM operacional.lectura_biometrica l
           JOIN operacional.sesion_monitoreo s USING (id_sesion)
@@ -200,8 +200,21 @@ FROM (VALUES ({E})) AS p(e)
 LEFT JOIN privado.seudonimo_embarazo se ON se.id_embarazo = p.e;
 ```
 
-Devuelve siempre una fila. Anotar `s0`, `l0`, `seud` y `q0`, y comprobar las
-precondiciones 2, 3 y 5.
+Devuelve siempre una fila. Comprobar las precondiciones 2, 3 y 5 y anotar los
+cuatro **valores de referencia**:
+
+| Valor | Qué es | De dónde sale | Para qué se usa |
+|---|---|---|---|
+| `id_ultima_sesion_previa` | El identificador de sesión más alto que existe antes del ensayo, de **cualquier** embarazo. Es un número de identificación, no la última sesión de `E`. | `max(id_sesion)` de `operacional.sesion_monitoreo` | A y B muestran solo las sesiones de `E` con un `id_sesion` mayor, es decir, las creadas durante el ensayo. |
+| `id_ultimo_log_previo` | El identificador del último evento de auditoría registrado antes del ensayo. | `max(id_log)` de `operacional.auditoria_log` | D muestra solo los eventos posteriores. |
+| `ultima_secuencia_publicada_previa` | El número de orden de la última sesión de `E` ya publicada: 1, 2, 3…, contado dentro de ese embarazo. Vale `0` si todavía no hay ninguna. | `max(secuencia_sesion)` de `publicacion.v_lectura` para el seudónimo de `E` | C muestra solo las sesiones publicadas después. |
+| `seudonimo_embarazo_demo` | El seudónimo (un UUID) con que la capa publicada identifica a `E`. | `privado.seudonimo_embarazo` | C filtra por él, porque la publicación no expone `id_embarazo`. |
+
+Los cuatro valores se toman **en cada ensayo**, justo antes de empezarlo, y se
+copian a mano en las consultas A–D. **No se reutilizan** los de un ensayo
+anterior ni los que aparecen como ejemplo en la sección 9: cada captura, inicio
+de sesión o ETL los cambia, y con valores viejos las pestañas mostrarían filas de
+otro ensayo, o ninguna.
 
 ### 4.3 Las cuatro pestañas
 
@@ -223,12 +236,14 @@ la consulta en la propia URL, codificada en `sql=`: Adminer la coloca en el
 editor **sin ejecutarla**, y recargar esa URL tampoco la ejecuta.
 
 En cada una se pega la consulta de la sección 5 **con los valores ya
-sustituidos** en lugar de `{E}`, `{S0}`, `{L0}`, `{SEUD}` y `{Q0}`. Si queda un
-marcador sin sustituir, la consulta falla en lugar de devolver filas
-equivocadas. Se ejecuta una vez para comprobar el estado inicial y se deja
+sustituidos** en lugar de `{E}`, `{id_ultima_sesion_previa}`,
+`{id_ultimo_log_previo}`, `{seudonimo_embarazo_demo}` y
+`{ultima_secuencia_publicada_previa}`. Si queda un marcador sin sustituir, la
+consulta falla en lugar de devolver filas equivocadas. Se ejecuta una vez para
+comprobar el estado inicial y se deja
 abierta. Estado inicial esperado: A, B y C **vacías**. D puede tener ya filas:
-`L0` se toma antes de que la gestante inicie sesión, así que el inicio de sesión
-y lo que registre el portal al abrirse aparecen después de `L0`.
+`id_ultimo_log_previo` se toma antes de que la gestante inicie sesión, así que el inicio
+de sesión y lo que registre el portal al abrirse aparecen después de ese valor.
 
 Durante la defensa solo se pulsa **Execute** (o Ctrl+Enter): no se escribe SQL.
 No se recarga la página con F5, que volvería a enviar el formulario.
@@ -252,7 +267,7 @@ JOIN operacional.lectura_biometrica l USING (id_sesion)
 JOIN operacional.semaforo sem ON sem.id_semaforo = l.id_semaforo
 LEFT JOIN operacional.idempotencia_solicitud i ON i.id_sesion = s.id_sesion
 WHERE s.id_embarazo = {E}
-  AND s.id_sesion > {S0}
+  AND s.id_sesion > {id_ultima_sesion_previa}
 ORDER BY l.id_lectura;
 ```
 
@@ -272,7 +287,7 @@ FROM operacional.sesion_monitoreo s
 JOIN operacional.lectura_biometrica l USING (id_sesion)
 LEFT JOIN analitico.fact_lectura_biometrica f ON f.id_lectura = l.id_lectura
 WHERE s.id_embarazo = {E}
-  AND s.id_sesion > {S0}
+  AND s.id_sesion > {id_ultima_sesion_previa}
 ORDER BY l.id_lectura;
 ```
 
@@ -289,8 +304,8 @@ tabla de hechos conserva el mismo `id_lectura` que la tabla operacional.
 SELECT secuencia_sesion, fecha_captura, semana_gestacion, codigo_semaforo,
        hr_valor, spo2_valor, mov_valor, estado_hr, estado_spo2, estado_mov
 FROM publicacion.v_lectura
-WHERE seudonimo_embarazo = '{SEUD}'
-  AND secuencia_sesion > {Q0}
+WHERE seudonimo_embarazo = '{seudonimo_embarazo_demo}'
+  AND secuencia_sesion > {ultima_secuencia_publicada_previa}
 ORDER BY secuencia_sesion;
 ```
 
@@ -302,21 +317,22 @@ Se consulta como `fetalalert_powerbi` y muestra la superficie de esa cuenta, no
 lo que ve un médico: ver la sección 2. La vista no se modifica para la
 demostración.
 
-### D · Auditoría: eventos posteriores a `L0`
+### D · Auditoría: eventos posteriores a `id_ultimo_log_previo`
 
 ```sql
 SELECT id_log, fecha_hora AT TIME ZONE 'America/Panama' AS fecha_hora,
        id_usuario, accion, nombre_entidad_afectada, id_entidad_afectada,
        ip_origen
 FROM operacional.auditoria_log
-WHERE id_log > {L0}
+WHERE id_log > {id_ultimo_log_previo}
 ORDER BY id_log;
 ```
 
-Muestra, en orden, todos los eventos registrados **después de `L0`**, es decir,
-los que produjo la demostración si se cumplió la precondición 6. Como `L0` se
-toma antes de que la gestante inicie sesión, incluye su inicio de sesión y los
-accesos que registre el portal, además del registro de la sesión sincronizada.
+Muestra, en orden, todos los eventos registrados **después de
+`id_ultimo_log_previo`**, es decir, los que produjo la demostración si se
+cumplió la precondición 6. Como ese valor se toma antes de que la gestante
+inicie sesión, incluye su inicio de sesión y los accesos que registre el
+portal, además del registro de la sesión sincronizada.
 
 **Correlación con A.** El registro de la sesión aparece como
 `SESION_MONITOREO_REGISTRADA`, con `nombre_entidad_afectada = 'sesion_monitoreo'`
@@ -420,8 +436,10 @@ Hecho en la computadora de desarrollo, sobre `fetalalert_demo_sustentacion`
 (sección 10), con una sola captura `SIGNOS_MATERNOS` del embarazo 130. Valida el
 procedimiento de SCRUM-103; **no** decide la base definitiva de la sustentación.
 
-Referencias tomadas antes del inicio de sesión de la gestante: `S0 = 831`,
-`L0 = 0`, `Q0 = 0` y el seudónimo del embarazo 130.
+Referencias tomadas antes del inicio de sesión de la gestante:
+`id_ultima_sesion_previa = 831`, `id_ultimo_log_previo = 0`,
+`ultima_secuencia_publicada_previa = 0` y `seudonimo_embarazo_demo` del
+embarazo 130. Son los valores de ese ensayo y no se reutilizan.
 
 La columna «Navegador» recoge lo que la operadora verificó y reportó a mano en
 Adminer y en el portal. La columna «Terminal / HTTP» recoge las comprobaciones
@@ -515,7 +533,9 @@ Adminer no cambia.
    el usuario de la sesión.
 3. **Valores de referencia, antes de que la gestante inicie sesión.** En la
    pestaña 1, la consulta de preparación (sección 4.2). Comprobar las
-   precondiciones y anotar `s0`, `l0`, `seud` y `q0`.
+   precondiciones y anotar los cuatro valores de referencia
+   (`id_ultima_sesion_previa`, `id_ultimo_log_previo`,
+   `ultima_secuencia_publicada_previa` y `seudonimo_embarazo_demo`).
 4. **Consultas preparadas.** Sustituir los valores en A–D y ejecutarlas: A, B y
    C vacías.
 5. **La gestante inicia sesión en el portal.** D puede mostrar ahora su inicio

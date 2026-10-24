@@ -2400,7 +2400,8 @@ conciliación no pasan por código nuevo. Una prueba recorre el fuente del scrip
 y falla si aparece un umbral o una función de carga.
 
 La auditoría y las consultas de observación se quedan en Adminer (SCRUM-103).
-Demo Control tampoco calcula `S0`, `L0`, `Q0` ni el seudónimo.
+Demo Control tampoco calcula los valores de referencia (`id_ultima_sesion_previa`,
+`id_ultimo_log_previo`, `ultima_secuencia_publicada_previa` ni `seudonimo_embarazo_demo`).
 
 ### El reset no escribe en PostgreSQL
 
