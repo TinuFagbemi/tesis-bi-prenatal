@@ -15,8 +15,10 @@ asignaria a una paciente canonica. Si ese dispositivo ya existe con otro
 identificador, la carga se niega y lo explica.
 
 **Que hace.** Lee la definicion (``escenario_scrum109_definicion.py``), resuelve
-en la base lo que no se inventa --el medico autorizado de la demo y su clinica,
-el rol PACIENTE, los catalogos de semana y de semaforo--, comprueba conflictos
+en la base lo que no se inventa --la clinica de la provincia de la demo, los
+roles PACIENTE y MEDICO, la especialidad y los catalogos de semana y de
+semaforo--, comprueba que la afiliacion del medico de la demo deriva esa
+clinica cada dia del escenario (la regla del ETL), comprueba conflictos
 y carga todo en **una transaccion** con :func:`app.loader.postgres.cargar_dataset`,
 el mismo motor idempotente del cargador canonico: inserta lo que falta, deja lo
 identico y aborta ante una fila con la misma llave y otro contenido. La
@@ -177,14 +179,26 @@ def _fechas_que_debe_cubrir_la_afiliacion() -> list[date]:
     return sorted(fechas)
 
 
+def _id_de_rol(conexion: Connection, nombre: str) -> int:
+    rol = conexion.execute(
+        text("SELECT id_rol FROM operacional.rol WHERE nombre_rol = :r"), {"r": nombre}
+    ).scalar_one_or_none()
+    if rol is None:
+        raise ErrorDeEscenario(f"El catalogo de roles no tiene {nombre}.")
+    return rol
+
+
 def resolver_referencias(conexion: Connection, clave: str) -> definicion.Referencias:
-    """Clinica y medico de la demo, rol PACIENTE, catalogos y hashes.
+    """Clinica de la demo, roles, especialidad, catalogos y hashes.
 
     La clinica es la unica de :data:`definicion.PROVINCIA_DE_LA_DEMO`. El medico
-    es el unico con cuenta MEDICO activa cuya afiliacion a esa clinica supera,
-    para cada dia del escenario, la misma regla del ETL
-    (``reglas.verificar_afiliacion``). Si hay cero o varios, se niega en lugar
-    de elegir: el medico autorizado no se adivina.
+    no se busca entre los existentes: es el del escenario
+    (:data:`definicion.MEDICO_DE_LA_DEMO`), con su unica afiliacion a esa
+    clinica. Aqui se comprueba, para cada dia del escenario y con la misma
+    regla del ETL (``reglas.verificar_afiliacion``), que esa afiliacion --junto
+    con cualquier otra que ya tenga en la base-- deriva siempre esta clinica.
+    Que otros medicos esten afiliados a la misma clinica no importa: cada
+    embarazo tiene su propio seguimiento.
     """
     clinicas = conexion.execute(
         text("SELECT id_clinica FROM operacional.clinica WHERE provincia = :provincia"),
@@ -197,56 +211,41 @@ def resolver_referencias(conexion: Connection, clave: str) -> definicion.Referen
         )
     id_clinica = clinicas[0]
 
-    candidatos = conexion.execute(
-        text(
-            "SELECT DISTINCT um.id_medico FROM operacional.usuario u"
-            "  JOIN operacional.usuario_medico um ON um.id_usuario = u.id_usuario"
-            "  JOIN operacional.rol r ON r.id_rol = u.id_rol"
-            "  JOIN operacional.medico_clinica mc ON mc.id_medico = um.id_medico"
-            " WHERE r.nombre_rol = :rol AND u.activo AND mc.id_clinica = :clinica"
-            " ORDER BY um.id_medico"
-        ),
-        {"rol": NombreRol.MEDICO.value, "clinica": id_clinica},
-    ).scalars().all()
-    fechas = _fechas_que_debe_cubrir_la_afiliacion()
-    autorizados = []
-    for id_medico in candidatos:
-        afiliaciones = [
-            reglas.AfiliacionClinica(id_clinica=f.id_clinica, fecha_inicio=f.fecha_inicio, fecha_final=f.fecha_final)
-            for f in conexion.execute(
-                text(
-                    "SELECT id_clinica, fecha_inicio, fecha_final FROM operacional.medico_clinica"
-                    " WHERE id_medico = :m"
-                ),
-                {"m": id_medico},
-            )
-        ]
-        try:
-            # La misma regla del ETL, para cada dia del escenario: falla aqui y
-            # no a mitad de la ejecucion del ETL.
-            for dia in fechas:
-                reglas.verificar_afiliacion(
-                    afiliaciones, dia, id_medico=id_medico, id_clinica_embarazo=id_clinica, id_lectura=0
-                )
-        except reglas.ErrorDeDatos:
-            continue
-        autorizados.append(id_medico)
-    if len(autorizados) != 1:
-        raise ErrorDeEscenario(
-            f"Se esperaba exactamente un medico con cuenta activa y una unica afiliacion a la clinica "
-            f"id_clinica={id_clinica} del {fechas[0].isoformat()} al {fechas[-1].isoformat()}; "
-            f"hay {len(autorizados)} (de {len(candidatos)} afiliados con cuenta)."
+    medico = definicion.MEDICO_DE_LA_DEMO
+    afiliaciones = {
+        reglas.AfiliacionClinica(id_clinica=id_clinica, fecha_inicio=medico.inicio_afiliacion, fecha_final=None)
+    }
+    afiliaciones |= {
+        reglas.AfiliacionClinica(id_clinica=f.id_clinica, fecha_inicio=f.fecha_inicio, fecha_final=f.fecha_final)
+        for f in conexion.execute(
+            text("SELECT id_clinica, fecha_inicio, fecha_final FROM operacional.medico_clinica WHERE id_medico = :m"),
+            {"m": medico.id_medico},
         )
-    id_medico = autorizados[0]
+    }
+    try:
+        # Falla aqui y no a mitad de la ejecucion del ETL.
+        for dia in _fechas_que_debe_cubrir_la_afiliacion():
+            reglas.verificar_afiliacion(
+                sorted(afiliaciones, key=lambda a: (a.id_clinica, a.fecha_inicio)),
+                dia, id_medico=medico.id_medico, id_clinica_embarazo=id_clinica, id_lectura=0,
+            )
+    except reglas.ErrorDeDatos as error:
+        raise ErrorDeEscenario(
+            f"La afiliacion del medico de la demo (id_medico={medico.id_medico}) no deriva la clinica "
+            f"id_clinica={id_clinica} en todo el escenario ({type(error).__name__})."
+        ) from None
 
-    rol = conexion.execute(
-        text("SELECT id_rol FROM operacional.rol WHERE nombre_rol = :r"), {"r": NombreRol.PACIENTE.value}
-    ).scalar_one_or_none()
-    if rol is None:
-        raise ErrorDeEscenario("El catalogo de roles no tiene PACIENTE.")
+    especialidades = conexion.execute(
+        text("SELECT id_especialidad FROM operacional.especialidad WHERE nombre_especialidad = :n"),
+        {"n": definicion.ESPECIALIDAD_DEL_MEDICO},
+    ).scalars().all()
+    if len(especialidades) != 1:
+        raise ErrorDeEscenario(
+            f"El catalogo de especialidades no tiene una unica «{definicion.ESPECIALIDAD_DEL_MEDICO}»."
+        )
     catalogos = provisionar_demo.leer_catalogos(conexion)
 
-    cuentas = [p.id_usuario for p in definicion.PACIENTES if p.con_cuenta]
+    cuentas = [p.id_usuario for p in definicion.PACIENTES if p.con_cuenta] + [medico.id_usuario]
     existentes = dict(
         conexion.execute(
             text("SELECT id_usuario, password_hash FROM operacional.usuario WHERE id_usuario = ANY(:ids)"),
@@ -265,8 +264,9 @@ def resolver_referencias(conexion: Connection, clave: str) -> definicion.Referen
     }
     return definicion.Referencias(
         id_clinica=id_clinica,
-        id_medico=id_medico,
-        id_rol_paciente=rol,
+        id_rol_paciente=_id_de_rol(conexion, NombreRol.PACIENTE.value),
+        id_rol_medico=_id_de_rol(conexion, NombreRol.MEDICO.value),
+        id_especialidad=especialidades[0],
         semanas={f["semana"]: (f["id_tiempo_gest"], f["trimestre"]) for f in catalogos["tiempo_gestacional"]},
         semaforos=dict(catalogos["semaforo"]),
         password_hash=hashes,
@@ -351,6 +351,9 @@ def comprobar_conflictos(conexion: Connection, completas: dict, del_corte: dict)
          _ids(completas, "asignacion_dispositivo")),
         ("asignacion_dispositivo", "id_embarazo", embarazos, _ids(completas, "asignacion_dispositivo")),
         ("seguimiento_clinico", "id_embarazo", embarazos, _ids(completas, "seguimiento_clinico")),
+        # El medico de la demo sigue solo a las pacientes del escenario.
+        ("seguimiento_clinico", "id_medico", sorted(_ids(completas, "medico")),
+         _ids(completas, "seguimiento_clinico")),
         ("embarazo", "id_paciente", sorted(_ids(completas, "paciente")), set(embarazos)),
     ):
         pk = definicion.BLOQUES[tabla][0]
@@ -364,6 +367,20 @@ def comprobar_conflictos(conexion: Connection, completas: dict, del_corte: dict)
                 f"{tabla}: {len(ajenas)} fila(s) ajenas ligadas por {columna} a filas del escenario "
                 f"(p. ej. {pk}={min(ajenas)})."
             )
+    # medico_clinica no tiene identificador propio: sus filas se reconocen por
+    # (id_medico, id_clinica). Otra afiliacion del medico de la demo es ajena.
+    propias = {(f["id_medico"], f["id_clinica"]) for f in completas.get("medico_clinica", [])}
+    ajenas = {
+        (f.id_medico, f.id_clinica)
+        for f in conexion.execute(
+            text("SELECT id_medico, id_clinica FROM operacional.medico_clinica WHERE id_medico = ANY(:v)"),
+            {"v": sorted(_ids(completas, "medico"))},
+        )
+    } - propias
+    if ajenas:
+        motivos.append(
+            f"medico_clinica: {len(ajenas)} afiliacion(es) ajenas del medico de la demo (p. ej. {min(ajenas)})."
+        )
     if motivos:
         raise ConflictoDeEscenario(" | ".join(motivos))
 
@@ -438,10 +455,13 @@ def contar_presentes(conexion: Connection) -> dict[str, int]:
             text(f"SELECT count(*) FROM operacional.{tabla} WHERE {columna} BETWEEN :a AND :b"),
             {"a": primero, "b": ultimo},
         ).scalar_one()
-    conteos["usuario_paciente"] = conexion.execute(
-        text("SELECT count(*) FROM operacional.usuario_paciente WHERE id_usuario BETWEEN :a AND :b"),
-        {"a": definicion.BLOQUE_ENTIDADES[0], "b": definicion.BLOQUE_ENTIDADES[1]},
-    ).scalar_one()
+    for tabla, columna in (
+        ("usuario_paciente", "id_usuario"), ("usuario_medico", "id_usuario"), ("medico_clinica", "id_medico"),
+    ):
+        conteos[tabla] = conexion.execute(
+            text(f"SELECT count(*) FROM operacional.{tabla} WHERE {columna} BETWEEN :a AND :b"),
+            {"a": definicion.BLOQUE_ENTIDADES[0], "b": definicion.BLOQUE_ENTIDADES[1]},
+        ).scalar_one()
     return conteos
 
 
@@ -582,7 +602,7 @@ def construir_manifiesto(resultado: ResultadoEscenario, base: str, ejecutado_en:
         "fin_del_escenario": definicion.FIN_DEL_ESCENARIO.isoformat(),
         "referencias": {
             "id_clinica": resultado.referencias.id_clinica,
-            "id_medico": resultado.referencias.id_medico,
+            "id_medico": definicion.MEDICO_DE_LA_DEMO.id_medico,
             "bloques": {t: {"columna": c, "desde": a, "hasta": b} for t, (c, (a, b)) in definicion.BLOQUES.items()},
             "pacientes": [
                 {"id_paciente": p.id_paciente, "id_usuario": p.id_usuario, "papel": p.papel}

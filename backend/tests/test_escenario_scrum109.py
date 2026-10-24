@@ -62,14 +62,16 @@ def cargador():
 def referencias(d):
     """Catalogos con la misma forma que el canonico: semanas 1-40 y tres niveles."""
     generador = _cargar("generate_mock_data")
-    # 102/104: la clinica de Darien y su medico en el dataset canonico.
+    # 102: la clinica de Darien del dataset canonico; roles y especialidad canonicos.
+    cuentas = [p.id_usuario for p in d.PACIENTES if p.con_cuenta] + [d.MEDICO_DE_LA_DEMO.id_usuario]
     return d.Referencias(
         id_clinica=102,
-        id_medico=104,
         id_rol_paciente=102,
+        id_rol_medico=101,
+        id_especialidad=100,
         semanas={s: (99 + s, generador.calcular_trimestre(s)) for s in range(1, 41)},
         semaforos={"OK": 100, "WARNING": 101, "ERROR": 102},
-        password_hash={p.id_usuario: "$argon2id$ficticio" for p in d.PACIENTES if p.con_cuenta},
+        password_hash={cuenta: "$argon2id$ficticio" for cuenta in cuentas},
     )
 
 
@@ -124,11 +126,78 @@ def test_la_protagonista_tiene_su_identidad_completa(d):
     assert elena.contacto_secundario == (TipoContacto.TELEFONO_DOMICILIO, "299-6408")
 
 
-def test_la_demo_es_de_darien_y_no_fija_medico_ni_clinica(d):
+def test_la_demo_es_de_darien_con_un_medico_propio(d):
     assert d.PROVINCIA_DE_LA_DEMO == "Darién"
     assert d.PREFIJO_DE_CEDULA == "5"
-    # El medico y la clinica los resuelve el cargador en la base.
-    assert not hasattr(d, "EMAIL_MEDICO_DE_LA_DEMO")
+    m = d.MEDICO_DE_LA_DEMO
+    assert m.nombre_completo == "Itzel Marina Barría Cortés"
+    assert m.correo == "itzel.barria@example.com" == m.correo.lower()
+    assert d.BLOQUE_ENTIDADES[0] <= m.id_medico <= d.BLOQUE_ENTIDADES[1]
+    assert m.id_usuario not in {p.id_usuario for p in d.PACIENTES}
+    # Afiliado antes del primer embarazo del escenario (2025-01-13).
+    assert m.inicio_afiliacion == date(2025, 1, 1) <= min(e.fecha_inicio for e in d.EMBARAZOS)
+    # Ningun medico canonico: su cuenta no esta en el patron del dataset.
+    assert not re.fullmatch(r"medico\d+@example\.com", m.correo)
+
+
+def test_el_medico_de_la_demo_sigue_los_seis_embarazos_y_solo_ellos(d, referencias):
+    filas = d.filas(referencias, None)
+    seguimientos = filas["seguimiento_clinico"]
+    assert {s["id_embarazo"] for s in seguimientos} == {e.id_embarazo for e in d.EMBARAZOS}
+    assert {s["id_medico"] for s in seguimientos} == {d.MEDICO_DE_LA_DEMO.id_medico}
+    assert all(s["rol_seguimiento"] == "PRINCIPAL" for s in seguimientos)
+    for e in d.EMBARAZOS:
+        s = next(x for x in seguimientos if x["id_embarazo"] == e.id_embarazo)
+        assert s["fecha_asignacion"] == e.fecha_inicio
+        assert (s["fecha_fin"], s["activo"]) == ((e.fecha_cierre, False) if e.cerrado else (None, True))
+    # Cinco pacientes con embarazo en curso; Paula sin cuenta ni embarazo.
+    en_curso = {e.id_paciente for e in d.EMBARAZOS if not e.cerrado}
+    assert en_curso == {10901, 10902, 10903, 10904, 10905}
+    assert filas["medico_clinica"] == [{
+        "id_medico": d.MEDICO_DE_LA_DEMO.id_medico, "id_clinica": 102,
+        "fecha_inicio": date(2025, 1, 1), "fecha_final": None, "activo": True,
+    }]
+    assert filas["usuario_medico"] == [{"id_usuario": 10950, "id_medico": 10950}]
+    assert [u["id_rol"] for u in filas["usuario"] if u["id_usuario"] == 10950] == [101]
+
+
+def test_un_seguimiento_principal_superpuesto_se_rechaza(d, monkeypatch):
+    """Control negativo: dos PRINCIPAL el mismo dia es la ambiguedad que el ETL rechaza."""
+    originales = d.seguimientos()
+    otro = reglas.PeriodoDeSeguimiento(10902, 104, date(2026, 9, 1), None)
+    monkeypatch.setattr(d, "seguimientos", lambda: originales + [otro])
+    with pytest.raises(d.ErrorDeDefinicion, match="DerivacionAmbigua"):
+        d.validar_definicion()
+    with pytest.raises(reglas.DerivacionAmbigua):
+        reglas.medico_responsable(
+            [s for s in d.seguimientos() if s.id_seguimiento == 10902], date(2026, 10, 1), id_lectura=0
+        )
+
+
+def test_una_afiliacion_que_empieza_tarde_se_rechaza(d, monkeypatch):
+    tarde = dataclasses.replace(d.MEDICO_DE_LA_DEMO, inicio_afiliacion=date(2025, 2, 1))
+    monkeypatch.setattr(d, "MEDICO_DE_LA_DEMO", tarde)
+    with pytest.raises(d.ErrorDeDefinicion, match="embarazo 10901, 2025-01-13"):
+        d.validar_definicion()
+
+
+def test_los_dos_embarazos_de_elena_no_se_solapan_y_son_coherentes(d):
+    """El intervalo es plausible pero corto: se documenta, no se impone."""
+    anterior, actual = sorted(
+        (e for e in d.EMBARAZOS if e.id_paciente == 10901), key=lambda e: e.fecha_inicio
+    )
+    assert anterior.fecha_cierre < actual.fecha_inicio
+    assert (actual.fecha_inicio - anterior.fecha_cierre).days == 196
+    # fecha_inicio es el inicio del computo gestacional: FPP = inicio + 280 dias.
+    assert anterior.fecha_probable_parto - anterior.fecha_inicio == timedelta(days=280)
+    # Cierre a termino: semana 40 por la aritmetica del sistema (39+0).
+    assert semana_gestacional(anterior.fecha_inicio, datetime(2025, 10, 13, tzinfo=d.ZONA)) == 40
+    assert max(o.dia for o in d.observaciones_del_embarazo(anterior)) < anterior.fecha_cierre
+    assert (anterior.numero_gestas, anterior.numero_partos) == (1, 0)
+    assert (actual.numero_gestas, actual.numero_partos) == (2, 1)
+    elena = d.paciente(10901)
+    edad = lambda dia: dia.year - elena.fecha_nac.year - ((dia.month, dia.day) < (elena.fecha_nac.month, elena.fecha_nac.day))  # noqa: E731
+    assert (edad(anterior.fecha_inicio), edad(actual.fecha_inicio)) == (30, 31)
 
 
 def test_una_cedula_de_otra_provincia_no_pasa_la_validacion(d, monkeypatch):
@@ -328,7 +397,11 @@ def test_identificadores_dentro_de_sus_bloques_y_sin_repetir(d, referencias):
         ids = [f[columna] for f in filas[tabla]]
         assert len(ids) == len(set(ids)), tabla
         assert all(primero <= i <= ultimo for i in ids), tabla
-    assert {f["id_usuario"] for f in filas["usuario_paciente"]} == {f["id_usuario"] for f in filas["usuario"]}
+    # Cada cuenta del escenario tiene exactamente un vinculo: de paciente o de medico.
+    pacientes = {f["id_usuario"] for f in filas["usuario_paciente"]}
+    medicos = {f["id_usuario"] for f in filas["usuario_medico"]}
+    assert not pacientes & medicos
+    assert pacientes | medicos == {f["id_usuario"] for f in filas["usuario"]}
 
 
 def test_una_sola_asignacion_por_dispositivo_y_un_seguimiento_principal_por_embarazo(d, referencias):

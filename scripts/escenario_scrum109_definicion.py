@@ -47,7 +47,14 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from app.etl.reglas import clasificar_lectura
+from app.etl.reglas import (
+    AfiliacionClinica,
+    ErrorDeDatos,
+    PeriodoDeSeguimiento,
+    clasificar_lectura,
+    medico_responsable,
+    verificar_afiliacion,
+)
 from app.loader.dataset import SEMANA_MINIMA_DE_MOVIMIENTO
 from app.models.enums import (
     EstadoDispositivo,
@@ -60,7 +67,7 @@ from app.models.enums import (
 )
 from app.services.ingesta import semana_gestacional
 
-VERSION = "SCRUM-109.3"
+VERSION = "SCRUM-109.4"
 NOMBRE = "Escenario de demostracion SCRUM-109"
 
 # Las fechas clinicas del proyecto son de Panama; el ETL ubica cada lectura en
@@ -80,10 +87,13 @@ FIN_DEL_ESCENARIO = date(2026, 11, 30)
 CODIGO_DISPOSITIVO_PRINCIPAL = "DEMO-SCRUM72-01"
 
 # La clinica de la demostracion, por su provincia: la del dataset canonico en
-# Darien. El cargador resuelve en la base la unica clinica de esa provincia y
-# el unico medico con cuenta activa cuya afiliacion a ella cubre todo el
-# escenario; ni sus identificadores ni el correo del medico se escriben aqui.
+# Darien. El cargador resuelve en la base la unica clinica de esa provincia; su
+# identificador no se escribe aqui. El medico de la demo, en cambio, es del
+# escenario (:data:`MEDICO_DE_LA_DEMO`): sigue solo a sus pacientes, de modo que
+# los medicos canonicos conservan unicamente las suyas.
 PROVINCIA_DE_LA_DEMO = "Darién"
+# La especialidad del medico de la demo, por su nombre en el catalogo canonico.
+ESPECIALIDAD_DEL_MEDICO = "Ginecología y Obstetricia"
 
 # Las seis pacientes son, por definicion de esta demo, originarias de Darien:
 # su cedula lleva el prefijo provincial 5 (como las de Darien del generador,
@@ -117,6 +127,8 @@ BLOQUES: dict[str, tuple[str, tuple[int, int]]] = {
     "paciente": ("id_paciente", BLOQUE_ENTIDADES),
     "telefono_paciente": ("id_telefono_paciente", BLOQUE_ENTIDADES),
     "usuario": ("id_usuario", BLOQUE_ENTIDADES),
+    "medico": ("id_medico", BLOQUE_ENTIDADES),
+    "telefono_medico": ("id_telefono_medico", BLOQUE_ENTIDADES),
     "dispositivo": ("id_dispositivo", BLOQUE_ENTIDADES),
     "embarazo": ("id_embarazo", BLOQUE_ENTIDADES),
     "seguimiento_clinico": ("id_seguimiento", BLOQUE_ENTIDADES),
@@ -147,6 +159,49 @@ class ErrorDeDefinicion(RuntimeError):
 # Un contacto secundario usa el id del perfil mas este desplazamiento, dentro
 # del mismo bloque reservado (10911-10916).
 DESPLAZAMIENTO_CONTACTO_SECUNDARIO = 10
+
+
+@dataclass(frozen=True)
+class Medico:
+    """El medico de la demo: identidad sintetica, cuenta MEDICO y afiliacion.
+
+    ``id_medico`` es tambien el de su cuenta (``usuario``) y el de su telefono,
+    dentro del bloque reservado. Su unica afiliacion es a la clinica de la
+    demo, desde ``inicio_afiliacion`` y sin fin: debe cubrir cada dia del
+    escenario, porque el ETL deriva de ella la clinica de cada lectura.
+    """
+
+    id_medico: int
+    primer_nombre: str
+    segundo_nombre: str | None
+    apellido_paterno: str
+    apellido_materno: str | None
+    usuario_de_correo: str
+    celular: str
+    inicio_afiliacion: date
+
+    @property
+    def id_usuario(self) -> int:
+        return self.id_medico
+
+    @property
+    def id_telefono_medico(self) -> int:
+        return self.id_medico
+
+    @property
+    def correo(self) -> str:
+        """Tambien su UPN en Power BI: ``lower(usuario.email)``."""
+        return f"{self.usuario_de_correo}@{DOMINIO_DE_CORREO}"
+
+    @property
+    def nombre_completo(self) -> str:
+        partes = (self.primer_nombre, self.segundo_nombre, self.apellido_paterno, self.apellido_materno)
+        return " ".join(p for p in partes if p)
+
+
+MEDICO_DE_LA_DEMO = Medico(
+    10950, "Itzel", "Marina", "Barría", "Cortés", "itzel.barria", "6731-5820", date(2025, 1, 1),
+)
 
 
 @dataclass(frozen=True)
@@ -386,13 +441,29 @@ def corte_minimo() -> datetime:
 # ---------------------------------------------------------------------------
 
 
+def seguimientos() -> list[PeriodoDeSeguimiento]:
+    """Un seguimiento PRINCIPAL por embarazo, del medico de la demo.
+
+    Desde el inicio del embarazo hasta su cierre (abierto si sigue en curso).
+    El de un embarazo finalizado queda cerrado: ningun medico lo ve hoy, y su
+    paciente si. Es la forma que exige el ETL: un solo PRINCIPAL por dia.
+    ``id_seguimiento`` es el ``id_embarazo`` que sigue (convencion del
+    escenario: un seguimiento por embarazo, mismo identificador).
+    """
+    return [
+        PeriodoDeSeguimiento(e.id_embarazo, MEDICO_DE_LA_DEMO.id_medico, e.fecha_inicio, e.fecha_cierre)
+        for e in EMBARAZOS
+    ]
+
+
 @dataclass(frozen=True)
 class Referencias:
     """Lo que el cargador resuelve en la base. Nada de esto se inventa aqui."""
 
     id_clinica: int
-    id_medico: int
     id_rol_paciente: int
+    id_rol_medico: int
+    id_especialidad: int
     # semana_gestacion -> (id_tiempo_gest, trimestre), del catalogo real.
     semanas: dict[int, tuple[int, int]]
     # codigo_nivel -> id_semaforo, del catalogo real.
@@ -432,10 +503,30 @@ def filas(referencias: Referencias, corte: datetime | None) -> dict[str, list[di
     """
     validar_definicion()
     tablas: dict[str, list[dict]] = {nombre: [] for nombre in (
-        "paciente", "telefono_paciente", "usuario", "usuario_paciente", "dispositivo",
-        "embarazo", "seguimiento_clinico", "asignacion_dispositivo",
-        "sesion_monitoreo", "lectura_biometrica",
+        "paciente", "telefono_paciente", "medico", "telefono_medico", "medico_clinica", "usuario",
+        "usuario_paciente", "usuario_medico", "dispositivo", "embarazo", "seguimiento_clinico",
+        "asignacion_dispositivo", "sesion_monitoreo", "lectura_biometrica",
     )}
+    m = MEDICO_DE_LA_DEMO
+    tablas["medico"].append({
+        "id_medico": m.id_medico, "id_especialidad": referencias.id_especialidad,
+        "primer_nombre": m.primer_nombre, "segundo_nombre": m.segundo_nombre,
+        "apellido_paterno": m.apellido_paterno, "apellido_materno": m.apellido_materno,
+        "email_med": m.correo,
+    })
+    tablas["telefono_medico"].append({
+        "id_telefono_medico": m.id_telefono_medico, "id_medico": m.id_medico,
+        "tipo_contacto": TipoContacto.CELULAR.value, "valor_contacto": m.celular, "principal": True,
+    })
+    tablas["medico_clinica"].append({
+        "id_medico": m.id_medico, "id_clinica": referencias.id_clinica,
+        "fecha_inicio": m.inicio_afiliacion, "fecha_final": None, "activo": True,
+    })
+    tablas["usuario"].append({
+        "id_usuario": m.id_usuario, "id_rol": referencias.id_rol_medico, "email": m.correo,
+        "password_hash": referencias.password_hash[m.id_usuario], "activo": True,
+    })
+    tablas["usuario_medico"].append({"id_usuario": m.id_usuario, "id_medico": m.id_medico})
     for p in PACIENTES:
         tablas["paciente"].append({
             "id_paciente": p.id_paciente, "cedula": p.cedula, "primer_nombre": p.primer_nombre,
@@ -475,12 +566,15 @@ def filas(referencias: Referencias, corte: datetime | None) -> dict[str, list[di
             "fecha_probable_parto": e.fecha_probable_parto, "estado_embarazo": e.estado.value,
             "fecha_cierre": e.fecha_cierre,
         })
+    for s in seguimientos():
+        cerrado = s.fecha_fin is not None
         tablas["seguimiento_clinico"].append({
-            "id_seguimiento": e.id_embarazo, "id_embarazo": e.id_embarazo,
-            "id_medico": referencias.id_medico, "fecha_asignacion": e.fecha_inicio,
-            "fecha_fin": e.fecha_cierre, "rol_seguimiento": RolSeguimiento.PRINCIPAL.value,
-            "activo": not e.cerrado,
+            "id_seguimiento": s.id_seguimiento, "id_embarazo": s.id_seguimiento,
+            "id_medico": s.id_medico, "fecha_asignacion": s.fecha_asignacion,
+            "fecha_fin": s.fecha_fin, "rol_seguimiento": RolSeguimiento.PRINCIPAL.value,
+            "activo": not cerrado,
         })
+    for e in EMBARAZOS:
         tablas["asignacion_dispositivo"].append({
             "id_asignacion": e.id_embarazo, "id_dispositivo": e.id_embarazo,
             "id_embarazo": e.id_embarazo, "fecha_inicio": e.fecha_inicio,
@@ -545,6 +639,38 @@ def validar_definicion() -> None:
                 raise ErrorDeDefinicion(
                     f"paciente {p.id_paciente}: correo alterno fuera del dominio reservado."
                 )
+    m = MEDICO_DE_LA_DEMO
+    if not primero <= m.id_medico <= ultimo:
+        raise ErrorDeDefinicion("El medico de la demo esta fuera del bloque reservado.")
+    if m.id_usuario in {p.id_usuario for p in PACIENTES if p.con_cuenta}:
+        raise ErrorDeDefinicion("La cuenta del medico de la demo coincide con la de una paciente.")
+    if not re.fullmatch(r"[a-z0-9]+([._][a-z0-9]+)*", m.usuario_de_correo) or m.correo in {
+        p.correo for p in PACIENTES
+    }:
+        raise ErrorDeDefinicion("Correo del medico de la demo invalido o repetido.")
+    if not re.fullmatch(r"6\d{3}-\d{4}", m.celular):
+        raise ErrorDeDefinicion("Celular del medico de la demo con formato invalido.")
+    # Su unica afiliacion debe cubrir cada dia con seguimiento u observacion,
+    # con la misma regla del ETL (la clinica real la resuelve el cargador).
+    afiliacion = [AfiliacionClinica(id_clinica=0, fecha_inicio=m.inicio_afiliacion, fecha_final=None)]
+    periodos = {s.id_seguimiento: s for s in seguimientos()}
+    if set(periodos) != set(ids_e):
+        raise ErrorDeDefinicion("Cada embarazo necesita exactamente un seguimiento del escenario.")
+    for e in EMBARAZOS:
+        dias = {e.fecha_inicio} | ({e.fecha_cierre} if e.fecha_cierre else set())
+        dias |= {o.dia for o in observaciones_del_embarazo(e)}
+        for dia in sorted(dias):
+            try:
+                id_medico = medico_responsable(
+                    [s for s in seguimientos() if s.id_seguimiento == e.id_embarazo], dia, id_lectura=0
+                )
+                verificar_afiliacion(afiliacion, dia, id_medico=id_medico, id_clinica_embarazo=0, id_lectura=0)
+            except ErrorDeDatos as error:
+                raise ErrorDeDefinicion(
+                    f"embarazo {e.id_embarazo}, {dia.isoformat()}: {type(error).__name__}."
+                ) from None
+            if id_medico != m.id_medico:
+                raise ErrorDeDefinicion(f"embarazo {e.id_embarazo}: lo sigue otro medico.")
     if codigos.count(CODIGO_DISPOSITIVO_PRINCIPAL) != 1:
         raise ErrorDeDefinicion("El dispositivo principal debe servir a un solo embarazo.")
     for e in EMBARAZOS:

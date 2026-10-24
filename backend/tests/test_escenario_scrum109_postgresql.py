@@ -50,8 +50,8 @@ AHORA = datetime(2026, 11, 19, 15, 0, tzinfo=timezone.utc)
 TABLAS_OPERACIONALES = (
     "paciente", "telefono_paciente", "usuario", "usuario_paciente", "dispositivo", "embarazo",
     "seguimiento_clinico", "asignacion_dispositivo", "sesion_monitoreo", "lectura_biometrica",
-    "clinica", "medico", "medico_clinica", "semaforo", "tiempo_gestacional", "rol",
-    "embarazo_factor_riesgo", "idempotencia_solicitud", "auditoria_log",
+    "clinica", "medico", "medico_clinica", "telefono_medico", "usuario_medico", "especialidad",
+    "semaforo", "tiempo_gestacional", "rol", "embarazo_factor_riesgo", "idempotencia_solicitud", "auditoria_log",
 )
 
 
@@ -219,38 +219,58 @@ def test_integridad_de_relaciones(cargador, conexion, revision, clave):
 
 
 # ---------------------------------------------------------------------------
-# Clinica y medico de Darien: se resuelven en la base, nunca se adivinan
+# Clinica de Darien resuelta en la base; medico propio de la demo
 # ---------------------------------------------------------------------------
 
 
-def test_el_escenario_queda_en_la_clinica_de_darien_con_su_medico_afiliado(cargador, conexion, revision, clave, d):
+def test_el_escenario_queda_en_darien_con_su_medico_propio(cargador, conexion, revision, clave, d):
     resultado = _cargar_escenario(cargador, conexion, revision, clave, "2026-11-18")
     clinica, provincia = conexion.execute(text(
         "SELECT id_clinica, provincia FROM operacional.clinica WHERE id_clinica = :c"
     ), {"c": resultado.referencias.id_clinica}).one()
     assert provincia == "Darién"
-    # En el dataset canonico, el medico de Darien es el de la cuenta medico05.
-    correo = conexion.execute(text(
-        "SELECT u.email FROM operacional.usuario_medico um JOIN operacional.usuario u USING (id_usuario)"
+    m = d.MEDICO_DE_LA_DEMO
+    # Cuenta MEDICO activa, vinculada a su medico, con la clave simulada.
+    email, rol, activo, hash_ = conexion.execute(text(
+        "SELECT u.email, r.nombre_rol, u.activo, u.password_hash FROM operacional.usuario u"
+        " JOIN operacional.rol r USING (id_rol) JOIN operacional.usuario_medico um USING (id_usuario)"
         " WHERE um.id_medico = :m"
-    ), {"m": resultado.referencias.id_medico}).scalar_one()
-    assert correo == "medico05@example.com"
+    ), {"m": m.id_medico}).one()
+    assert (email, rol, activo) == ("itzel.barria@example.com", "MEDICO", True)
+    assert cargador.passwords.verificar(hash_, clave)
+    # Una sola afiliacion, a la clinica de Darien, desde el 2025-01-01.
+    assert conexion.execute(text(
+        "SELECT id_clinica, fecha_inicio, fecha_final, activo FROM operacional.medico_clinica WHERE id_medico = :m"
+    ), {"m": m.id_medico}).all() == [(clinica, date(2025, 1, 1), None, True)]
     for tabla in ("embarazo", "dispositivo"):
         fuera = conexion.execute(text(
             f"SELECT count(*) FROM operacional.{tabla} WHERE id_{tabla} BETWEEN 10901 AND 10999"
             " AND id_clinica <> :c"
         ), {"c": clinica}).scalar()
         assert fuera == 0, tabla
-    medicos = set(conexion.execute(text(
+    # Los seis seguimientos del escenario son suyos, y solo esos.
+    assert set(conexion.execute(text(
         "SELECT id_medico FROM operacional.seguimiento_clinico WHERE id_seguimiento BETWEEN 10901 AND 10999"
-    )).scalars())
-    assert medicos == {resultado.referencias.id_medico}
+    )).scalars()) == {m.id_medico}
+    assert sorted(conexion.execute(text(
+        "SELECT id_embarazo FROM operacional.seguimiento_clinico WHERE id_medico = :m"
+    ), {"m": m.id_medico}).scalars()) == [10901, 10902, 10903, 10904, 10905, 10906]
+    # El medico canonico de Darien (medico05) no sigue ningun embarazo del escenario.
+    assert not conexion.execute(text(
+        "SELECT count(*) FROM operacional.seguimiento_clinico sc"
+        " JOIN operacional.usuario_medico um USING (id_medico) JOIN operacional.usuario u USING (id_usuario)"
+        " WHERE u.email = 'medico05@example.com' AND sc.id_embarazo BETWEEN 10901 AND 10999"
+    )).scalar()
+    # El embarazo anterior de Elena: finalizado y con su seguimiento cerrado.
+    assert conexion.execute(text(
+        "SELECT e.estado_embarazo, sc.activo, sc.fecha_fin FROM operacional.embarazo e"
+        " JOIN operacional.seguimiento_clinico sc USING (id_embarazo) WHERE e.id_embarazo = 10901"
+    )).one() == ("FINALIZADO", False, date(2025, 10, 13))
     cedulas = conexion.execute(text(
         "SELECT cedula FROM operacional.paciente WHERE id_paciente BETWEEN 10901 AND 10999"
     )).scalars().all()
     assert len(cedulas) == len(d.PACIENTES) and all(c.startswith("5-") for c in cedulas)
-    # La sexta paciente sigue sin cuenta ni embarazo: no hay relacion con la
-    # clinica que inventarle.
+    # La sexta paciente sigue sin cuenta ni embarazo.
     assert not conexion.execute(text(
         "SELECT count(*) FROM operacional.embarazo WHERE id_paciente = 10906"
     )).scalar()
@@ -259,24 +279,39 @@ def test_el_escenario_queda_en_la_clinica_de_darien_con_su_medico_afiliado(carga
     )).scalar()
 
 
-def test_dos_medicos_posibles_en_darien_se_rechaza_sin_elegir(cargador, conexion, revision, clave, d):
-    # Otro medico con cuenta pasa a estar afiliado solo a Darien.
+def test_otro_medico_afiliado_a_darien_no_impide_la_carga(cargador, conexion, revision, clave, d):
+    """La clinica puede tener varios medicos: cada embarazo tiene su seguimiento."""
     conexion.execute(text("UPDATE operacional.medico_clinica SET id_clinica = 102 WHERE id_medico = 100"))
-    punto = conexion.begin_nested()
-    with pytest.raises(cargador.ErrorDeEscenario, match="exactamente un medico"):
-        _cargar_escenario(cargador, conexion, revision, clave, "2026-10-10")
-    punto.rollback()
-    assert _filas_del_escenario(conexion, d) == 0
+    _cargar_escenario(cargador, conexion, revision, clave, "2026-10-10")
+    assert _filas_del_escenario(conexion, d) > 0
 
 
-def test_sin_medico_que_cubra_todo_el_escenario_se_rechaza(cargador, conexion, revision, clave, d):
-    # La afiliacion de Darien empieza despues del primer embarazo (2025-01-13).
-    conexion.execute(text("UPDATE operacional.medico_clinica SET fecha_inicio = '2025-06-01' WHERE id_clinica = 102"))
+def test_un_principal_superpuesto_en_la_base_se_rechaza(cargador, conexion, revision, clave, d):
+    """Control negativo: un segundo PRINCIPAL sobre un embarazo del escenario."""
+    _cargar_escenario(cargador, conexion, revision, clave, "2026-10-10")
+    conexion.execute(text(
+        "INSERT INTO operacional.seguimiento_clinico"
+        " (id_medico, id_embarazo, fecha_asignacion, fecha_fin, rol_seguimiento, activo)"
+        " VALUES (104, 10902, '2026-09-01', NULL, 'PRINCIPAL', true)"
+    ))
+    antes = _huella(conexion)
     punto = conexion.begin_nested()
-    with pytest.raises(cargador.ErrorDeEscenario, match="hay 0"):
-        _cargar_escenario(cargador, conexion, revision, clave, "2026-10-10")
+    with pytest.raises(cargador.ConflictoDeEscenario, match="seguimiento_clinico"):
+        _cargar_escenario(cargador, conexion, revision, clave, "2026-10-12")
     punto.rollback()
-    assert _filas_del_escenario(conexion, d) == 0
+    assert _huella(conexion) == antes
+
+
+def test_una_afiliacion_ajena_del_medico_de_la_demo_se_rechaza(cargador, conexion, revision, clave, d):
+    _cargar_escenario(cargador, conexion, revision, clave, "2026-10-10")
+    conexion.execute(text(
+        "INSERT INTO operacional.medico_clinica (id_medico, id_clinica, fecha_inicio, activo)"
+        " VALUES (:m, 100, '2026-01-01', true)"
+    ), {"m": d.MEDICO_DE_LA_DEMO.id_medico})
+    punto = conexion.begin_nested()
+    with pytest.raises(cargador.ErrorDeEscenario):
+        _cargar_escenario(cargador, conexion, revision, clave, "2026-10-12")
+    punto.rollback()
 
 
 def test_semaforos_y_semanas_coinciden_con_las_reglas_del_etl(cargador, conexion, revision, clave):
@@ -307,7 +342,7 @@ def test_las_cuentas_verifican_la_clave_simulada_y_se_reutilizan(cargador, conex
     hashes = dict(conexion.execute(text(
         "SELECT id_usuario, password_hash FROM operacional.usuario WHERE id_usuario BETWEEN 10901 AND 10999"
     )).all())
-    assert len(hashes) == 5
+    assert len(hashes) == 6  # cinco pacientes con cuenta y el medico de la demo
     assert all(cargador.passwords.verificar(h, clave) for h in hashes.values())
     _cargar_escenario(cargador, conexion, revision, clave, "2026-10-10")
     assert dict(conexion.execute(text(
