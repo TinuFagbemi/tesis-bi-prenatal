@@ -14,6 +14,7 @@ Todos los datos son simulados y completamente ficticios.
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from collections import Counter, defaultdict
 from datetime import date, datetime, time, timedelta, timezone
@@ -29,7 +30,7 @@ from app.loader.dataset import (
     normalizar_fila,
     tabla_operacional,
 )
-from app.models.enums import EstadoEmbarazo, TipoSesion
+from app.models.enums import EstadoEmbarazo, TipoContacto, TipoSesion
 from app.services.ingesta import semana_gestacional
 
 SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
@@ -97,14 +98,35 @@ def test_cinco_pacientes_con_cuenta_y_un_perfil_sin_cuenta(d):
     assert not [e for e in d.EMBARAZOS if e.id_paciente == perfil.id_paciente]
 
 
-def test_los_datos_personales_son_claramente_ficticios(d):
+def test_los_datos_personales_son_completos_y_el_correo_no_puede_ser_de_nadie(d):
     for p in d.PACIENTES:
+        assert p.primer_nombre and p.segundo_nombre and p.apellido_paterno and p.apellido_materno
         assert p.correo.endswith("@example.com")
-        assert p.correo == p.correo.lower() and " " not in p.correo
-        assert p.cedula.startswith("4-109-")
-        assert p.apellido_paterno == "Ficticia"
-    assert len({p.cedula for p in d.PACIENTES}) == len(d.PACIENTES)
-    assert len({p.correo for p in d.PACIENTES}) == len(d.PACIENTES)
+        assert p.correo == p.correo.lower() and " " not in p.correo and p.correo.isascii()
+        assert re.fullmatch(r"4-\d{3}-\d{4}", p.cedula)  # Chiriqui, como la clinica 100
+        assert re.fullmatch(r"6\d{3}-\d{4}", p.celular)
+        if p.contacto_secundario and p.contacto_secundario[0] is TipoContacto.CORREO_ALTERNO:
+            assert p.contacto_secundario[1].endswith("@example.com")
+    for campo in ("cedula", "correo", "celular"):
+        assert len({getattr(p, campo) for p in d.PACIENTES}) == len(d.PACIENTES)
+
+
+def test_la_protagonista_tiene_su_identidad_completa(d):
+    elena = d.paciente(10901)
+    assert elena.nombre_completo == "Elena Sofía Araúz Quiel"
+    assert elena.correo == "elena.arauz94@example.com"
+    assert elena.contacto_secundario == (TipoContacto.TELEFONO_DOMICILIO, "775-4062")
+
+
+def test_cada_contacto_tiene_un_principal_y_los_secundarios_quedan_en_el_bloque(d, referencias):
+    telefonos = d.filas(referencias, corte=d.corte_minimo())["telefono_paciente"]
+    for p in d.PACIENTES:
+        suyos = [t for t in telefonos if t["id_paciente"] == p.id_paciente]
+        assert [t["principal"] for t in suyos].count(True) == 1
+        assert len(suyos) == 1 + (p.contacto_secundario is not None)
+    ids = [t["id_telefono_paciente"] for t in telefonos]
+    assert len(set(ids)) == len(ids)
+    assert all(d.BLOQUE_ENTIDADES[0] <= i <= d.BLOQUE_ENTIDADES[1] for i in ids)
 
 
 def test_la_protagonista_tiene_dos_embarazos_con_dispositivos_distintos(d):

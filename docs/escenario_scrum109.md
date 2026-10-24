@@ -27,20 +27,24 @@ la tiene) y queda en el historial del manifiesto.
 ## El grupo de pacientes del escenario
 
 Todas en la clínica 100 (Chiriquí) y seguidas por `medico01@example.com`
-(id_medico 100, PRINCIPAL), el médico autorizado de la demo. Correos
-`escenario109.<nombre>@example.com`; cédulas `4-109-000N`; la contraseña es la
-contraseña simulada del dataset (`PASSWORD_SIMULADA` del generador; no se
-repite aquí).
+(id_medico 100, PRINCIPAL), el médico autorizado de la demo. Cada paciente
+tiene la identidad completa que guarda la base —dos nombres, dos apellidos,
+cédula de Chiriquí, correo y celular, y en dos casos un contacto secundario—
+para que en el portal y en el BI se vean como un expediente real. Todo es
+inventado: los correos usan el dominio reservado `example.com` (parecen
+personales pero no pueden ser de nadie) y cédulas y teléfonos se eligieron a
+mano. La contraseña es la contraseña simulada del dataset (`PASSWORD_SIMULADA`
+del generador; no se repite aquí).
 
 | id_paciente | Perfil | Embarazo (id) | Dispositivo | Qué permite demostrar |
 |---|---|---|---|---|
-| 10901 | **Protagonista** (Elena) | 10901 FINALIZADO, 2025-01-13 → cierre 2025-10-13 | `DEMO-SCRUM109-01` (DISPONIBLE, asignación cerrada) | Historial de un embarazo anterior (≈9 meses de seguimiento, WARNING aislados en julio de 2025). |
+| 10901 | **Protagonista**: Elena Sofía Araúz Quiel, `elena.arauz94@example.com` | 10901 FINALIZADO, 2025-01-13 → cierre 2025-10-13 | `DEMO-SCRUM109-01` (DISPONIBLE, asignación cerrada) | Historial de un embarazo anterior (≈9 meses de seguimiento, WARNING aislados en julio de 2025). |
 | | | 10902 ACTIVO, 2026-04-27 (semana 30–31 en la sustentación) | **`DEMO-SCRUM72-01`** (el principal, una sola asignación) | Embarazo actual, Demo Control, captura en vivo, descarga del resumen; WARNING histórico en julio de 2026 seguido de OK. |
-| 10902 | Apoyo (Marta) | 10903 ACTIVO, 2026-03-02 | `DEMO-SCRUM109-03` | Solo lecturas OK. |
-| 10903 | Apoyo (Rosa) | 10904 ACTIVO, 2026-04-13 | `DEMO-SCRUM109-04` | **WARNING recientes**: desde el 2026-10-05 todas sus lecturas son WARNING. |
-| 10904 | Apoyo (Inés) | 10905 ACTIVO, 2026-03-23 | `DEMO-SCRUM109-05` | **WARNING históricos seguidos de OK** (2026-08-17 a 2026-09-06). |
-| 10905 | Apoyo (Clara) | 10906 ACTIVO, 2026-06-01 | `DEMO-SCRUM109-06` | Embarazo temprano: movimientos solo desde la semana 20 (2026-10-14). |
-| 10906 | Paula, **sin cuenta** | — | — | Perfil preparado para SCRUM-110 (habilitar una cuenta). Sin embarazo ni mediciones. |
+| 10902 | Apoyo: Marta Isabel Samudio Caballero | 10903 ACTIVO, 2026-03-02 | `DEMO-SCRUM109-03` | Solo lecturas OK. |
+| 10903 | Apoyo: Rosa María Jaramillo Serrano | 10904 ACTIVO, 2026-04-13 | `DEMO-SCRUM109-04` | **WARNING recientes**: desde el 2026-10-05 todas sus lecturas son WARNING. |
+| 10904 | Apoyo: Inés Carolina Pittí Morales | 10905 ACTIVO, 2026-03-23 | `DEMO-SCRUM109-05` | **WARNING históricos seguidos de OK** (2026-08-17 a 2026-09-06). |
+| 10905 | Apoyo: Clara Lucía Miranda Guerra | 10906 ACTIVO, 2026-06-01 | `DEMO-SCRUM109-06` | Embarazo temprano: movimientos solo desde la semana 20 (2026-10-14). |
+| 10906 | Paula Andrea Quintero Saldaña, **sin cuenta** | — | — | Perfil preparado para SCRUM-110 (habilitar una cuenta). Sin embarazo ni mediciones. |
 
 **Frecuencias.** Signos maternos (FC y SpO₂) una vez por semana desde la semana
 4, a las 09:30 de Panamá; movimientos fetales una vez por semana desde la
@@ -55,7 +59,8 @@ hay ningún ERROR ni ninguna categoría nueva.
 **Identificadores.** Bloques reservados: 10901–10999 para pacientes, cuentas,
 teléfonos, dispositivos, embarazos, seguimientos y asignaciones;
 10.900.001–10.999.999 para sesiones y lecturas (fijos para toda la historia,
-también para lo posterior al corte). Tras la carga, las secuencias de esas
+también para lo posterior al corte); los contactos secundarios usan el id de su
+paciente + 10 (10911, 10913). Tras la carga, las secuencias de esas
 tablas quedan detrás del bloque (11000 y 11.000.000): la API y el
 aprovisionamiento nunca toman un identificador reservado.
 

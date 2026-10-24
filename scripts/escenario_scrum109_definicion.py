@@ -40,6 +40,7 @@ historia ni se cambia la fecha del sistema.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
@@ -58,7 +59,7 @@ from app.models.enums import (
 )
 from app.services.ingesta import semana_gestacional
 
-VERSION = "SCRUM-109.1"
+VERSION = "SCRUM-109.2"
 NOMBRE = "Escenario de demostracion SCRUM-109"
 
 # Las fechas clinicas del proyecto son de Panama; el ETL ubica cada lectura en
@@ -81,6 +82,8 @@ CODIGO_DISPOSITIVO_PRINCIPAL = "DEMO-SCRUM72-01"
 # su ``id_medico`` y su clinica en la base; ninguno se escribe aqui.
 EMAIL_MEDICO_DE_LA_DEMO = "medico01@example.com"
 
+# Dominio reservado (RFC 2606): los correos parecen personales pero no pueden
+# ser de nadie. Cedulas y telefonos tampoco corresponden a personas reales.
 DOMINIO_DE_CORREO = "example.com"
 MODELO_DE_DISPOSITIVO = "Simulado SCRUM-109"
 FIRMWARE_DE_DISPOSITIVO = "0.0-demo"
@@ -129,15 +132,32 @@ class ErrorDeDefinicion(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
+# Un contacto secundario usa el id del perfil mas este desplazamiento, dentro
+# del mismo bloque reservado (10911-10916).
+DESPLAZAMIENTO_CONTACTO_SECUNDARIO = 10
+
+
 @dataclass(frozen=True)
 class Paciente:
+    """Identidad completa de una paciente, como la de un expediente real.
+
+    Todo es ficticio: el correo usa :data:`DOMINIO_DE_CORREO` y la cedula y los
+    telefonos se eligieron a mano, sin relacion con personas reales.
+    """
+
     id_paciente: int
     primer_nombre: str
+    segundo_nombre: str | None
     apellido_paterno: str
     apellido_materno: str
     fecha_nac: date
+    cedula: str
+    usuario_de_correo: str
+    celular: str
     con_cuenta: bool
     papel: str
+    # (tipo, valor) de un contacto secundario, o ``None``.
+    contacto_secundario: tuple[TipoContacto, str] | None = None
 
     @property
     def id_usuario(self) -> int | None:
@@ -146,15 +166,12 @@ class Paciente:
 
     @property
     def correo(self) -> str:
-        return f"escenario109.{self.primer_nombre.lower()}@{DOMINIO_DE_CORREO}"
+        return f"{self.usuario_de_correo}@{DOMINIO_DE_CORREO}"
 
     @property
-    def cedula(self) -> str:
-        return f"4-109-{self.id_paciente - 10900:04d}"
-
-    @property
-    def celular(self) -> str:
-        return f"6109-{self.id_paciente - 10900:04d}"
+    def nombre_completo(self) -> str:
+        partes = (self.primer_nombre, self.segundo_nombre, self.apellido_paterno, self.apellido_materno)
+        return " ".join(p for p in partes if p)
 
 
 @dataclass(frozen=True)
@@ -208,17 +225,21 @@ class Embarazo:
 S, M = TipoSesion.SIGNOS_MATERNOS, TipoSesion.MOVIMIENTOS_FETALES
 
 PACIENTES: tuple[Paciente, ...] = (
-    Paciente(10901, "Elena", "Ficticia", "Escenario", date(1994, 5, 14), True,
-             "protagonista"),
-    Paciente(10902, "Marta", "Ficticia", "Apoyo", date(1990, 9, 3), True,
-             "apoyo: lecturas OK"),
-    Paciente(10903, "Rosa", "Ficticia", "Apoyo", date(1997, 2, 21), True,
-             "apoyo: WARNING recientes"),
-    Paciente(10904, "Ines", "Ficticia", "Apoyo", date(1988, 11, 30), True,
+    Paciente(10901, "Elena", "Sofía", "Araúz", "Quiel", date(1994, 5, 14),
+             "4-752-1834", "elena.arauz94", "6674-2918", True, "protagonista",
+             contacto_secundario=(TipoContacto.TELEFONO_DOMICILIO, "775-4062")),
+    Paciente(10902, "Marta", "Isabel", "Samudio", "Caballero", date(1990, 9, 3),
+             "4-731-2290", "marta.samudio", "6238-5174", True, "apoyo: lecturas OK"),
+    Paciente(10903, "Rosa", "María", "Jaramillo", "Serrano", date(1997, 2, 21),
+             "4-779-1065", "rosamjaramillo", "6915-3087", True, "apoyo: WARNING recientes",
+             contacto_secundario=(TipoContacto.CORREO_ALTERNO, "rosa.jaramillo.s@example.com")),
+    Paciente(10904, "Inés", "Carolina", "Pittí", "Morales", date(1988, 11, 30),
+             "4-718-2406", "ines.pitti88", "6482-7731", True,
              "apoyo: WARNING historicos seguidos de OK"),
-    Paciente(10905, "Clara", "Ficticia", "Apoyo", date(2001, 7, 9), True,
-             "apoyo: embarazo temprano"),
-    Paciente(10906, "Paula", "Ficticia", "Pendiente", date(1999, 3, 17), False,
+    Paciente(10905, "Clara", "Lucía", "Miranda", "Guerra", date(2001, 7, 9),
+             "4-812-1597", "claramiranda01", "6357-0846", True, "apoyo: embarazo temprano"),
+    Paciente(10906, "Paula", "Andrea", "Quintero", "Saldaña", date(1999, 3, 17),
+             "4-798-2213", "paula.quintero", "6729-4580", False,
              "perfil sin cuenta para SCRUM-110 (sin embarazo ni mediciones)"),
 )
 
@@ -405,13 +426,20 @@ def filas(referencias: Referencias, corte: datetime | None) -> dict[str, list[di
     for p in PACIENTES:
         tablas["paciente"].append({
             "id_paciente": p.id_paciente, "cedula": p.cedula, "primer_nombre": p.primer_nombre,
-            "segundo_nombre": None, "apellido_paterno": p.apellido_paterno,
+            "segundo_nombre": p.segundo_nombre, "apellido_paterno": p.apellido_paterno,
             "apellido_materno": p.apellido_materno, "email_pac": p.correo, "fecha_nac": p.fecha_nac,
         })
         tablas["telefono_paciente"].append({
             "id_telefono_paciente": p.id_paciente, "id_paciente": p.id_paciente,
             "tipo_contacto": TipoContacto.CELULAR.value, "valor_contacto": p.celular, "principal": True,
         })
+        if p.contacto_secundario is not None:
+            tipo, valor = p.contacto_secundario
+            tablas["telefono_paciente"].append({
+                "id_telefono_paciente": p.id_paciente + DESPLAZAMIENTO_CONTACTO_SECUNDARIO,
+                "id_paciente": p.id_paciente, "tipo_contacto": tipo.value, "valor_contacto": valor,
+                "principal": False,
+            })
         if p.con_cuenta:
             tablas["usuario"].append({
                 "id_usuario": p.id_usuario, "id_rol": referencias.id_rol_paciente, "email": p.correo,
@@ -482,6 +510,25 @@ def validar_definicion() -> None:
     primero, ultimo = BLOQUE_ENTIDADES
     if not all(primero <= i <= ultimo for i in ids_p + ids_e):
         raise ErrorDeDefinicion("Un identificador de entidad esta fuera de su bloque.")
+    for campo in ("cedula", "correo", "celular"):
+        valores = [getattr(p, campo) for p in PACIENTES]
+        if len(set(valores)) != len(valores):
+            raise ErrorDeDefinicion(f"Valores de {campo} repetidos entre pacientes.")
+    for p in PACIENTES:
+        if not re.fullmatch(r"[a-z0-9]+([._][a-z0-9]+)*", p.usuario_de_correo):
+            raise ErrorDeDefinicion(f"paciente {p.id_paciente}: correo con caracteres no validos.")
+        if not re.fullmatch(r"\d{1,2}-\d{1,4}-\d{1,6}", p.cedula):
+            raise ErrorDeDefinicion(f"paciente {p.id_paciente}: cedula con formato invalido.")
+        if not re.fullmatch(r"6\d{3}-\d{4}", p.celular):
+            raise ErrorDeDefinicion(f"paciente {p.id_paciente}: celular con formato invalido.")
+        if p.contacto_secundario is not None:
+            tipo, valor = p.contacto_secundario
+            if tipo is TipoContacto.CELULAR or valor == p.celular:
+                raise ErrorDeDefinicion(f"paciente {p.id_paciente}: contacto secundario invalido.")
+            if tipo is TipoContacto.CORREO_ALTERNO and not valor.endswith(f"@{DOMINIO_DE_CORREO}"):
+                raise ErrorDeDefinicion(
+                    f"paciente {p.id_paciente}: correo alterno fuera del dominio reservado."
+                )
     if codigos.count(CODIGO_DISPOSITIVO_PRINCIPAL) != 1:
         raise ErrorDeDefinicion("El dispositivo principal debe servir a un solo embarazo.")
     for e in EMBARAZOS:
