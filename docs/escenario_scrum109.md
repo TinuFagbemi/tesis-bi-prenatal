@@ -26,19 +26,28 @@ la tiene) y queda en el historial del manifiesto.
 
 ## El grupo de pacientes del escenario
 
-**Clínica y médico: Darién, resueltos en la base.** Los embarazos y los
-dispositivos del escenario pertenecen a la clínica de Darién del dataset
-canónico, y los seis seguimientos (PRINCIPAL) al médico autorizado de esa
-clínica. La definición solo declara la provincia (`PROVINCIA_DE_LA_DEMO`); el
-cargador exige **una** clínica en ella y **un** médico con cuenta MEDICO activa
-cuya afiliación supere, para cada día del escenario, la misma regla del ETL
-(`reglas.verificar_afiliacion`). Con cero o varios candidatos se niega. Sobre
-el dataset canónico resultan:
+**Clínica de Darién y médica propia de la demo (SCRUM-109.4).** Los embarazos
+y los dispositivos del escenario pertenecen a la clínica de Darién del dataset
+canónico, que el cargador resuelve en la base: la definición solo declara la
+provincia (`PROVINCIA_DE_LA_DEMO`) y el cargador exige **una** clínica en ella.
+Los seis seguimientos PRINCIPAL son, desde el inicio de cada embarazo, de una
+**médica sintética propia del escenario** (`MEDICO_DE_LA_DEMO`), de modo que
+quien inicia sesión como ella ve **solo** a las cinco pacientes preparadas y
+los médicos canónicos conservan únicamente las suyas. Su única afiliación es a
+esa clínica, desde el 2025-01-01 y sin fin; la definición comprueba, día a día
+y con las reglas del ETL (`medico_responsable` y `verificar_afiliacion`), que
+cubre cada día con seguimiento u observación y que hay exactamente un
+PRINCIPAL. El cargador ya no depende de que haya un único médico afiliado a la
+clínica: otro médico afiliado a Darién no impide la carga.
 
 | | Valor |
 |---|---|
 | Clínica | id_clinica 102, «Clínica Rural Simulada 03», Darién, distrito Chepigana, corregimiento Camogantí |
-| Médico autorizado | id_medico 104, Daniel Vega, cuenta y UPN `medico05@example.com`, afiliado a la 102 desde el 2025-01-01 |
+| Médica de la demo | id_medico 10950 (también su cuenta y su teléfono, en el bloque reservado), **Itzel Marina Barría Cortés**, Ginecología y Obstetricia, cel. 6731-5820, cuenta MEDICO y UPN `itzel.barria@example.com`, afiliada a la 102 desde el 2025-01-01 |
+| Médico canónico de Darién | id_medico 104, Daniel Vega, `medico05@example.com`: conserva sus 8 pacientes y embarazos canónicos en curso y ya no sigue ninguno del escenario |
+
+La contraseña de la médica es la contraseña simulada del dataset, como la de
+las pacientes.
 
 **Identidades.** Cada paciente tiene la identidad completa que guarda la base
 —dos nombres, dos apellidos, cédula, correo y celular, y en dos casos un
@@ -63,6 +72,38 @@ dataset (`PASSWORD_SIMULADA` del generador; no se repite aquí).
 | 10904 | Apoyo: Inés Carolina Pittí Morales, `ines.pitti88@example.com` | 5-702-1918 | 10905 ACTIVO, 2026-03-23 | `DEMO-SCRUM109-05` | **WARNING históricos seguidos de OK** (2026-08-17 a 2026-09-06). |
 | 10905 | Apoyo: Clara Lucía Miranda Guerra, `claramiranda01@example.com` | 5-716-1597 | 10906 ACTIVO, 2026-06-01 | `DEMO-SCRUM109-06` | Embarazo temprano: movimientos solo desde la semana 20 (2026-10-14). |
 | 10906 | Paula Andrea Quintero Saldaña, `paula.quintero@example.com`, **sin cuenta** | 5-713-2213 | — | — | Perfil preparado para SCRUM-110 (habilitar una cuenta). Sin embarazo ni mediciones. |
+
+**Los dos embarazos de Elena: fechas e intervalo.**
+
+- *Qué es `embarazo.fecha_inicio`.* El modelo no lo declara con un nombre
+  clínico, pero el sistema lo usa como el **día 0 del cómputo gestacional**
+  (equivalente a la fecha de la última menstruación), no como la fecha de
+  concepción: la FPP es `fecha_inicio + 280 días` (generador y escenario) y la
+  semana gestacional es `días transcurridos // 7 + 1`
+  (`app.services.ingesta.semana_gestacional`, la misma aritmética del
+  generador). La concepción no se registra; por convención clínica se estima
+  unas 2 semanas después de ese día 0.
+- *Fechas (definitivas, sin cambios).* Anterior 10901: 2025-01-13 → cierre
+  2025-10-13 (273 días; semana 40 por la aritmética del sistema, 39+0
+  cumplidas; FPP 2025-10-20), FINALIZADO, G1 P0, seguimiento cerrado ese día.
+  Actual 10902: 2026-04-27, ACTIVO, G2 P1, FPP 2027-02-01; semanas 30–31 del
+  20 al 23 de noviembre de 2026. Elena (nacida el 1994-05-14) tenía 30 y 31
+  años al inicio de cada uno.
+- *Intervalo.* Del cierre anterior al inicio registrado del siguiente: **196
+  días ≈ 6,4 meses**. Hasta la concepción estimada (≈ 2026-05-11): ≈ 210 días ≈
+  6,9 meses. No hay solapamiento: las lecturas del anterior terminan antes de
+  su cierre, las del actual empiezan después de su inicio, cada uno tiene su
+  dispositivo y su asignación, y los seguimientos no se cruzan.
+- *Posible frente a recomendado.* Es un intervalo **biológicamente posible**
+  y **más corto que el recomendado**: la OMS recomienda esperar al menos 24
+  meses tras un nacido vivo antes de un nuevo embarazo
+  ([WHO/RHR/07.1, 2005](https://www.who.int/publications/i/item/WHO-RHR-07.1)),
+  y ACOG/SMFM aconsejan evitar intervalos menores de 6 meses y asesorar sobre
+  los menores de 18 ([Obstetric Care Consensus n.º 8, 2019](https://www.acog.org/clinical/clinical-guidance/obstetric-care-consensus/articles/2019/01/interpregnancy-care)).
+  Son recomendaciones de asesoría, no reglas del sistema: no se validan ni se
+  imponen, y las fechas no se cambiaron. El modelo solo guarda el estado
+  FINALIZADO y la fórmula G/P (el P1 del actual cuenta el parto del anterior);
+  no registra el desenlace del parto, y el escenario no lo inventa.
 
 **Paula y la clínica.** El modelo solo relaciona paciente y clínica a través
 del embarazo (`embarazo.id_clinica`). Paula no tiene cuenta ni embarazo, así
@@ -183,11 +224,13 @@ python scripts/cargar_escenario_scrum109.py verificar
 falta regenerarlo. Si se regenera, solo cambia `password_hash` (sal aleatoria
 de Argon2id) y la clave simulada sigue verificando.
 
-**Base inicial de referencia (SCRUM-109.3).** Reconstruida así el 2026-10-23,
-con corte efectivo **2026-10-23T21:12:57-05:00 (America/Panama)**: 1.180
-lecturas canónicas + 226 del escenario, ETL `SUCCESS` con conciliación 27/27,
-sin capturas en vivo ni filas de auditoría. Respaldo:
-`C:\FetalAlert_respaldos\SCRUM-109_base_inicial_darien_20261023`.
+**Base inicial de referencia (SCRUM-109.4).** Reconstruida así el 2026-10-24
+(con un primer `cargar --corte 2026-10-10` para comparar con la versión
+anterior al mismo corte), con corte efectivo **2026-10-24T16:49:54-05:00
+(America/Panama)**: 1.180 lecturas canónicas + 226 del escenario, ETL
+`SUCCESS`, sin capturas en vivo ni filas de auditoría. Respaldo:
+`C:\FetalAlert_respaldos\SCRUM-109_base_inicial_medico_demo_20261024` (el
+estado previo, 109.3, está en `SCRUM-109_antes_medico_demo_20261024`).
 
 ### Conflictos que detiene, sin sobrescribir
 
@@ -197,9 +240,11 @@ sin capturas en vivo ni filas de auditoría. Respaldo:
 - asignaciones o seguimientos ajenos sobre sus dispositivos o embarazos, u otro
   embarazo de una de sus pacientes;
 - una cuenta cuyo hash ya no verifica la contraseña simulada;
-- cero o varias clínicas en la provincia de la demo, o cero o varios médicos
-  con cuenta activa cuya afiliación a esa clínica cubra todo el escenario (se
-  comprueba con `reglas.verificar_afiliacion`, la del ETL): no se elige uno.
+- cero o varias clínicas en la provincia de la demo: no se elige una;
+- seguimientos de otros embarazos sobre la médica de la demo, o afiliaciones
+  suyas a otra clínica;
+- en la definición, un día sin PRINCIPAL o con dos superpuestos, o una
+  afiliación que no cubra cada día con seguimiento u observación.
 
 ## Elegir el corte
 
@@ -256,16 +301,21 @@ mientras exista dentro del repositorio. Muévelo fuera o bórralo tras revisarlo
 
 - **Paciente** (portal y `/api/v1/clinico`): la protagonista ve sus dos
   embarazos, el actual y el anterior, cada uno con su historial.
-- **Médico autorizado** (`medico05@example.com`): ve las cinco pacientes con
-  cuenta y sus identidades (`v_paciente_medico`) y sus cinco embarazos **en
-  curso** (10902–10906), además de sus 8 embarazos canónicos. **No** ve el
-  embarazo anterior de la protagonista: la regla vigente (API y
+- **Médica de la demo** (`itzel.barria@example.com`): ve **solo** las cinco
+  pacientes con cuenta —Elena, Marta, Rosa, Inés y Clara— con sus identidades
+  (`v_paciente_medico`) y sus cinco embarazos **en curso** (10902–10906).
+  **No** ve el embarazo anterior de la protagonista: la regla vigente (API y
   `v_entitlement_medico`) exige un seguimiento activo y vigente hoy, y el de un
   embarazo finalizado está cerrado. El escenario respeta esa regla (ver «Por
-  qué el médico no ve el embarazo anterior»).
-- **Otros médicos**: `medico01` a `medico04` (clínicas de Chiriquí y Veraguas)
-  no ven ninguna paciente del escenario (404 en la API, sin entitlement en las
-  vistas). Administración recibe 403 en la superficie clínica.
+  qué el médico no ve el embarazo anterior»). Paula no aparece: no tiene cuenta,
+  embarazo ni seguimiento.
+- **Médicos canónicos**: `medico05` (Darién) conserva sus 8 embarazos
+  canónicos en curso y ya no ve ninguna paciente del escenario; `medico01` a
+  `medico04` (Chiriquí y Veraguas) tampoco (404 en la API, sin entitlement en
+  las vistas). Administración recibe 403 en la superficie clínica.
+- La separación sale de las filas de `seguimiento_clinico` y de los permisos
+  efectivos que ya derivan de ellas (API, RLS y vistas de publicación); no hay
+  filtros visuales ni excepciones de RLS.
 - **Administración** (`v_resumen_administrativo`): sin identidades, con el
   mínimo vigente de 5 embarazos distintos por provincia, mes y semáforo. En
   Darién, las celdas OK de 2026-07, 2026-08 y 2026-09 se publican **solo con
@@ -277,12 +327,21 @@ mientras exista dentro del repositorio. Muévelo fuera o bórralo tras revisarlo
   de Darién de 2025, todas suprimidas. El dataset canónico de la tesis no se
   toca.
 
-| Superficie (corte de la base inicial, sin capturas) | Valor esperado |
+| Superficie (corte 2026-10-24T16:49:54-05:00 de la base inicial, sin capturas) | Valor esperado |
 |---|---|
-| `medico05` (UPN) | 13 pacientes, 13 embarazos, 504 lecturas (334 canónicas + 170 del escenario; no entran las 56 del embarazo finalizado) |
-| `medico01` / `02` / `03` / `04` | 3 / 3 / 3 / 3 embarazos; 127 / 115 / 116 / 113 lecturas; ninguna del escenario |
-| `v_lectura` (sin RLS) | 1.406 lecturas, 36 embarazos |
+| `itzel.barria@example.com` (UPN) | 5 pacientes, 5 embarazos, 170 lecturas, todas del escenario (no entran las 56 del embarazo finalizado) |
+| `medico05` (UPN) | 8 pacientes, 8 embarazos, 334 lecturas; ninguna del escenario |
+| `medico01` / `02` / `03` / `04` | 3 / 3 / 3 / 3 pacientes y embarazos; 127 / 115 / 116 / 113 lecturas; ninguna del escenario |
+| `v_lectura` (sin RLS) | 1.406 lecturas (1.180 canónicas + 226 del escenario), 36 embarazos |
 | `v_resumen_administrativo` | 34 celdas publicadas, 1.021 lecturas: Chiriquí 10/286, Darién 14/453, Veraguas 10/282 |
+
+Respecto de SCRUM-109.3 (mismo corte de observaciones) solo cambia quién ve
+las pacientes del escenario: `medico05` pasa de 13/13/504 a 8/8/334 y la
+médica de la demo recibe las 5/5/170. `v_lectura` y las celdas
+administrativas no cambian: el administrador sigue viendo el conjunto
+ampliado —canónico más demo— sin identidades y con el mínimo de 5 embarazos
+por celda. Este entorno ampliado **no es** la muestra de la tesis (30
+gestantes, 732 sesiones y 1.180 lecturas), que sigue intacta en sus filas.
 
 ## Power BI: comprobaciones pendientes (manuales)
 
@@ -294,6 +353,27 @@ medidas es el **PBIP del 27/09/2026**
 (`[upn_medico] = LOWER(USERPRINCIPALNAME())`). El archivo vigente puede ser
 posterior: comprueba los nombres antes de aplicar nada. Ver el informe de
 entrega para la lista y las expresiones DAX propuestas.
+
+Lo comprobado por SQL y HTTP (cifras de la tabla anterior, permisos por rol)
+**no** valida el PBIX. En Power BI Desktop queda pendiente:
+
+1. **Conexión**: servidor `127.0.0.1:5443`, base `fetalalert_scrum109`, rol
+   `fetalalert_powerbi` (clave en el `.env` del worktree, no versionada).
+   Confirmar que el modelo apunta a este origen y no al entorno habitual.
+2. **Origen de `v_embarazo`**: que la tabla importe `publicacion.v_embarazo`
+   (y no una versión anterior o una consulta propia).
+3. **Relaciones** entre `v_embarazo`, `v_lectura`, `v_entitlement_medico`,
+   `v_embarazo_medico`, `v_entitlement_paciente_medico` y `v_paciente_medico`.
+4. **RLS** con «Ver como» `itzel.barria@example.com`: 5 pacientes, 5
+   embarazos y 170 lecturas, nombres y cédulas solo de esas cinco; con
+   `medico05@example.com`: 8/8/334 y ninguna paciente del escenario; los
+   permisos de embarazos y de pacientes (incluidos nombres y cédulas) deben
+   salir de las vistas de entitlement, no de un filtro de página.
+5. **Filtros guardados que hay que limpiar**: la paciente «Katherine» en el
+   resumen médico y el seudónimo antiguo en la página de evolución; si quedan,
+   ocultan o vacían los datos del escenario.
+
+No basta con «actualizar» hasta verificar en Desktop el modelo vigente.
 
 ## Por qué el médico no ve el embarazo anterior (limitación aceptada)
 
@@ -323,14 +403,17 @@ fuera de este ticket. Si se quiere que el médico consulte antecedentes
 obstétricos, es una decisión de autorización para otro ticket.
 
 **Recorrido de la demostración.** El historial del embarazo anterior se muestra
-en el **portal de la paciente** (Mi historial y su PDF); en el **BI médico** se
-muestra el embarazo actual de la protagonista y los de las pacientes de apoyo.
+en el **portal de la paciente** (Mi historial y su PDF); en el **BI médico**,
+con la médica de la demo, se muestra el embarazo actual de la protagonista y
+los de las cuatro pacientes de apoyo.
 
 ## Dependencias
 
-Esta rama parte del PR #24 (`feature/entorno-demo-restaurable`, que ya contiene
-el #23 de Demo Control) e integra el PR #22 (`feature/gestante-guardar-resumen-demo`,
-descarga del resumen) con un merge sin conflictos. Mientras esos PR sigan
+Esta rama parte del PR #24 (`feature/entorno-demo-restaurable`, `0866598`, que
+contiene los cuatro primeros commits del #23 de Demo Control), integra el PR
+#22 (`feature/gestante-guardar-resumen-demo`, `6bd303e`, descarga del resumen)
+y el último commit del #23 (`3b8bece`, nombres descriptivos de Adminer), ambos
+con merges locales sin conflictos. Mientras esos PR sigan
 abiertos, el PR de SCRUM-109 mostrará también sus commits; debe fusionarse
 **después** de ellos.
 
@@ -339,12 +422,20 @@ abiertos, el PR de SCRUM-109 mostrará también sus commits; debe fusionarse
 - `backend/tests/test_escenario_scrum109.py`, sin servidor: identidades
   (cédula de Darién, correos reservados, sin duplicados), reglas del dominio,
   semana 20, forma de las lecturas, coberturas, reglas de médico y afiliación del
-  ETL, semáforos, celdas administrativas, columnas exactas del modelo y corte.
+  ETL, médica de la demo y sus seguimientos, afiliación tardía, PRINCIPAL
+  superpuesto, coherencia de los dos embarazos de Elena (intervalo de 196 días,
+  FPP, semana de cierre, edades), semáforos, celdas administrativas, columnas
+  exactas del modelo y corte.
 - `backend/tests/test_escenario_scrum109_postgresql.py`, con
   `SCRUM109_TEST_DATABASE_URL` hacia una base desechable `scrum109_*` migrada y
   con el dataset canónico: primera carga y reejecución, avance y retroceso del
   corte, ausencia de futuro, canónico intacto fila por fila, secuencias,
   integridad, semáforos, cuentas, rollback ante fallo, conflictos, `--ensayo`
-  del CLI y resolución de la clínica y el médico de Darién (con rechazo si hay
-  dos médicos posibles o ninguno que cubra el escenario). Tiene su propio paso
-  en CI.
+  del CLI, resolución de la clínica de Darién (otro médico afiliado no impide
+  la carga), seguimientos y afiliaciones ajenas sobre la médica de la demo, y
+  control negativo: la base rechaza dos seguimientos PRINCIPAL superpuestos.
+  Tiene su propio paso en CI.
+- `scripts/reproducir_ci_local.py`: reproduce en local los pasos del job de
+  CI contra un PostgreSQL desechable; se detiene en el primer fallo y borra los
+  reportes JUnit previos para que el guardián solo lea los de la ejecución en
+  curso.

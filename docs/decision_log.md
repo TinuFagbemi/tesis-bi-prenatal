@@ -2596,3 +2596,25 @@ Guía de uso: [Escenario de demostración de SCRUM-109](escenario_scrum109.md).
   relaciona paciente y clínica a través del embarazo (`embarazo.id_clinica`);
   Paula no tiene cuenta ni embarazo (SCRUM-110), y crearle uno para ligarla
   falsearía su perfil. Su vínculo con Darién es el de origen, por la cédula.
+- **Médica propia de la demo** (versión SCRUM-109.4, sustituye la resolución
+  de un único médico de 109.3). Decisión: quien presenta como médico ve solo
+  las cinco pacientes preparadas, y el administrador conserva los agregados
+  del conjunto ampliado. Se añade una identidad sintética —Itzel Marina Barría
+  Cortés, `itzel.barria@example.com`, id 10950 en el bloque reservado— con
+  cuenta MEDICO y una única afiliación a la clínica 102 desde el 2025-01-01,
+  que cubre el embarazo anterior de Elena. Toma los seis seguimientos PRINCIPAL
+  desde el inicio de cada embarazo, sin superposición; el del embarazo
+  anterior sigue cerrado. Con ello `medico05` vuelve a tener solo sus 8
+  embarazos canónicos. La separación usa las relaciones de autorización
+  existentes: sin cambios de esquema, API, ETL, vistas ni RLS, ni filtros del
+  PBIX. Se descartaron una base exclusiva de cinco pacientes y un selector de
+  modos.
+- **Intervalo entre los embarazos de Elena: plausible, corto, sin cambios.**
+  `fecha_inicio` funciona en el sistema como día 0 del cómputo gestacional
+  (FPP = inicio + 280 días), no como concepción. Del cierre (2025-10-13) al
+  inicio registrado del actual (2026-04-27) hay 196 días (≈ 6,4 meses; ≈ 6,9
+  hasta la concepción estimada). Es biológicamente posible y menor que lo
+  recomendado (OMS: ≥ 24 meses tras un nacido vivo; ACOG/SMFM: evitar < 6
+  meses, asesorar < 18). Esas recomendaciones no son reglas del sistema; se
+  documenta y se prueba la coherencia, sin mover fechas ni inventar un
+  desenlace que el modelo no registra.
