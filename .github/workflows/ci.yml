@@ -134,7 +134,7 @@ jobs:
             --ignore=tests/test_publicacion_postgresql.py \
             --ignore=tests/test_provisionar_demo_postgresql.py \
             --ignore=tests/test_entorno_demo_postgresql.py \
-            --ignore=tests/test_publicacion_medica_postgresql.py
+            --ignore=tests/test_publicacion_medica_postgresql.py \
             --ignore=tests/test_escenario_scrum109_postgresql.py
 
       # Contrato del camino .env/shell -> docker-compose.yml -> entorno del

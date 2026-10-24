@@ -110,6 +110,30 @@ def test_ninguna_linea_del_bloque_termina_en_barra_sin_continuacion():
             assert cuerpo.endswith("\\"), f"Continuacion rota: {cuerpo!r}"
 
 
+def lineas_sin_continuacion(texto: str) -> list[str]:
+    """Lineas que no terminan en barra invertida, salvo la ultima del bloque."""
+    lineas = [linea for linea in texto.splitlines() if linea.strip()]
+    return [linea for linea in lineas[:-1] if not linea.rstrip().endswith("\\")]
+
+
+def test_el_bloque_offline_es_un_solo_comando():
+    """Una linea sin barra final corta el comando de pytest.
+
+    ``argumentos_como_bash`` une las continuaciones y ``shlex`` trata cualquier
+    otro salto de linea como un espacio, asi que no distingue una opcion de
+    pytest de un comando nuevo. bash si: lo que sigue a una linea sin barra lo
+    ejecuta aparte (``--ignore=...: No such file or directory``) y el step
+    falla aunque pytest haya pasado.
+    """
+    assert lineas_sin_continuacion(bloque_run(NOMBRE_DEL_STEP)) == []
+
+
+def test_el_detector_de_comando_cortado_encuentra_el_defecto():
+    """Control: sin la barra en una linea intermedia, el detector la senala."""
+    roto = "python -m pytest -q \\\n  --ignore=tests/a.py\n  --ignore=tests/b.py\n"
+    assert lineas_sin_continuacion(roto) == ["  --ignore=tests/a.py"]
+
+
 def test_cada_suite_de_postgresql_queda_fuera_del_bloque_offline():
     """Una suite nueva de PostgreSQL no puede colarse en la capa sin servidor."""
     ignorados = {
