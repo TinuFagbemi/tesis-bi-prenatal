@@ -1,6 +1,7 @@
 """Definicion del escenario de demostracion de SCRUM-109: datos fijos, sin base.
 
-**Que es.** El grupo de pacientes del escenario: cinco pacientes ficticias con
+**Que es.** El grupo de pacientes del escenario, en la clinica de Darien del
+dataset canonico: cinco pacientes ficticias con
 cuenta --una protagonista con dos embarazos y cuatro de apoyo-- y un sexto
 perfil sin cuenta, sin embarazo y sin mediciones, que SCRUM-110 usara para
 habilitar una cuenta. Todo lo que aqui aparece es simulado y completamente
@@ -59,7 +60,7 @@ from app.models.enums import (
 )
 from app.services.ingesta import semana_gestacional
 
-VERSION = "SCRUM-109.2"
+VERSION = "SCRUM-109.3"
 NOMBRE = "Escenario de demostracion SCRUM-109"
 
 # Las fechas clinicas del proyecto son de Panama; el ETL ubica cada lectura en
@@ -78,12 +79,23 @@ FIN_DEL_ESCENARIO = date(2026, 11, 30)
 # para que este modulo no dependa de ``scripts/``.
 CODIGO_DISPOSITIVO_PRINCIPAL = "DEMO-SCRUM72-01"
 
-# El medico autorizado de la demostracion, por su cuenta. El cargador resuelve
-# su ``id_medico`` y su clinica en la base; ninguno se escribe aqui.
-EMAIL_MEDICO_DE_LA_DEMO = "medico01@example.com"
+# La clinica de la demostracion, por su provincia: la del dataset canonico en
+# Darien. El cargador resuelve en la base la unica clinica de esa provincia y
+# el unico medico con cuenta activa cuya afiliacion a ella cubre todo el
+# escenario; ni sus identificadores ni el correo del medico se escriben aqui.
+PROVINCIA_DE_LA_DEMO = "Darién"
+
+# Las seis pacientes son, por definicion de esta demo, originarias de Darien:
+# su cedula lleva el prefijo provincial 5 (como las de Darien del generador,
+# ``PREFIJO_POR_PROVINCIA``). No es la clinica la que fija la cedula --residir
+# o atenderse en una provincia no cambia el documento--, sino el origen que se
+# eligio para ellas. Las cedulas son inventadas (provincia-tomo-asiento) y no
+# se ha verificado si coinciden con las de personas reales.
+PREFIJO_DE_CEDULA = "5"
 
 # Dominio reservado (RFC 2606): los correos parecen personales pero no pueden
-# ser de nadie. Cedulas y telefonos tampoco corresponden a personas reales.
+# ser de nadie. Cedulas y telefonos se inventaron a mano; no se ha verificado
+# si coinciden con los de personas reales.
 DOMINIO_DE_CORREO = "example.com"
 MODELO_DE_DISPOSITIVO = "Simulado SCRUM-109"
 FIRMWARE_DE_DISPOSITIVO = "0.0-demo"
@@ -141,8 +153,9 @@ DESPLAZAMIENTO_CONTACTO_SECUNDARIO = 10
 class Paciente:
     """Identidad completa de una paciente, como la de un expediente real.
 
-    Todo es ficticio: el correo usa :data:`DOMINIO_DE_CORREO` y la cedula y los
-    telefonos se eligieron a mano, sin relacion con personas reales.
+    Todo es ficticio: el correo usa :data:`DOMINIO_DE_CORREO`; la cedula
+    (prefijo :data:`PREFIJO_DE_CEDULA`) y los telefonos se inventaron a mano y
+    no se ha verificado si coinciden con los de personas reales.
     """
 
     id_paciente: int
@@ -226,20 +239,20 @@ S, M = TipoSesion.SIGNOS_MATERNOS, TipoSesion.MOVIMIENTOS_FETALES
 
 PACIENTES: tuple[Paciente, ...] = (
     Paciente(10901, "Elena", "Sofía", "Araúz", "Quiel", date(1994, 5, 14),
-             "4-752-1834", "elena.arauz94", "6674-2918", True, "protagonista",
-             contacto_secundario=(TipoContacto.TELEFONO_DOMICILIO, "775-4062")),
+             "5-708-1834", "elena.arauz94", "6674-2918", True, "protagonista",
+             contacto_secundario=(TipoContacto.TELEFONO_DOMICILIO, "299-6408")),
     Paciente(10902, "Marta", "Isabel", "Samudio", "Caballero", date(1990, 9, 3),
-             "4-731-2290", "marta.samudio", "6238-5174", True, "apoyo: lecturas OK"),
+             "5-704-2290", "marta.samudio", "6238-5174", True, "apoyo: lecturas OK"),
     Paciente(10903, "Rosa", "María", "Jaramillo", "Serrano", date(1997, 2, 21),
-             "4-779-1065", "rosamjaramillo", "6915-3087", True, "apoyo: WARNING recientes",
+             "5-711-1065", "rosamjaramillo", "6915-3087", True, "apoyo: WARNING recientes",
              contacto_secundario=(TipoContacto.CORREO_ALTERNO, "rosa.jaramillo.s@example.com")),
     Paciente(10904, "Inés", "Carolina", "Pittí", "Morales", date(1988, 11, 30),
-             "4-718-2406", "ines.pitti88", "6482-7731", True,
+             "5-702-1918", "ines.pitti88", "6482-7731", True,
              "apoyo: WARNING historicos seguidos de OK"),
     Paciente(10905, "Clara", "Lucía", "Miranda", "Guerra", date(2001, 7, 9),
-             "4-812-1597", "claramiranda01", "6357-0846", True, "apoyo: embarazo temprano"),
+             "5-716-1597", "claramiranda01", "6357-0846", True, "apoyo: embarazo temprano"),
     Paciente(10906, "Paula", "Andrea", "Quintero", "Saldaña", date(1999, 3, 17),
-             "4-798-2213", "paula.quintero", "6729-4580", False,
+             "5-713-2213", "paula.quintero", "6729-4580", False,
              "perfil sin cuenta para SCRUM-110 (sin embarazo ni mediciones)"),
 )
 
@@ -517,14 +530,17 @@ def validar_definicion() -> None:
     for p in PACIENTES:
         if not re.fullmatch(r"[a-z0-9]+([._][a-z0-9]+)*", p.usuario_de_correo):
             raise ErrorDeDefinicion(f"paciente {p.id_paciente}: correo con caracteres no validos.")
-        if not re.fullmatch(r"\d{1,2}-\d{1,4}-\d{1,6}", p.cedula):
-            raise ErrorDeDefinicion(f"paciente {p.id_paciente}: cedula con formato invalido.")
+        # Cedula panamena de nacional: provincia-tomo-asiento.
+        if not re.fullmatch(rf"{PREFIJO_DE_CEDULA}-\d{{1,4}}-\d{{1,6}}", p.cedula):
+            raise ErrorDeDefinicion(f"paciente {p.id_paciente}: cedula con formato o provincia invalidos.")
         if not re.fullmatch(r"6\d{3}-\d{4}", p.celular):
             raise ErrorDeDefinicion(f"paciente {p.id_paciente}: celular con formato invalido.")
         if p.contacto_secundario is not None:
             tipo, valor = p.contacto_secundario
             if tipo is TipoContacto.CELULAR or valor == p.celular:
                 raise ErrorDeDefinicion(f"paciente {p.id_paciente}: contacto secundario invalido.")
+            if tipo is TipoContacto.TELEFONO_DOMICILIO and not re.fullmatch(r"\d{3}-\d{4}", valor):
+                raise ErrorDeDefinicion(f"paciente {p.id_paciente}: telefono de domicilio invalido.")
             if tipo is TipoContacto.CORREO_ALTERNO and not valor.endswith(f"@{DOMINIO_DE_CORREO}"):
                 raise ErrorDeDefinicion(
                     f"paciente {p.id_paciente}: correo alterno fuera del dominio reservado."

@@ -13,6 +13,7 @@ Todos los datos son simulados y completamente ficticios.
 
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import re
 import sys
@@ -61,9 +62,10 @@ def cargador():
 def referencias(d):
     """Catalogos con la misma forma que el canonico: semanas 1-40 y tres niveles."""
     generador = _cargar("generate_mock_data")
+    # 102/104: la clinica de Darien y su medico en el dataset canonico.
     return d.Referencias(
-        id_clinica=100,
-        id_medico=100,
+        id_clinica=102,
+        id_medico=104,
         id_rol_paciente=102,
         semanas={s: (99 + s, generador.calcular_trimestre(s)) for s in range(1, 41)},
         semaforos={"OK": 100, "WARNING": 101, "ERROR": 102},
@@ -103,7 +105,10 @@ def test_los_datos_personales_son_completos_y_el_correo_no_puede_ser_de_nadie(d)
         assert p.primer_nombre and p.segundo_nombre and p.apellido_paterno and p.apellido_materno
         assert p.correo.endswith("@example.com")
         assert p.correo == p.correo.lower() and " " not in p.correo and p.correo.isascii()
-        assert re.fullmatch(r"4-\d{3}-\d{4}", p.cedula)  # Chiriqui, como la clinica 100
+        # Originarias de Darien por definicion de la demo: prefijo provincial 5,
+        # tomo y asiento. No es la clinica la que fija la cedula.
+        assert re.fullmatch(r"5-\d{1,4}-\d{1,6}", p.cedula)
+        assert not p.cedula.startswith("5-900-")  # el tomo de las del dataset canonico
         assert re.fullmatch(r"6\d{3}-\d{4}", p.celular)
         if p.contacto_secundario and p.contacto_secundario[0] is TipoContacto.CORREO_ALTERNO:
             assert p.contacto_secundario[1].endswith("@example.com")
@@ -115,7 +120,23 @@ def test_la_protagonista_tiene_su_identidad_completa(d):
     elena = d.paciente(10901)
     assert elena.nombre_completo == "Elena Sofía Araúz Quiel"
     assert elena.correo == "elena.arauz94@example.com"
-    assert elena.contacto_secundario == (TipoContacto.TELEFONO_DOMICILIO, "775-4062")
+    assert elena.cedula == "5-708-1834"
+    assert elena.contacto_secundario == (TipoContacto.TELEFONO_DOMICILIO, "299-6408")
+
+
+def test_la_demo_es_de_darien_y_no_fija_medico_ni_clinica(d):
+    assert d.PROVINCIA_DE_LA_DEMO == "Darién"
+    assert d.PREFIJO_DE_CEDULA == "5"
+    # El medico y la clinica los resuelve el cargador en la base.
+    assert not hasattr(d, "EMAIL_MEDICO_DE_LA_DEMO")
+
+
+def test_una_cedula_de_otra_provincia_no_pasa_la_validacion(d, monkeypatch):
+    elena = d.paciente(10901)
+    otra = dataclasses.replace(elena, cedula="4-708-1834")
+    monkeypatch.setattr(d, "PACIENTES", (otra,) + d.PACIENTES[1:])
+    with pytest.raises(d.ErrorDeDefinicion, match="cedula"):
+        d.validar_definicion()
 
 
 def test_cada_contacto_tiene_un_principal_y_los_secundarios_quedan_en_el_bloque(d, referencias):
@@ -220,7 +241,7 @@ def test_las_observaciones_caen_dentro_del_periodo_y_en_el_catalogo(d):
 
 def test_las_reglas_de_medico_y_afiliacion_del_etl_aceptan_cada_dia(d, referencias):
     filas = d.filas(referencias, None)
-    afiliacion = [reglas.AfiliacionClinica(id_clinica=100, fecha_inicio=date(2025, 1, 1), fecha_final=None)]
+    afiliacion = [reglas.AfiliacionClinica(id_clinica=102, fecha_inicio=date(2025, 1, 1), fecha_final=None)]
     seguimientos = defaultdict(list)
     for s in filas["seguimiento_clinico"]:
         seguimientos[s["id_embarazo"]].append(
@@ -230,7 +251,7 @@ def test_las_reglas_de_medico_y_afiliacion_del_etl_aceptan_cada_dia(d, referenci
     for sesion in filas["sesion_monitoreo"]:
         dia = reglas.fecha_clinica(sesion["fecha_inicio"])
         medico = reglas.medico_responsable(seguimientos[sesion["id_embarazo"]], dia, id_lectura=sesion["id_sesion"])
-        reglas.verificar_afiliacion(afiliacion, dia, id_medico=medico, id_clinica_embarazo=100, id_lectura=0)
+        reglas.verificar_afiliacion(afiliacion, dia, id_medico=medico, id_clinica_embarazo=102, id_lectura=0)
         a = asignaciones[sesion["id_embarazo"]]
         assert a["id_dispositivo"] == sesion["id_dispositivo"]
         assert a["fecha_inicio"] <= dia and (a["fecha_fin"] is None or dia <= a["fecha_fin"])

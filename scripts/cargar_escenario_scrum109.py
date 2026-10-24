@@ -178,48 +178,66 @@ def _fechas_que_debe_cubrir_la_afiliacion() -> list[date]:
 
 
 def resolver_referencias(conexion: Connection, clave: str) -> definicion.Referencias:
-    """Medico de la demo, su clinica, rol PACIENTE, catalogos y hashes."""
-    medicos = conexion.execute(
-        text(
-            "SELECT um.id_medico FROM operacional.usuario u"
-            "  JOIN operacional.usuario_medico um ON um.id_usuario = u.id_usuario"
-            "  JOIN operacional.rol r ON r.id_rol = u.id_rol"
-            " WHERE u.email = :email AND r.nombre_rol = :rol AND u.activo"
-        ),
-        {"email": definicion.EMAIL_MEDICO_DE_LA_DEMO, "rol": NombreRol.MEDICO.value},
+    """Clinica y medico de la demo, rol PACIENTE, catalogos y hashes.
+
+    La clinica es la unica de :data:`definicion.PROVINCIA_DE_LA_DEMO`. El medico
+    es el unico con cuenta MEDICO activa cuya afiliacion a esa clinica supera,
+    para cada dia del escenario, la misma regla del ETL
+    (``reglas.verificar_afiliacion``). Si hay cero o varios, se niega en lugar
+    de elegir: el medico autorizado no se adivina.
+    """
+    clinicas = conexion.execute(
+        text("SELECT id_clinica FROM operacional.clinica WHERE provincia = :provincia"),
+        {"provincia": definicion.PROVINCIA_DE_LA_DEMO},
     ).scalars().all()
-    if len(medicos) != 1:
-        raise ErrorDeEscenario(
-            "No se identifica un unico medico activo con la cuenta de la demo. "
-            "Carga primero el dataset canonico."
-        )
-    id_medico = medicos[0]
-    afiliaciones = [
-        reglas.AfiliacionClinica(id_clinica=f.id_clinica, fecha_inicio=f.fecha_inicio, fecha_final=f.fecha_final)
-        for f in conexion.execute(
-            text("SELECT id_clinica, fecha_inicio, fecha_final FROM operacional.medico_clinica WHERE id_medico = :m"),
-            {"m": id_medico},
-        )
-    ]
-    fechas = _fechas_que_debe_cubrir_la_afiliacion()
-    clinicas = {a.id_clinica for a in afiliaciones if a.cubre(fechas[0])}
     if len(clinicas) != 1:
         raise ErrorDeEscenario(
-            f"El medico id_medico={id_medico} no tiene exactamente una afiliacion el "
-            f"{fechas[0].isoformat()}; el ETL no podria derivar su clinica."
+            f"Se esperaba exactamente una clinica en {definicion.PROVINCIA_DE_LA_DEMO} y hay "
+            f"{len(clinicas)}. Carga primero el dataset canonico."
         )
-    id_clinica = clinicas.pop()
-    try:
-        # La misma regla del ETL, para cada dia del escenario: falla aqui y no
-        # a mitad de la ejecucion del ETL.
-        for dia in fechas:
-            reglas.verificar_afiliacion(
-                afiliaciones, dia, id_medico=id_medico, id_clinica_embarazo=id_clinica, id_lectura=0
+    id_clinica = clinicas[0]
+
+    candidatos = conexion.execute(
+        text(
+            "SELECT DISTINCT um.id_medico FROM operacional.usuario u"
+            "  JOIN operacional.usuario_medico um ON um.id_usuario = u.id_usuario"
+            "  JOIN operacional.rol r ON r.id_rol = u.id_rol"
+            "  JOIN operacional.medico_clinica mc ON mc.id_medico = um.id_medico"
+            " WHERE r.nombre_rol = :rol AND u.activo AND mc.id_clinica = :clinica"
+            " ORDER BY um.id_medico"
+        ),
+        {"rol": NombreRol.MEDICO.value, "clinica": id_clinica},
+    ).scalars().all()
+    fechas = _fechas_que_debe_cubrir_la_afiliacion()
+    autorizados = []
+    for id_medico in candidatos:
+        afiliaciones = [
+            reglas.AfiliacionClinica(id_clinica=f.id_clinica, fecha_inicio=f.fecha_inicio, fecha_final=f.fecha_final)
+            for f in conexion.execute(
+                text(
+                    "SELECT id_clinica, fecha_inicio, fecha_final FROM operacional.medico_clinica"
+                    " WHERE id_medico = :m"
+                ),
+                {"m": id_medico},
             )
-    except reglas.ErrorDeDatos as error:
+        ]
+        try:
+            # La misma regla del ETL, para cada dia del escenario: falla aqui y
+            # no a mitad de la ejecucion del ETL.
+            for dia in fechas:
+                reglas.verificar_afiliacion(
+                    afiliaciones, dia, id_medico=id_medico, id_clinica_embarazo=id_clinica, id_lectura=0
+                )
+        except reglas.ErrorDeDatos:
+            continue
+        autorizados.append(id_medico)
+    if len(autorizados) != 1:
         raise ErrorDeEscenario(
-            f"La afiliacion del medico de la demo no cubre el escenario ({type(error).__name__})."
-        ) from None
+            f"Se esperaba exactamente un medico con cuenta activa y una unica afiliacion a la clinica "
+            f"id_clinica={id_clinica} del {fechas[0].isoformat()} al {fechas[-1].isoformat()}; "
+            f"hay {len(autorizados)} (de {len(candidatos)} afiliados con cuenta)."
+        )
+    id_medico = autorizados[0]
 
     rol = conexion.execute(
         text("SELECT id_rol FROM operacional.rol WHERE nombre_rol = :r"), {"r": NombreRol.PACIENTE.value}

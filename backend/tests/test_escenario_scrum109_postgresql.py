@@ -218,6 +218,67 @@ def test_integridad_de_relaciones(cargador, conexion, revision, clave):
     conexion.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
 
 
+# ---------------------------------------------------------------------------
+# Clinica y medico de Darien: se resuelven en la base, nunca se adivinan
+# ---------------------------------------------------------------------------
+
+
+def test_el_escenario_queda_en_la_clinica_de_darien_con_su_medico_afiliado(cargador, conexion, revision, clave, d):
+    resultado = _cargar_escenario(cargador, conexion, revision, clave, "2026-11-18")
+    clinica, provincia = conexion.execute(text(
+        "SELECT id_clinica, provincia FROM operacional.clinica WHERE id_clinica = :c"
+    ), {"c": resultado.referencias.id_clinica}).one()
+    assert provincia == "Darién"
+    # En el dataset canonico, el medico de Darien es el de la cuenta medico05.
+    correo = conexion.execute(text(
+        "SELECT u.email FROM operacional.usuario_medico um JOIN operacional.usuario u USING (id_usuario)"
+        " WHERE um.id_medico = :m"
+    ), {"m": resultado.referencias.id_medico}).scalar_one()
+    assert correo == "medico05@example.com"
+    for tabla in ("embarazo", "dispositivo"):
+        fuera = conexion.execute(text(
+            f"SELECT count(*) FROM operacional.{tabla} WHERE id_{tabla} BETWEEN 10901 AND 10999"
+            " AND id_clinica <> :c"
+        ), {"c": clinica}).scalar()
+        assert fuera == 0, tabla
+    medicos = set(conexion.execute(text(
+        "SELECT id_medico FROM operacional.seguimiento_clinico WHERE id_seguimiento BETWEEN 10901 AND 10999"
+    )).scalars())
+    assert medicos == {resultado.referencias.id_medico}
+    cedulas = conexion.execute(text(
+        "SELECT cedula FROM operacional.paciente WHERE id_paciente BETWEEN 10901 AND 10999"
+    )).scalars().all()
+    assert len(cedulas) == len(d.PACIENTES) and all(c.startswith("5-") for c in cedulas)
+    # La sexta paciente sigue sin cuenta ni embarazo: no hay relacion con la
+    # clinica que inventarle.
+    assert not conexion.execute(text(
+        "SELECT count(*) FROM operacional.embarazo WHERE id_paciente = 10906"
+    )).scalar()
+    assert not conexion.execute(text(
+        "SELECT count(*) FROM operacional.usuario_paciente WHERE id_paciente = 10906"
+    )).scalar()
+
+
+def test_dos_medicos_posibles_en_darien_se_rechaza_sin_elegir(cargador, conexion, revision, clave, d):
+    # Otro medico con cuenta pasa a estar afiliado solo a Darien.
+    conexion.execute(text("UPDATE operacional.medico_clinica SET id_clinica = 102 WHERE id_medico = 100"))
+    punto = conexion.begin_nested()
+    with pytest.raises(cargador.ErrorDeEscenario, match="exactamente un medico"):
+        _cargar_escenario(cargador, conexion, revision, clave, "2026-10-10")
+    punto.rollback()
+    assert _filas_del_escenario(conexion, d) == 0
+
+
+def test_sin_medico_que_cubra_todo_el_escenario_se_rechaza(cargador, conexion, revision, clave, d):
+    # La afiliacion de Darien empieza despues del primer embarazo (2025-01-13).
+    conexion.execute(text("UPDATE operacional.medico_clinica SET fecha_inicio = '2025-06-01' WHERE id_clinica = 102"))
+    punto = conexion.begin_nested()
+    with pytest.raises(cargador.ErrorDeEscenario, match="hay 0"):
+        _cargar_escenario(cargador, conexion, revision, clave, "2026-10-10")
+    punto.rollback()
+    assert _filas_del_escenario(conexion, d) == 0
+
+
 def test_semaforos_y_semanas_coinciden_con_las_reglas_del_etl(cargador, conexion, revision, clave):
     _cargar_escenario(cargador, conexion, revision, clave, "2026-11-18")
     filas = conexion.execute(text(
