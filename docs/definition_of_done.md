@@ -105,6 +105,78 @@ considera terminado si además:
 - [ ] tiene el CI en verde y la revisión de la otra autora **sobre el último
       commit** del Pull Request.
 
+## Estado verificado localmente de SCRUM-104
+
+Evidencia local previa al Pull Request. **No sustituye la ejecución remota de CI
+ni la revisión de la otra autora.** La guía está en [Demo Control](demo_control.md)
+y las decisiones en el [registro de decisiones](decision_log.md).
+
+### Comprobado
+
+- **Pruebas sin servidor PostgreSQL**, con el comando del CI: 2,723 passed y 53
+  omitidas. Las 53 son las de `test_config_secretos.py` que se omiten en una
+  computadora cuyo `.env` define `JWT_SECRET_KEY`; no las introduce este ticket.
+  De ese total, 304 son de `test_demo_control.py` y 9 las nuevas de
+  `test_etl_cli.py`.
+- **Pruebas contra PostgreSQL**, sobre un servidor desechable preparado con los
+  mismos pasos del CI (roles, bootstrap, migraciones y dataset canónico):
+
+  | Suite | Resultado |
+  | --- | --- |
+  | Esquema analítico y ETL — `test_etl_postgresql.py` | 69 passed (51 previas y 18 nuevas) |
+  | Aprovisionamiento de la demo — `test_provisionar_demo_postgresql.py` | 24 passed (13 previas y 11 nuevas) |
+  | Aislamiento por filas — `test_rls_postgresql.py` | 97 passed |
+  | Recorridos HTTP — `test_http_como_api_postgresql.py` | 78 passed |
+  | Protección analítica — `test_publicacion_postgresql.py` | 146 passed |
+  | Publicación médica — `test_publicacion_medica_postgresql.py` | 67 passed |
+
+  **Ese servidor era PostgreSQL 17.5, no 16.** La corrida sobre PostgreSQL 16,
+  que es la versión del proyecto, es la del CI y queda pendiente.
+- **El ETL no cambió de comportamiento.** Las 51 pruebas previas de la suite del
+  ETL pasan sin modificar ninguna, tras separar la preparación de dimensiones y
+  de hechos.
+- **La previsualización no escribe.** Se compara, antes y después, el contenido
+  completo de las nueve tablas analíticas, las dos del mapa privado y siete
+  operacionales (lecturas, sesiones, embarazos, pacientes, seguimientos,
+  auditoría e idempotencia), y el valor de todas las secuencias. PostgreSQL
+  rechaza con SQLSTATE 25006 un `INSERT`, un `UPDATE`, un `DELETE`, un `nextval`
+  y un DDL lanzados dentro de su transacción. No pide el candado: con otra
+  transacción reteniéndolo, termina, lo informa ocupado y no lo adquiere.
+- **La previsualización predice lo que el ETL carga.** Sobre el dataset
+  canónico, las 1,180 candidatas coinciden lectura por lectura con los hechos que
+  la ejecución real inserta después: médico, estado de cada métrica y semáforo.
+- **Las opciones 5 y 6 con el CLI real**, conectado como `fetalalert_etl`:
+  código 0 con un hecho nuevo y conciliación correcta, segunda ejecución sin
+  hechos nuevos, código 4 con el candado ocupado y código 2 con un origen que las
+  reglas rechazan, sin cambios en la base en los dos últimos casos.
+- **La verificación no es más laxa que la ejecución.** Empieza por la misma
+  validación del destino que las opciones con efectos; ante cada una de las 21
+  discrepancias que esa validación rechaza —instancia, puerto, contenedor o
+  configuración—, el estado es `NO DISPONIBLE` y nunca `LISTO PARA DEMO`.
+- **La reconexión exige el contenedor y `/health`.** Con el portal apuntando a
+  otra API que responde, o con un `start` que no deja el contenedor en marcha,
+  no se informa `CONEXIÓN RESTABLECIDA`.
+- **La verificación y el reset no escriben en PostgreSQL.** Contra PostgreSQL
+  real, con la conexión de solo lectura del script, ninguna fila de ninguna
+  tabla de `operacional`, `analitico` y `privado` cambia, ni el valor de ninguna
+  secuencia.
+- **El dataset canónico, fila por fila.** Cada fila previa al aprovisionamiento
+  sigue presente con el mismo contenido —se compara una huella por fila, no un
+  conteo—, y lo único añadido es una fila en `dispositivo`, `embarazo`,
+  `asignacion_dispositivo` y `seguimiento_clinico`.
+
+### Sin comprobar todavía
+
+- La corrida en PostgreSQL 16 y el CI remoto.
+- Las suites de PostgreSQL de migraciones, cargador, endpoint, idempotencia,
+  nodo edge, sincronización, autenticación, cuentas, bootstrap y contexto. No
+  comparten código con lo que este ticket cambia y no se volvieron a ejecutar.
+- **Ninguna opción se ejecutó contra el entorno de la sustentación.** Las
+  opciones 3 y 4 se probaron con Docker simulado; el reset y el ETL, sobre bases
+  desechables. El ensayo en el entorno real requiere autorización aparte.
+- El recorrido completo de la demostración con el portal, Adminer y Power BI,
+  que pertenece a SCRUM-106.
+
 ## Estado verificado localmente de SCRUM-97
 
 Evidencia local previa al Pull Request. **No sustituye la ejecución remota de CI

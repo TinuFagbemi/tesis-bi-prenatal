@@ -133,7 +133,9 @@ jobs:
             --ignore=tests/test_http_como_api_postgresql.py \
             --ignore=tests/test_publicacion_postgresql.py \
             --ignore=tests/test_provisionar_demo_postgresql.py \
-            --ignore=tests/test_publicacion_medica_postgresql.py
+            --ignore=tests/test_entorno_demo_postgresql.py \
+            --ignore=tests/test_publicacion_medica_postgresql.py \
+            --ignore=tests/test_escenario_scrum109_postgresql.py
 
       # Contrato del camino .env/shell -> docker-compose.yml -> entorno del
       # contenedor de la API. Las pruebas de Python reciben JWT_SECRET_KEY
@@ -843,6 +845,85 @@ jobs:
           PY
           python -m pytest -q -rs tests/test_provisionar_demo_postgresql.py --junitxml=pytest-scrum72-provision.xml
 
+      # Escenario de demostracion de SCRUM-109: carga idempotente, corte,
+      # conflictos y rollback. Como la de SCRUM-72, corre sobre una base
+      # DESECHABLE propia ``scrum109_*`` copiada de la plantilla con el dataset
+      # canonico y **sin** el aprovisionamiento antiguo; cada prueba revierte su
+      # transaccion. Escribe como el migrador de CI.
+      - name: Pruebas del escenario de demostracion contra PostgreSQL (SCRUM-109)
+        working-directory: backend
+        env:
+          SCRUM109_TEST_DATABASE_URL: postgresql+psycopg://${{ env.CI_MIGRADOR_USER }}:${{ env.CI_MIGRADOR_PASSWORD }}@localhost:5432/scrum109_ci
+        run: |
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, text
+
+          motor = create_engine(
+              "postgresql+psycopg://"
+              f"{os.environ['POSTGRES_USER']}:{os.environ['POSTGRES_PASSWORD']}"
+              "@localhost:5432/postgres",
+              isolation_level="AUTOCOMMIT",
+          )
+          plantilla = os.environ["POSTGRES_DB"]
+          with motor.connect() as conexion:
+              conexion.exec_driver_sql("DROP DATABASE IF EXISTS scrum109_ci")
+              conexion.exec_driver_sql(f'CREATE DATABASE scrum109_ci TEMPLATE "{plantilla}"')
+          motor.dispose()
+
+          copia = create_engine(os.environ["SCRUM109_TEST_DATABASE_URL"])
+          with copia.connect() as conexion:
+              lecturas = conexion.execute(
+                  text("SELECT count(*) FROM operacional.lectura_biometrica")
+              ).scalar_one()
+          copia.dispose()
+          if lecturas != 1180:
+              raise SystemExit(f"::error::la copia desechable no trae el dataset: {lecturas}")
+          print("base desechable scrum109_ci lista, con el dataset canonico")
+          PY
+          python -m pytest -q -rs tests/test_escenario_scrum109_postgresql.py --junitxml=pytest-scrum109.xml
+
+      # Entorno de demostracion restaurable: varias gestantes de demo y el ciclo
+      # respaldar -> alterar -> restaurar. Como la de SCRUM-72, corre sobre una
+      # base DESECHABLE propia ``entorno_demo_*`` copiada de la plantilla recien
+      # cargada. ``pg_dump`` y ``pg_restore`` se ejecutan dentro del contenedor del
+      # servicio postgres:16 (``docker exec``), con su misma version; el
+      # aprovisionamiento escribe como el migrador de CI.
+      - name: Pruebas del entorno de demostracion restaurable contra PostgreSQL
+        working-directory: backend
+        env:
+          ENTORNO_DEMO_TEST_DATABASE_URL: postgresql+psycopg://${{ env.CI_MIGRADOR_USER }}:${{ env.CI_MIGRADOR_PASSWORD }}@localhost:5432/entorno_demo_ci
+          ENTORNO_DEMO_TEST_CONTENEDOR: ${{ job.services.postgres.id }}
+          ENTORNO_DEMO_TEST_ADMIN: ${{ env.POSTGRES_USER }}
+        run: |
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, text
+
+          motor = create_engine(
+              "postgresql+psycopg://"
+              f"{os.environ['POSTGRES_USER']}:{os.environ['POSTGRES_PASSWORD']}"
+              "@localhost:5432/postgres",
+              isolation_level="AUTOCOMMIT",
+          )
+          plantilla = os.environ["POSTGRES_DB"]
+          with motor.connect() as conexion:
+              conexion.exec_driver_sql("DROP DATABASE IF EXISTS entorno_demo_ci")
+              conexion.exec_driver_sql(f'CREATE DATABASE entorno_demo_ci TEMPLATE "{plantilla}"')
+          motor.dispose()
+
+          copia = create_engine(os.environ["ENTORNO_DEMO_TEST_DATABASE_URL"])
+          with copia.connect() as conexion:
+              lecturas = conexion.execute(
+                  text("SELECT count(*) FROM operacional.lectura_biometrica")
+              ).scalar_one()
+          copia.dispose()
+          if lecturas != 1180:
+              raise SystemExit(f"::error::la copia desechable no trae el dataset: {lecturas}")
+          print("base desechable entorno_demo_ci lista, con el dataset canonico")
+          PY
+          python -m pytest -q -rs tests/test_entorno_demo_postgresql.py --junitxml=pytest-entorno-demo.xml
+
       # Aislamiento por filas, conectando como **fetalalert_api**: el mismo rol
       # con el que la API atiende peticiones, no un rol de pruebas con politicas
       # propias. Un sujeto distinto demostraria el aislamiento de ese sujeto.
@@ -1019,7 +1100,9 @@ jobs:
               "pytest-scrum98-http.xml": "SCRUM98_HTTP_TEST_DATABASE_URL",
               "pytest-scrum98-pub.xml": "SCRUM98_PUB_TEST_DATABASE_URL",
               "pytest-scrum72-provision.xml": "SCRUM72_PROVISION_TEST_DATABASE_URL",
+              "pytest-entorno-demo.xml": "ENTORNO_DEMO_TEST_DATABASE_URL",
               "pytest-scrum99-pub.xml": "SCRUM99_PUB_TEST_DATABASE_URL",
+              "pytest-scrum109.xml": "SCRUM109_TEST_DATABASE_URL",
           }
 
           fallo = False

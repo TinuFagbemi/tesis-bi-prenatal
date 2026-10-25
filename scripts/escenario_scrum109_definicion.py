@@ -1,0 +1,773 @@
+"""Definicion del escenario de demostracion de SCRUM-109: datos fijos, sin base.
+
+**Que es.** El grupo de pacientes del escenario, en la clinica de Darien del
+dataset canonico: cinco pacientes ficticias con
+cuenta --una protagonista con dos embarazos y cuatro de apoyo-- y un sexto
+perfil sin cuenta, sin embarazo y sin mediciones, que SCRUM-110 usara para
+habilitar una cuenta. Todo lo que aqui aparece es simulado y completamente
+ficticio; las frecuencias son un diseno de datos de prueba, no una
+recomendacion clinica.
+
+**Que no es.** No es el dataset canonico de la tesis (732 sesiones, 1.180
+lecturas) ni lo modifica: se carga **despues** de el, en filas propias, con
+``scripts/cargar_escenario_scrum109.py``. Este modulo no abre conexiones: la
+logica de carga vive en ese script.
+
+**El modelo es el de siempre.** Las estructuras auxiliares de este modulo
+(:class:`Paciente`, :class:`Embarazo`, :class:`Observacion`) solo describen la
+historia. :func:`filas` las traduce, columna por columna, a las tablas
+operacionales existentes --``paciente``, ``telefono_paciente``, ``usuario``,
+``usuario_paciente``, ``dispositivo``, ``embarazo``, ``seguimiento_clinico``,
+``asignacion_dispositivo``, ``sesion_monitoreo`` y ``lectura_biometrica``-- con
+sus nombres exactos. No hay tablas, columnas ni catalogos nuevos.
+
+**Las reglas tampoco se reescriben.** La semana gestacional se calcula con
+:func:`app.services.ingesta.semana_gestacional`, la misma que aplica la API; el
+umbral de la semana 20 es :data:`app.loader.dataset.SEMANA_MINIMA_DE_MOVIMIENTO`;
+y el semaforo de cada lectura lo decide :func:`app.etl.reglas.clasificar_lectura`,
+la misma que usa el ETL para conciliar. Aqui no se elige ningun nivel.
+
+**Identificadores reservados.** Cada fila del escenario usa un identificador
+explicito dentro de un bloque reservado (:data:`BLOQUES`), y ese bloque es la
+forma estable de reconocerla. Las sesiones y lecturas tienen identificadores
+fijos para toda la historia, tambien para las que aun no se cargaron porque
+son posteriores al corte: avanzar el corte nunca renumera nada.
+
+**El corte.** Las fechas de los embarazos y de cada observacion son fijas. El
+corte solo decide **hasta donde** se carga: una sesion entra, con todas sus
+lecturas, si la ``fecha_hora_captura`` de la ultima es anterior o igual al
+corte. Nunca se desplaza la historia ni se cambia la fecha del sistema.
+
+**Granularidad.** Una sesion de signos maternos tiene cinco lecturas
+conjuntas (FC y SpO2 en cada fila); una de movimientos fetales, un conteo
+consolidado.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal
+from zoneinfo import ZoneInfo
+
+from app.etl.reglas import (
+    AfiliacionClinica,
+    ErrorDeDatos,
+    PeriodoDeSeguimiento,
+    clasificar_lectura,
+    medico_responsable,
+    verificar_afiliacion,
+)
+from app.loader.dataset import SEMANA_MINIMA_DE_MOVIMIENTO
+from app.models.enums import (
+    EstadoDispositivo,
+    EstadoEmbarazo,
+    EstadoSesion,
+    OrigenDato,
+    RolSeguimiento,
+    TipoContacto,
+    TipoSesion,
+)
+from app.services.ingesta import semana_gestacional
+
+VERSION = "SCRUM-109.5"
+NOMBRE = "Escenario de demostracion SCRUM-109"
+
+# Las fechas clinicas del proyecto son de Panama; el ETL ubica cada lectura en
+# su dia de America/Panama (``reglas.ZONA_HORARIA_CLINICA``).
+ZONA = ZoneInfo("America/Panama")
+
+# Ultimo dia con observaciones programadas. La sustentacion es del 20 al 23 de
+# noviembre de 2026; la historia sigue una semana mas para que cualquier corte
+# de esos dias encuentre datos hasta el propio dia.
+FIN_DEL_ESCENARIO = date(2026, 11, 30)
+
+# El dispositivo simulado que reconocen las herramientas de la demo
+# (``provisionar_demo.CODIGO_DISPOSITIVO_DEMO``; Demo Control exige una sola
+# asignacion suya). Aqui sirve al embarazo actual de la protagonista. Las
+# pruebas comprueban que coincide con el del script, en lugar de importarlo,
+# para que este modulo no dependa de ``scripts/``.
+CODIGO_DISPOSITIVO_PRINCIPAL = "DEMO-SCRUM72-01"
+
+# La clinica de la demostracion, por su provincia: la del dataset canonico en
+# Darien. El cargador resuelve en la base la unica clinica de esa provincia; su
+# identificador no se escribe aqui. El medico de la demo, en cambio, es del
+# escenario (:data:`MEDICO_DE_LA_DEMO`): sigue solo a sus pacientes, de modo que
+# los medicos canonicos conservan unicamente las suyas.
+PROVINCIA_DE_LA_DEMO = "Darién"
+# La especialidad del medico de la demo, por su nombre en el catalogo canonico.
+ESPECIALIDAD_DEL_MEDICO = "Ginecología y Obstetricia"
+
+# Las seis pacientes son, por definicion de esta demo, originarias de Darien:
+# su cedula lleva el prefijo provincial 5 (como las de Darien del generador,
+# ``PREFIJO_POR_PROVINCIA``). No es la clinica la que fija la cedula --residir
+# o atenderse en una provincia no cambia el documento--, sino el origen que se
+# eligio para ellas. Las cedulas son inventadas (provincia-tomo-asiento) y no
+# se ha verificado si coinciden con las de personas reales.
+PREFIJO_DE_CEDULA = "5"
+
+# Dominio reservado (RFC 2606): los correos parecen personales pero no pueden
+# ser de nadie. Cedulas y telefonos se inventaron a mano; no se ha verificado
+# si coinciden con los de personas reales.
+DOMINIO_DE_CORREO = "example.com"
+MODELO_DE_DISPOSITIVO = "Simulado SCRUM-109"
+FIRMWARE_DE_DISPOSITIVO = "0.0-demo"
+DIAS_POR_SEMANA = 7
+DURACION_DE_REFERENCIA_DIAS = 280  # FPP = inicio + 40 semanas exactas
+
+# Semana desde la que se registran signos maternos en cada embarazo.
+SEMANA_INICIO_SIGNOS = 4
+HORA_SIGNOS = time(9, 30)
+HORA_MOVIMIENTOS = time(16, 0)
+# Dias dentro de la semana 20 en que cae el primer conteo de movimientos.
+DESFASE_MOVIMIENTOS_DIAS = 2
+
+# Bloques reservados: (primero, ultimo), ambos incluidos. Una fila del bloque que
+# no figure en esta definicion es ajena y el cargador se niega a seguir.
+BLOQUE_ENTIDADES = (10901, 10999)
+BLOQUE_MONITOREO = (10_900_001, 10_999_999)
+BLOQUES: dict[str, tuple[str, tuple[int, int]]] = {
+    "paciente": ("id_paciente", BLOQUE_ENTIDADES),
+    "telefono_paciente": ("id_telefono_paciente", BLOQUE_ENTIDADES),
+    "usuario": ("id_usuario", BLOQUE_ENTIDADES),
+    "medico": ("id_medico", BLOQUE_ENTIDADES),
+    "telefono_medico": ("id_telefono_medico", BLOQUE_ENTIDADES),
+    "dispositivo": ("id_dispositivo", BLOQUE_ENTIDADES),
+    "embarazo": ("id_embarazo", BLOQUE_ENTIDADES),
+    "seguimiento_clinico": ("id_seguimiento", BLOQUE_ENTIDADES),
+    "asignacion_dispositivo": ("id_asignacion", BLOQUE_ENTIDADES),
+    "sesion_monitoreo": ("id_sesion", BLOQUE_MONITOREO),
+    "lectura_biometrica": ("id_lectura", BLOQUE_MONITOREO),
+}
+# Sesiones y lecturas: 10_900_000 + (id_embarazo - 10900) * 10_000 + n.
+BASE_MONITOREO = 10_900_000
+TRAMO_POR_EMBARAZO = 10_000
+
+# Valores biometricos de rutina, en ciclo. Son datos de prueba fijos; su
+# clasificacion la decide ``clasificar_lectura``, no este modulo. En signos
+# maternos son el valor base de cada sesion (la primera de sus lecturas).
+HR_DE_RUTINA = (78, 82, 85, 80, 88, 84, 79, 86)
+SPO2_DE_RUTINA = (98, 97, 99, 97, 98, 96, 98, 97)
+MOV_DE_RUTINA = (12, 14, 11, 15, 13, 16, 12, 14)
+
+# Una sesion de signos maternos son cinco lecturas conjuntas (FC y SpO2 en la
+# misma fila), tomadas un minuto aparte. Movimientos fetales: un conteo
+# consolidado por sesion, una sola lectura.
+LECTURAS_POR_SESION_DE_SIGNOS = 5
+INTERVALO_ENTRE_LECTURAS = timedelta(minutes=1)
+# Variacion de cada lectura respecto del valor base de su sesion, en ciclo y
+# rotada por sesion. Son pequeñas a proposito: ninguna saca a una lectura de la
+# banda de SIM-1.0 de su valor base, de modo que cada caso conserva su
+# semaforo (lo comprueban las pruebas con ``clasificar_lectura``). La SpO2 solo
+# baja: subir un punto llevaria un 94 de precaucion al 95 normal.
+DESVIO_HR = (0, 2, -1, 3, 1)
+DESVIO_SPO2 = (0, -1, 0, 0, -1)
+
+
+class ErrorDeDefinicion(RuntimeError):
+    """La definicion se contradice o contradice una regla del dominio."""
+
+
+# ---------------------------------------------------------------------------
+# La historia
+# ---------------------------------------------------------------------------
+
+
+# Un contacto secundario usa el id del perfil mas este desplazamiento, dentro
+# del mismo bloque reservado (10911-10916).
+DESPLAZAMIENTO_CONTACTO_SECUNDARIO = 10
+
+
+@dataclass(frozen=True)
+class Medico:
+    """El medico de la demo: identidad sintetica, cuenta MEDICO y afiliacion.
+
+    ``id_medico`` es tambien el de su cuenta (``usuario``) y el de su telefono,
+    dentro del bloque reservado. Su unica afiliacion es a la clinica de la
+    demo, desde ``inicio_afiliacion`` y sin fin: debe cubrir cada dia del
+    escenario, porque el ETL deriva de ella la clinica de cada lectura.
+    """
+
+    id_medico: int
+    primer_nombre: str
+    segundo_nombre: str | None
+    apellido_paterno: str
+    apellido_materno: str | None
+    usuario_de_correo: str
+    celular: str
+    inicio_afiliacion: date
+
+    @property
+    def id_usuario(self) -> int:
+        return self.id_medico
+
+    @property
+    def id_telefono_medico(self) -> int:
+        return self.id_medico
+
+    @property
+    def correo(self) -> str:
+        """Tambien su UPN en Power BI: ``lower(usuario.email)``."""
+        return f"{self.usuario_de_correo}@{DOMINIO_DE_CORREO}"
+
+    @property
+    def nombre_completo(self) -> str:
+        partes = (self.primer_nombre, self.segundo_nombre, self.apellido_paterno, self.apellido_materno)
+        return " ".join(p for p in partes if p)
+
+
+MEDICO_DE_LA_DEMO = Medico(
+    10950, "Itzel", "Marina", "Barría", "Cortés", "itzel.barria", "6731-5820", date(2025, 1, 1),
+)
+
+
+@dataclass(frozen=True)
+class Paciente:
+    """Identidad completa de una paciente, como la de un expediente real.
+
+    Todo es ficticio: el correo usa :data:`DOMINIO_DE_CORREO`; la cedula
+    (prefijo :data:`PREFIJO_DE_CEDULA`) y los telefonos se inventaron a mano y
+    no se ha verificado si coinciden con los de personas reales.
+    """
+
+    id_paciente: int
+    primer_nombre: str
+    segundo_nombre: str | None
+    apellido_paterno: str
+    apellido_materno: str
+    fecha_nac: date
+    cedula: str
+    usuario_de_correo: str
+    celular: str
+    con_cuenta: bool
+    papel: str
+    # (tipo, valor) de un contacto secundario, o ``None``.
+    contacto_secundario: tuple[TipoContacto, str] | None = None
+
+    @property
+    def id_usuario(self) -> int | None:
+        """La cuenta PACIENTE comparte el numero del perfil; ``None`` sin cuenta."""
+        return self.id_paciente if self.con_cuenta else None
+
+    @property
+    def correo(self) -> str:
+        return f"{self.usuario_de_correo}@{DOMINIO_DE_CORREO}"
+
+    @property
+    def nombre_completo(self) -> str:
+        partes = (self.primer_nombre, self.segundo_nombre, self.apellido_paterno, self.apellido_materno)
+        return " ".join(p for p in partes if p)
+
+
+@dataclass(frozen=True)
+class Alteracion:
+    """Valores fuera de la rutina para un tipo de sesion en un periodo.
+
+    ``hasta`` incluido; ``None`` = hasta el final. Los valores se recorren en
+    ciclo, y los que son ``None`` conservan el de rutina.
+    """
+
+    tipo: TipoSesion
+    desde: date
+    hasta: date | None
+    hr: tuple[int, ...] | None = None
+    spo2: tuple[int, ...] | None = None
+    mov: tuple[int, ...] | None = None
+
+    def aplica(self, tipo: TipoSesion, dia: date) -> bool:
+        return tipo is self.tipo and self.desde <= dia and (self.hasta is None or dia <= self.hasta)
+
+
+@dataclass(frozen=True)
+class Embarazo:
+    id_embarazo: int
+    id_paciente: int
+    fecha_inicio: date
+    estado: EstadoEmbarazo
+    fecha_cierre: date | None
+    numero_gestas: int
+    numero_partos: int
+    codigo_dispositivo: str
+    papel: str
+    alteraciones: tuple[Alteracion, ...] = ()
+
+    @property
+    def fecha_probable_parto(self) -> date:
+        return self.fecha_inicio + timedelta(days=DURACION_DE_REFERENCIA_DIAS)
+
+    @property
+    def fin_de_observaciones(self) -> date:
+        """Primer dia **sin** observaciones (excluido)."""
+        if self.fecha_cierre is not None:
+            return self.fecha_cierre
+        return min(FIN_DEL_ESCENARIO + timedelta(days=1), self.fecha_probable_parto)
+
+    @property
+    def cerrado(self) -> bool:
+        return self.fecha_cierre is not None
+
+
+S, M = TipoSesion.SIGNOS_MATERNOS, TipoSesion.MOVIMIENTOS_FETALES
+
+PACIENTES: tuple[Paciente, ...] = (
+    Paciente(10901, "Elena", "Sofía", "Araúz", "Quiel", date(1994, 5, 14),
+             "5-708-1834", "elena.arauz94", "6674-2918", True, "protagonista",
+             contacto_secundario=(TipoContacto.TELEFONO_DOMICILIO, "299-6408")),
+    Paciente(10902, "Marta", "Isabel", "Samudio", "Caballero", date(1990, 9, 3),
+             "5-704-2290", "marta.samudio", "6238-5174", True, "apoyo: lecturas OK"),
+    Paciente(10903, "Rosa", "María", "Jaramillo", "Serrano", date(1997, 2, 21),
+             "5-711-1065", "rosamjaramillo", "6915-3087", True, "apoyo: WARNING recientes",
+             contacto_secundario=(TipoContacto.CORREO_ALTERNO, "rosa.jaramillo.s@example.com")),
+    Paciente(10904, "Inés", "Carolina", "Pittí", "Morales", date(1988, 11, 30),
+             "5-702-1918", "ines.pitti88", "6482-7731", True,
+             "apoyo: WARNING historicos seguidos de OK"),
+    Paciente(10905, "Clara", "Lucía", "Miranda", "Guerra", date(2001, 7, 9),
+             "5-716-1597", "claramiranda01", "6357-0846", True, "apoyo: embarazo temprano"),
+    Paciente(10906, "Paula", "Andrea", "Quintero", "Saldaña", date(1999, 3, 17),
+             "5-713-2213", "paula.quintero", "6729-4580", False,
+             "perfil sin cuenta para SCRUM-110 (sin embarazo ni mediciones)"),
+)
+
+EMBARAZOS: tuple[Embarazo, ...] = (
+    Embarazo(
+        10901, 10901, date(2025, 1, 13), EstadoEmbarazo.FINALIZADO, date(2025, 10, 13),
+        numero_gestas=1, numero_partos=0, codigo_dispositivo="DEMO-SCRUM109-01",
+        papel="protagonista: embarazo anterior, finalizado",
+        alteraciones=(Alteracion(S, date(2025, 7, 14), date(2025, 7, 27), hr=(103,)),),
+    ),
+    Embarazo(
+        10902, 10901, date(2026, 4, 27), EstadoEmbarazo.ACTIVO, None,
+        numero_gestas=2, numero_partos=1, codigo_dispositivo=CODIGO_DISPOSITIVO_PRINCIPAL,
+        papel="protagonista: embarazo actual (dispositivo principal de la demo)",
+        alteraciones=(Alteracion(S, date(2026, 7, 13), date(2026, 7, 26), spo2=(94,)),),
+    ),
+    Embarazo(
+        10903, 10902, date(2026, 3, 2), EstadoEmbarazo.ACTIVO, None,
+        numero_gestas=1, numero_partos=0, codigo_dispositivo="DEMO-SCRUM109-03",
+        papel="apoyo: lecturas OK",
+    ),
+    Embarazo(
+        10904, 10903, date(2026, 4, 13), EstadoEmbarazo.ACTIVO, None,
+        numero_gestas=2, numero_partos=1, codigo_dispositivo="DEMO-SCRUM109-04",
+        papel="apoyo: WARNING recientes (desde el 2026-10-05)",
+        alteraciones=(
+            Alteracion(S, date(2026, 10, 5), None, hr=(104, 106)),
+            Alteracion(M, date(2026, 10, 5), None, mov=(8, 7)),
+        ),
+    ),
+    Embarazo(
+        10905, 10904, date(2026, 3, 23), EstadoEmbarazo.ACTIVO, None,
+        numero_gestas=1, numero_partos=0, codigo_dispositivo="DEMO-SCRUM109-05",
+        papel="apoyo: WARNING historicos (2026-08-17 a 2026-09-06) seguidos de OK",
+        alteraciones=(
+            Alteracion(S, date(2026, 8, 17), date(2026, 9, 6), spo2=(93,)),
+            Alteracion(M, date(2026, 8, 17), date(2026, 9, 6), mov=(7,)),
+        ),
+    ),
+    Embarazo(
+        10906, 10905, date(2026, 6, 1), EstadoEmbarazo.ACTIVO, None,
+        numero_gestas=1, numero_partos=0, codigo_dispositivo="DEMO-SCRUM109-06",
+        papel="apoyo: embarazo temprano, movimientos desde la semana 20",
+    ),
+)
+
+
+@dataclass(frozen=True)
+class Lectura:
+    """Una lectura consolidada: FC y SpO2 juntas, o un conteo de movimientos."""
+
+    id_lectura: int
+    captura: datetime
+    hr: Decimal | None
+    spo2: Decimal | None
+    mov: int | None
+
+    @property
+    def dia(self) -> date:
+        return self.captura.astimezone(ZONA).date()
+
+
+@dataclass(frozen=True)
+class Observacion:
+    """Una sesion simulada con sus lecturas.
+
+    Signos maternos: :data:`LECTURAS_POR_SESION_DE_SIGNOS` lecturas conjuntas
+    seguidas; movimientos: una. ``captura`` es el inicio de la sesion (su
+    primera lectura) y ``fin`` el de la ultima.
+    """
+
+    id_sesion: int
+    id_embarazo: int
+    tipo: TipoSesion
+    lecturas: tuple[Lectura, ...]
+
+    @property
+    def captura(self) -> datetime:
+        return self.lecturas[0].captura
+
+    @property
+    def fin(self) -> datetime:
+        return self.lecturas[-1].captura
+
+    @property
+    def dia(self) -> date:
+        return self.captura.astimezone(ZONA).date()
+
+
+def _en_panama(dia: date, hora: time) -> datetime:
+    return datetime.combine(dia, hora, ZONA)
+
+
+def _dias(embarazo: Embarazo, primera_semana: int, desfase: int = 0) -> list[date]:
+    dia = embarazo.fecha_inicio + timedelta(days=(primera_semana - 1) * DIAS_POR_SEMANA + desfase)
+    dias = []
+    while dia < embarazo.fin_de_observaciones:
+        dias.append(dia)
+        dia += timedelta(days=DIAS_POR_SEMANA)
+    return dias
+
+
+def _valor(alteraciones, tipo, dia, campo, rutina, indice):
+    for alteracion in alteraciones:
+        valores = getattr(alteracion, campo)
+        if valores is not None and alteracion.aplica(tipo, dia):
+            return valores[indice % len(valores)]
+    return rutina[indice % len(rutina)]
+
+
+def observaciones_del_embarazo(embarazo: Embarazo) -> list[Observacion]:
+    """Signos semanales desde la semana 4 y movimientos semanales desde la 20.
+
+    Cada sesion de signos tiene cinco lecturas conjuntas, un minuto aparte,
+    con el valor base de la sesion (rutina o alteracion) y una variacion fija
+    (:data:`DESVIO_HR`, :data:`DESVIO_SPO2`). Cada sesion de movimientos, un
+    solo conteo. Antes de la semana 20 no hay **ninguna** sesion de
+    movimiento: la ausencia es la forma de decir «no registrado», nunca un cero.
+
+    Identificadores: las sesiones se numeran por su inicio y las lecturas por
+    su captura, ambas desde ``BASE_MONITOREO + (id_embarazo - 10900) *
+    TRAMO_POR_EMBARAZO + 1``, cada una en su tabla.
+    """
+    desplazamiento = embarazo.id_embarazo - 10900
+    crudas = []
+    for indice, dia in enumerate(_dias(embarazo, SEMANA_INICIO_SIGNOS)):
+        rotacion = indice + desplazamiento
+        hr = _valor(embarazo.alteraciones, S, dia, "hr", HR_DE_RUTINA, rotacion)
+        spo2 = _valor(embarazo.alteraciones, S, dia, "spo2", SPO2_DE_RUTINA, rotacion)
+        inicio = _en_panama(dia, HORA_SIGNOS)
+        valores = [
+            (
+                inicio + k * INTERVALO_ENTRE_LECTURAS,
+                Decimal(hr + DESVIO_HR[(k + rotacion) % len(DESVIO_HR)]),
+                Decimal(spo2 + DESVIO_SPO2[(k + rotacion) % len(DESVIO_SPO2)]),
+                None,
+            )
+            for k in range(LECTURAS_POR_SESION_DE_SIGNOS)
+        ]
+        crudas.append((inicio, S, valores))
+    dias_mov = _dias(embarazo, SEMANA_MINIMA_DE_MOVIMIENTO, DESFASE_MOVIMIENTOS_DIAS)
+    for indice, dia in enumerate(dias_mov):
+        mov = _valor(embarazo.alteraciones, M, dia, "mov", MOV_DE_RUTINA, indice + desplazamiento)
+        inicio = _en_panama(dia, HORA_MOVIMIENTOS)
+        crudas.append((inicio, M, [(inicio, None, None, mov)]))
+    crudas.sort(key=lambda c: c[0])
+    base = BASE_MONITOREO + desplazamiento * TRAMO_POR_EMBARAZO
+    observaciones = []
+    siguiente_lectura = base + 1
+    for numero, (_, tipo, valores) in enumerate(crudas, start=1):
+        lecturas = []
+        for captura, hr, spo2, mov in valores:
+            lecturas.append(Lectura(siguiente_lectura, captura, hr, spo2, mov))
+            siguiente_lectura += 1
+        observaciones.append(Observacion(base + numero, embarazo.id_embarazo, tipo, tuple(lecturas)))
+    return observaciones
+
+
+def todas_las_observaciones() -> list[Observacion]:
+    return [o for e in EMBARAZOS for o in observaciones_del_embarazo(e)]
+
+
+def fecha_estructural_maxima() -> date:
+    """La fecha mas reciente de las filas que se cargan siempre, con cualquier corte."""
+    fechas = [e.fecha_inicio for e in EMBARAZOS] + [e.fecha_cierre for e in EMBARAZOS if e.fecha_cierre]
+    return max(fechas)
+
+
+def corte_minimo() -> datetime:
+    """Un corte anterior dejaria cargados embarazos y asignaciones del futuro."""
+    return _en_panama(fecha_estructural_maxima(), time(0))
+
+
+# ---------------------------------------------------------------------------
+# Traduccion explicita al modelo existente
+# ---------------------------------------------------------------------------
+
+
+def seguimientos() -> list[PeriodoDeSeguimiento]:
+    """Un seguimiento PRINCIPAL por embarazo, del medico de la demo.
+
+    Desde el inicio del embarazo hasta su cierre (abierto si sigue en curso).
+    El de un embarazo finalizado queda cerrado: ningun medico lo ve hoy, y su
+    paciente si. Es la forma que exige el ETL: un solo PRINCIPAL por dia.
+    ``id_seguimiento`` es el ``id_embarazo`` que sigue (convencion del
+    escenario: un seguimiento por embarazo, mismo identificador).
+    """
+    return [
+        PeriodoDeSeguimiento(e.id_embarazo, MEDICO_DE_LA_DEMO.id_medico, e.fecha_inicio, e.fecha_cierre)
+        for e in EMBARAZOS
+    ]
+
+
+@dataclass(frozen=True)
+class Referencias:
+    """Lo que el cargador resuelve en la base. Nada de esto se inventa aqui."""
+
+    id_clinica: int
+    id_rol_paciente: int
+    id_rol_medico: int
+    id_especialidad: int
+    # semana_gestacion -> (id_tiempo_gest, trimestre), del catalogo real.
+    semanas: dict[int, tuple[int, int]]
+    # codigo_nivel -> id_semaforo, del catalogo real.
+    semaforos: dict[str, int]
+    # id_usuario -> digest Argon2id de la clave simulada del dataset.
+    password_hash: dict[int, str]
+
+
+def paciente(id_paciente: int) -> Paciente:
+    return next(p for p in PACIENTES if p.id_paciente == id_paciente)
+
+
+def clasificar(lectura: Lectura, embarazo: Embarazo, referencias: Referencias):
+    """Semana, fila del catalogo y estados de una lectura, con las funciones del dominio."""
+    semana = semana_gestacional(embarazo.fecha_inicio, lectura.captura.astimezone(ZONA))
+    if semana not in referencias.semanas:
+        raise ErrorDeDefinicion(
+            f"lectura {lectura.id_lectura}: la semana {semana} no esta en el catalogo."
+        )
+    id_tiempo_gest, trimestre = referencias.semanas[semana]
+    estados = clasificar_lectura(
+        hr_valor=lectura.hr,
+        spo2_valor=lectura.spo2,
+        mov_valor=lectura.mov,
+        semana=semana,
+        trimestre=trimestre,
+    )
+    return semana, id_tiempo_gest, estados
+
+
+def filas(referencias: Referencias, corte: datetime | None) -> dict[str, list[dict]]:
+    """Filas por tabla operacional, con sus columnas exactas.
+
+    ``corte=None`` devuelve la historia completa (la usa el cargador para
+    reconocer las filas del bloque reservado); con un corte, solo las
+    sesiones cuya ultima lectura se capturo hasta el: una sesion entra entera
+    o no entra.
+    """
+    validar_definicion()
+    tablas: dict[str, list[dict]] = {nombre: [] for nombre in (
+        "paciente", "telefono_paciente", "medico", "telefono_medico", "medico_clinica", "usuario",
+        "usuario_paciente", "usuario_medico", "dispositivo", "embarazo", "seguimiento_clinico",
+        "asignacion_dispositivo", "sesion_monitoreo", "lectura_biometrica",
+    )}
+    m = MEDICO_DE_LA_DEMO
+    tablas["medico"].append({
+        "id_medico": m.id_medico, "id_especialidad": referencias.id_especialidad,
+        "primer_nombre": m.primer_nombre, "segundo_nombre": m.segundo_nombre,
+        "apellido_paterno": m.apellido_paterno, "apellido_materno": m.apellido_materno,
+        "email_med": m.correo,
+    })
+    tablas["telefono_medico"].append({
+        "id_telefono_medico": m.id_telefono_medico, "id_medico": m.id_medico,
+        "tipo_contacto": TipoContacto.CELULAR.value, "valor_contacto": m.celular, "principal": True,
+    })
+    tablas["medico_clinica"].append({
+        "id_medico": m.id_medico, "id_clinica": referencias.id_clinica,
+        "fecha_inicio": m.inicio_afiliacion, "fecha_final": None, "activo": True,
+    })
+    tablas["usuario"].append({
+        "id_usuario": m.id_usuario, "id_rol": referencias.id_rol_medico, "email": m.correo,
+        "password_hash": referencias.password_hash[m.id_usuario], "activo": True,
+    })
+    tablas["usuario_medico"].append({"id_usuario": m.id_usuario, "id_medico": m.id_medico})
+    for p in PACIENTES:
+        tablas["paciente"].append({
+            "id_paciente": p.id_paciente, "cedula": p.cedula, "primer_nombre": p.primer_nombre,
+            "segundo_nombre": p.segundo_nombre, "apellido_paterno": p.apellido_paterno,
+            "apellido_materno": p.apellido_materno, "email_pac": p.correo, "fecha_nac": p.fecha_nac,
+        })
+        tablas["telefono_paciente"].append({
+            "id_telefono_paciente": p.id_paciente, "id_paciente": p.id_paciente,
+            "tipo_contacto": TipoContacto.CELULAR.value, "valor_contacto": p.celular, "principal": True,
+        })
+        if p.contacto_secundario is not None:
+            tipo, valor = p.contacto_secundario
+            tablas["telefono_paciente"].append({
+                "id_telefono_paciente": p.id_paciente + DESPLAZAMIENTO_CONTACTO_SECUNDARIO,
+                "id_paciente": p.id_paciente, "tipo_contacto": tipo.value, "valor_contacto": valor,
+                "principal": False,
+            })
+        if p.con_cuenta:
+            tablas["usuario"].append({
+                "id_usuario": p.id_usuario, "id_rol": referencias.id_rol_paciente, "email": p.correo,
+                "password_hash": referencias.password_hash[p.id_usuario], "activo": True,
+            })
+            tablas["usuario_paciente"].append({"id_usuario": p.id_usuario, "id_paciente": p.id_paciente})
+    for e in EMBARAZOS:
+        tablas["dispositivo"].append({
+            "id_dispositivo": e.id_embarazo, "id_clinica": referencias.id_clinica,
+            "codigo_dispositivo": e.codigo_dispositivo, "modelo": MODELO_DE_DISPOSITIVO,
+            "version_firmware": FIRMWARE_DE_DISPOSITIVO,
+            # Devuelto al cerrar el embarazo: queda libre, sin otra asignacion.
+            "estado": (EstadoDispositivo.DISPONIBLE if e.cerrado else EstadoDispositivo.ASIGNADO).value,
+            "fecha_registro": _en_panama(e.fecha_inicio, time(0)),
+        })
+        tablas["embarazo"].append({
+            "id_embarazo": e.id_embarazo, "id_paciente": e.id_paciente,
+            "id_clinica": referencias.id_clinica, "numero_gestas": e.numero_gestas,
+            "numero_partos": e.numero_partos, "fecha_inicio": e.fecha_inicio,
+            "fecha_probable_parto": e.fecha_probable_parto, "estado_embarazo": e.estado.value,
+            "fecha_cierre": e.fecha_cierre,
+        })
+    for s in seguimientos():
+        cerrado = s.fecha_fin is not None
+        tablas["seguimiento_clinico"].append({
+            "id_seguimiento": s.id_seguimiento, "id_embarazo": s.id_seguimiento,
+            "id_medico": s.id_medico, "fecha_asignacion": s.fecha_asignacion,
+            "fecha_fin": s.fecha_fin, "rol_seguimiento": RolSeguimiento.PRINCIPAL.value,
+            "activo": not cerrado,
+        })
+    for e in EMBARAZOS:
+        tablas["asignacion_dispositivo"].append({
+            "id_asignacion": e.id_embarazo, "id_dispositivo": e.id_embarazo,
+            "id_embarazo": e.id_embarazo, "fecha_inicio": e.fecha_inicio,
+            "fecha_fin": e.fecha_cierre, "activo": not e.cerrado,
+        })
+        for o in observaciones_del_embarazo(e):
+            if corte is not None and o.fin > corte:
+                continue
+            tablas["sesion_monitoreo"].append({
+                "id_sesion": o.id_sesion, "id_embarazo": e.id_embarazo, "id_dispositivo": e.id_embarazo,
+                "tipo_sesion": o.tipo.value, "fecha_inicio": o.captura, "fecha_fin": o.fin,
+                "estado_sesion": EstadoSesion.COMPLETADA.value, "origen_dato": OrigenDato.DISPOSITIVO.value,
+            })
+            for lectura in o.lecturas:
+                _, id_tiempo_gest, estados = clasificar(lectura, e, referencias)
+                tablas["lectura_biometrica"].append({
+                    "id_lectura": lectura.id_lectura, "id_sesion": o.id_sesion, "id_tiempo_gest": id_tiempo_gest,
+                    "id_semaforo": referencias.semaforos[estados.codigo_global],
+                    "fecha_hora_captura": lectura.captura,
+                    # Precarga: no hubo sincronizacion que registrar. Es lo mismo que
+                    # deja la ruta en vivo (el paquete viaja con este campo en NULL).
+                    "fecha_hora_sincronizacion": None,
+                    "hr_valor": lectura.hr, "spo2_valor": lectura.spo2, "mov_valor": lectura.mov,
+                })
+    return tablas
+
+
+# ---------------------------------------------------------------------------
+# Coherencia interna
+# ---------------------------------------------------------------------------
+
+
+def validar_definicion() -> None:
+    """Lo que la definicion debe cumplir sin mirar la base."""
+    ids_p = [p.id_paciente for p in PACIENTES]
+    ids_e = [e.id_embarazo for e in EMBARAZOS]
+    codigos = [e.codigo_dispositivo for e in EMBARAZOS]
+    for nombre, ids in (("pacientes", ids_p), ("embarazos", ids_e), ("dispositivos", codigos)):
+        if len(set(ids)) != len(ids):
+            raise ErrorDeDefinicion(f"Identificadores de {nombre} repetidos.")
+    primero, ultimo = BLOQUE_ENTIDADES
+    if not all(primero <= i <= ultimo for i in ids_p + ids_e):
+        raise ErrorDeDefinicion("Un identificador de entidad esta fuera de su bloque.")
+    for campo in ("cedula", "correo", "celular"):
+        valores = [getattr(p, campo) for p in PACIENTES]
+        if len(set(valores)) != len(valores):
+            raise ErrorDeDefinicion(f"Valores de {campo} repetidos entre pacientes.")
+    for p in PACIENTES:
+        if not re.fullmatch(r"[a-z0-9]+([._][a-z0-9]+)*", p.usuario_de_correo):
+            raise ErrorDeDefinicion(f"paciente {p.id_paciente}: correo con caracteres no validos.")
+        # Cedula panamena de nacional: provincia-tomo-asiento.
+        if not re.fullmatch(rf"{PREFIJO_DE_CEDULA}-\d{{1,4}}-\d{{1,6}}", p.cedula):
+            raise ErrorDeDefinicion(f"paciente {p.id_paciente}: cedula con formato o provincia invalidos.")
+        if not re.fullmatch(r"6\d{3}-\d{4}", p.celular):
+            raise ErrorDeDefinicion(f"paciente {p.id_paciente}: celular con formato invalido.")
+        if p.contacto_secundario is not None:
+            tipo, valor = p.contacto_secundario
+            if tipo is TipoContacto.CELULAR or valor == p.celular:
+                raise ErrorDeDefinicion(f"paciente {p.id_paciente}: contacto secundario invalido.")
+            if tipo is TipoContacto.TELEFONO_DOMICILIO and not re.fullmatch(r"\d{3}-\d{4}", valor):
+                raise ErrorDeDefinicion(f"paciente {p.id_paciente}: telefono de domicilio invalido.")
+            if tipo is TipoContacto.CORREO_ALTERNO and not valor.endswith(f"@{DOMINIO_DE_CORREO}"):
+                raise ErrorDeDefinicion(
+                    f"paciente {p.id_paciente}: correo alterno fuera del dominio reservado."
+                )
+    m = MEDICO_DE_LA_DEMO
+    if not primero <= m.id_medico <= ultimo:
+        raise ErrorDeDefinicion("El medico de la demo esta fuera del bloque reservado.")
+    if m.id_usuario in {p.id_usuario for p in PACIENTES if p.con_cuenta}:
+        raise ErrorDeDefinicion("La cuenta del medico de la demo coincide con la de una paciente.")
+    if not re.fullmatch(r"[a-z0-9]+([._][a-z0-9]+)*", m.usuario_de_correo) or m.correo in {
+        p.correo for p in PACIENTES
+    }:
+        raise ErrorDeDefinicion("Correo del medico de la demo invalido o repetido.")
+    if not re.fullmatch(r"6\d{3}-\d{4}", m.celular):
+        raise ErrorDeDefinicion("Celular del medico de la demo con formato invalido.")
+    # Su unica afiliacion debe cubrir cada dia con seguimiento u observacion,
+    # con la misma regla del ETL (la clinica real la resuelve el cargador).
+    afiliacion = [AfiliacionClinica(id_clinica=0, fecha_inicio=m.inicio_afiliacion, fecha_final=None)]
+    periodos = {s.id_seguimiento: s for s in seguimientos()}
+    if set(periodos) != set(ids_e):
+        raise ErrorDeDefinicion("Cada embarazo necesita exactamente un seguimiento del escenario.")
+    for e in EMBARAZOS:
+        dias = {e.fecha_inicio} | ({e.fecha_cierre} if e.fecha_cierre else set())
+        dias |= {o.dia for o in observaciones_del_embarazo(e)}
+        for dia in sorted(dias):
+            try:
+                id_medico = medico_responsable(
+                    [s for s in seguimientos() if s.id_seguimiento == e.id_embarazo], dia, id_lectura=0
+                )
+                verificar_afiliacion(afiliacion, dia, id_medico=id_medico, id_clinica_embarazo=0, id_lectura=0)
+            except ErrorDeDatos as error:
+                raise ErrorDeDefinicion(
+                    f"embarazo {e.id_embarazo}, {dia.isoformat()}: {type(error).__name__}."
+                ) from None
+            if id_medico != m.id_medico:
+                raise ErrorDeDefinicion(f"embarazo {e.id_embarazo}: lo sigue otro medico.")
+    if codigos.count(CODIGO_DISPOSITIVO_PRINCIPAL) != 1:
+        raise ErrorDeDefinicion("El dispositivo principal debe servir a un solo embarazo.")
+    for e in EMBARAZOS:
+        if e.id_paciente not in ids_p or not paciente(e.id_paciente).con_cuenta:
+            raise ErrorDeDefinicion(f"embarazo {e.id_embarazo}: su paciente no tiene cuenta.")
+        if not 0 <= e.numero_partos < e.numero_gestas:
+            raise ErrorDeDefinicion(f"embarazo {e.id_embarazo}: gestas/partos incoherentes.")
+        if (e.estado is EstadoEmbarazo.FINALIZADO) != e.cerrado:
+            raise ErrorDeDefinicion(f"embarazo {e.id_embarazo}: estado y cierre no concuerdan.")
+        activos = [x for x in EMBARAZOS if x.id_paciente == e.id_paciente and not x.cerrado]
+        if len(activos) > 1:
+            raise ErrorDeDefinicion(f"paciente {e.id_paciente}: mas de un embarazo en curso.")
+        for o in observaciones_del_embarazo(e):
+            if not BLOQUE_MONITOREO[0] <= o.id_sesion <= BLOQUE_MONITOREO[1]:
+                raise ErrorDeDefinicion(f"sesion {o.id_sesion} fuera de su bloque.")
+            if not e.fecha_inicio <= o.dia < e.fin_de_observaciones:
+                raise ErrorDeDefinicion(f"sesion {o.id_sesion}: fuera del periodo del embarazo.")
+            semana = semana_gestacional(e.fecha_inicio, o.captura.astimezone(ZONA))
+            if o.tipo is M and semana < SEMANA_MINIMA_DE_MOVIMIENTO:
+                raise ErrorDeDefinicion(f"sesion {o.id_sesion}: movimiento antes de la semana 20.")
+            esperadas = LECTURAS_POR_SESION_DE_SIGNOS if o.tipo is S else 1
+            if len(o.lecturas) != esperadas:
+                raise ErrorDeDefinicion(f"sesion {o.id_sesion}: se esperaban {esperadas} lectura(s).")
+            capturas = [lectura.captura for lectura in o.lecturas]
+            if capturas != sorted(set(capturas)) or o.fin.astimezone(ZONA).date() != o.dia:
+                raise ErrorDeDefinicion(f"sesion {o.id_sesion}: capturas repetidas, desordenadas o en otro dia.")
+            for lectura in o.lecturas:
+                if not BLOQUE_MONITOREO[0] <= lectura.id_lectura <= BLOQUE_MONITOREO[1]:
+                    raise ErrorDeDefinicion(f"lectura {lectura.id_lectura} fuera de su bloque.")
+                if o.tipo is M and (lectura.mov is None or lectura.hr is not None or lectura.spo2 is not None):
+                    raise ErrorDeDefinicion(f"sesion {o.id_sesion}: forma de movimiento invalida.")
+                if o.tipo is S and (lectura.mov is not None or lectura.hr is None or lectura.spo2 is None):
+                    raise ErrorDeDefinicion(f"sesion {o.id_sesion}: forma de signos invalida.")
+            if o.tipo is S and len({(lectura.hr, lectura.spo2) for lectura in o.lecturas}) < 2:
+                raise ErrorDeDefinicion(f"sesion {o.id_sesion}: cinco copias de la misma lectura.")

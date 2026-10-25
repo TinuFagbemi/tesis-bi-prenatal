@@ -1,0 +1,4 @@
+{"nombre": "S109-protagonista-y-apoyo", "concurrente": true,
+ "gestantes": [
+   {"dispositivo": "DEMO-SCRUM72-01", "sesiones": 2, "tipo": ["SIGNOS_MATERNOS", "MOVIMIENTOS_FETALES"], "lecturas": 5},
+   {"dispositivo": "DEMO-SCRUM109-04", "sesiones": 1, "tipo": "SIGNOS_MATERNOS", "lecturas": 5}]}

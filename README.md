@@ -167,6 +167,14 @@ tesis-bi-prenatal/
 
 Para la sustentación, `docker-compose.yml` incluye además Adminer como herramienta auxiliar y opcional de inspección visual, en el perfil `demo`: un arranque ordinario sin perfiles no lo inicia, y no es un componente de FetalAlert. Ver [Adminer para la demostración](docs/demo_adminer.md).
 
+Para preparar y conducir esa demostración existe además **Demo Control**, una consola interna con un único punto de entrada: verifica el entorno en solo lectura, detiene y restablece únicamente el servicio `api`, previsualiza la próxima carga del ETL sin escribir y ejecuta el ETL real tras validar el destino. Orquesta lo que ya existe y no reimplementa nada; tampoco es un componente de FetalAlert. Ver [Demo Control](docs/demo_control.md).
+
+```powershell
+.\backend\.venv\Scripts\python.exe scripts\demo_control.py
+```
+
+Para la sustentación hay además un **escenario de demostración** con un grupo de cinco pacientes ficticias —una protagonista con un embarazo anterior y otro actual— cuya historia se precarga sobre el dataset canónico, sin modificarlo, hasta un corte elegido. Ver [Escenario de demostración de SCRUM-109](docs/escenario_scrum109.md).
+
 ## Estado actual del proyecto
 
 El repositorio se encuentra en una etapa temprana. Lo que ya existe y funciona es el esquema operacional en PostgreSQL con sus migraciones, el generador del dataset simulado, su carga idempotente, el endpoint que recibe una sesión de monitoreo con sus lecturas biométricas —con su contrato de idempotencia—, el nodo edge simulado, que captura paquetes sin conexión y los entrega después sin duplicarlos, con reintentos de espera incremental, agotamiento controlado y trazabilidad de extremo a extremo, y el esquema analítico (Star Schema) con su ETL reproducible, idempotente e incremental. A partir de SCRUM-70 existen además autenticación con JWT, autorización por rol y auditoría de accesos: el endpoint de ingesta ya no es público. SCRUM-97 añade el aprovisionamiento administrativo de cuentas para perfiles clínicos existentes y su desactivación y reactivación. SCRUM-98 añade el aislamiento por fila (RLS) sobre las tablas clínicas, las rutas mínimas de lectura para gestante y médico, la auditoría de los accesos clínicos concedidos y denegados, y la capa publicada y seudonimizada que Power BI consultará. **Aún no existen un servicio permanente o demonio que dispare la sincronización del nodo edge de clínica o el ETL por sí solo** (el portal de la gestante sí envía automáticamente la cola local de cada cuenta con sesión iniciada; ver «Captura simulada, operación sin conexión y envío automático»)**, HTTPS/TLS, el cifrado en reposo, los dashboards ni la configuración del workspace de Power BI.** El desarrollo activo continúa en el Capítulo IV, centrado en seguridad, interfaces, aislamiento de datos y analítica del MVP, y todo el trabajo se desarrolla y prueba en un entorno controlado/local, no en comunidades rurales reales.
@@ -1149,11 +1157,21 @@ cd backend
 cd ..
 .\backend\.venv\Scripts\python.exe scripts\etl_analitico.py ejecutar    # carga incremental y conciliación
 .\backend\.venv\Scripts\python.exe scripts\etl_analitico.py conciliar   # solo conciliación, sin escribir
+.\backend\.venv\Scripts\python.exe scripts\etl_analitico.py previsualizar  # qué cargaría, sin escribir
 ```
 
 `ejecutar` es una única transacción: o se confirma completa —dimensiones, bridge
 y hechos— o no queda nada. No hay scheduler ni demonio: una ejecución nocturna
 futura invocaría este mismo comando.
+
+`previsualizar` recorre la misma extracción y la misma transformación que
+`ejecutar`, con las mismas reglas SIM-1.0, en una transacción `REPEATABLE READ`
+de solo lectura y sin tomar el candado, y se detiene antes de cargar. Informa
+qué lecturas serían candidatas a hecho, con su contexto y su clasificación por
+métrica, y nunca un valor biométrico. Una candidata no es un hecho confirmado:
+la ejecución real todavía puede revertirse en la carga o en la conciliación.
+Usa los mismos códigos de salida; el 2 significa que la ejecución real
+rechazaría el origen.
 
 Ejemplo de la primera ejecución sobre el dataset simulado (salida resumida; no
 contiene ningún dato personal):
@@ -1894,6 +1912,19 @@ Ninguna vista crea filas: abrir, navegar, refrescar o iniciar sesión solo
 consulta. Las fechas se muestran en español
 y en hora de Panamá, sea cual sea el navegador; las fechas de calendario
 (`fecha_inicio`) no cambian de día por la zona horaria.
+
+### Guardar mi resumen
+
+En «Mi historial», **Guardar mi resumen** abre una vista previa del embarazo
+elegido allí y **Descargar PDF** descarga el documento con la estética de la
+interfaz: el resumen (últimos valores y hasta 10 lecturas) o el historial
+completo del período. El PDF se genera en el dispositivo con pdfmake, que el
+portal sirve desde `frontend/gestante/vendor/` (sin CDN ni servicios
+externos) y solo carga al descargar. Se arma con lo ya consultado y no se
+guarda nada en el navegador. Si mientras se prepara se cambia el contenido,
+se sale del resumen o se confirma el cierre de sesión, esa descarga no se
+entrega. Contenido, límites, pruebas y comprobaciones manuales pendientes en
+`docs/gestante_guardar_resumen.md`.
 
 ### Estado de conexión y sesión con el servidor
 
