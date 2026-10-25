@@ -76,10 +76,12 @@ def referencias(d):
 
 
 def _codigos(d, referencias, embarazo):
+    """(lectura, semaforo) de cada lectura del embarazo, en orden de captura."""
     resultado = []
     for o in d.observaciones_del_embarazo(embarazo):
-        _, _, estados = d.clasificar(o, embarazo, referencias)
-        resultado.append((o, estados.codigo_global))
+        for lectura in o.lecturas:
+            _, _, estados = d.clasificar(lectura, embarazo, referencias)
+            resultado.append((lectura, estados.codigo_global))
     return resultado
 
 
@@ -277,10 +279,55 @@ def test_no_hay_movimientos_antes_de_la_semana_20_y_empiezan_en_ella(d):
 
 def test_ausencia_de_movimiento_no_es_cero(d):
     for o in d.todas_las_observaciones():
-        if o.tipo is TipoSesion.MOVIMIENTOS_FETALES:
-            assert o.mov is not None and o.mov > 0 and o.hr is None and o.spo2 is None
+        for lectura in o.lecturas:
+            if o.tipo is TipoSesion.MOVIMIENTOS_FETALES:
+                assert lectura.mov is not None and lectura.mov > 0
+                assert lectura.hr is None and lectura.spo2 is None
+            else:
+                assert lectura.mov is None and lectura.hr is not None and lectura.spo2 is not None
+
+
+def test_cada_sesion_de_signos_tiene_cinco_lecturas_conjuntas_y_movimientos_una(d, referencias):
+    filas = d.filas(referencias, None)
+    por_sesion = defaultdict(list)
+    for lectura in filas["lectura_biometrica"]:
+        por_sesion[lectura["id_sesion"]].append(lectura)
+    sesiones = filas["sesion_monitoreo"]
+    assert {s["id_sesion"] for s in sesiones} == set(por_sesion)
+    for s in sesiones:
+        lecturas = sorted(por_sesion[s["id_sesion"]], key=lambda f: f["fecha_hora_captura"])
+        capturas = [f["fecha_hora_captura"] for f in lecturas]
+        assert capturas[0] == s["fecha_inicio"] and capturas[-1] == s["fecha_fin"]
+        if s["tipo_sesion"] == TipoSesion.SIGNOS_MATERNOS.value:
+            assert len(lecturas) == 5, s["id_sesion"]
+            # Conjuntas: FC y SpO2 en la misma fila, nunca cinco de cada una.
+            assert all(f["hr_valor"] is not None and f["spo2_valor"] is not None for f in lecturas)
+            assert all(f["mov_valor"] is None for f in lecturas)
+            assert [b - a for a, b in zip(capturas, capturas[1:])] == [timedelta(minutes=1)] * 4
+            # Valores sinteticos que varian, no cinco copias de una fila.
+            assert len({(f["hr_valor"], f["spo2_valor"]) for f in lecturas}) == 5
         else:
-            assert o.mov is None and o.hr is not None and o.spo2 is not None
+            assert len(lecturas) == 1 and lecturas[0]["mov_valor"] is not None, s["id_sesion"]
+            assert s["fecha_inicio"] == s["fecha_fin"]
+    ids = [f["id_lectura"] for f in filas["lectura_biometrica"]]
+    assert len(ids) == len(set(ids))
+
+
+def test_las_lecturas_de_una_sesion_comparten_el_semaforo_del_caso(d, referencias):
+    """La variacion dentro de la sesion no cambia la banda de SIM-1.0 de su valor base."""
+    for e in d.EMBARAZOS:
+        for o in d.observaciones_del_embarazo(e):
+            codigos = {d.clasificar(lectura, e, referencias)[2].codigo_global for lectura in o.lecturas}
+            assert len(codigos) == 1, (e.id_embarazo, o.id_sesion, codigos)
+
+
+def test_los_identificadores_de_lectura_siguen_la_captura_dentro_del_tramo(d):
+    for e in d.EMBARAZOS:
+        lecturas = [lectura for o in d.observaciones_del_embarazo(e) for lectura in o.lecturas]
+        base = d.BASE_MONITOREO + (e.id_embarazo - 10900) * d.TRAMO_POR_EMBARAZO
+        assert [lectura.id_lectura for lectura in lecturas] == list(range(base + 1, base + 1 + len(lecturas)))
+        assert [lectura.captura for lectura in lecturas] == sorted(lectura.captura for lectura in lecturas)
+        assert len(lecturas) < d.TRAMO_POR_EMBARAZO
 
 
 def test_al_menos_dos_registros_de_signos_por_mes_completo(d):
@@ -364,6 +411,20 @@ def test_warning_historicos_seguidos_de_ok(d, referencias, id_embarazo, desde, h
     warning = [o for o, c in pares if c == "WARNING"]
     assert warning and all(desde <= o.dia <= hasta for o in warning)
     assert all(c == "OK" for o, c in pares if o.dia > hasta)
+    assert pares[-1][1] == "OK"
+
+
+def test_ines_termina_en_ok_con_el_corte_de_la_base_inicial(d, referencias):
+    """La ultima lectura cargada de Ines es OK tras sus WARNING de agosto-septiembre."""
+    corte = datetime(2026, 10, 24, 16, 49, 54, tzinfo=PANAMA)
+    pares = [(lectura, c) for lectura, c in _codigos(d, referencias, _embarazo(d, 10905)) if lectura.captura <= corte]
+    assert pares[-1][1] == "OK" and any(c == "WARNING" for _, c in pares)
+
+
+def test_rosa_termina_en_warning_con_el_corte_de_la_base_inicial(d, referencias):
+    corte = datetime(2026, 10, 24, 16, 49, 54, tzinfo=PANAMA)
+    pares = [(lectura, c) for lectura, c in _codigos(d, referencias, _embarazo(d, 10904)) if lectura.captura <= corte]
+    assert pares[-1][1] == "WARNING" and pares[-1][0].dia >= date(2026, 10, 5)
 
 
 def test_hay_meses_con_cinco_embarazos_ok_para_la_vista_administrativa(d, referencias):
@@ -477,6 +538,21 @@ def test_ninguna_observacion_posterior_al_corte(d, referencias, cargador):
     assert filas["lectura_biometrica"]
     assert all(f["fecha_hora_captura"] <= corte for f in filas["lectura_biometrica"])
     assert all(f["fecha_inicio"] <= corte for f in filas["sesion_monitoreo"])
+
+
+def test_un_corte_a_mitad_de_sesion_no_la_parte(d, referencias, cargador):
+    """La sesion de Elena del lunes 2026-10-19 va de 09:30 a 09:34: a las 09:32 no entra."""
+    corte = cargador.interpretar_corte("2026-10-19T09:32", AHORA)
+    filas = d.filas(referencias, corte)
+    sesion = next(
+        o for o in d.observaciones_del_embarazo(_embarazo(d, 10902))
+        if o.dia == date(2026, 10, 19) and o.tipo is TipoSesion.SIGNOS_MATERNOS
+    )
+    assert sesion.captura <= corte < sesion.fin
+    assert sesion.id_sesion not in {s["id_sesion"] for s in filas["sesion_monitoreo"]}
+    cargadas = {s["id_sesion"] for s in filas["sesion_monitoreo"]}
+    assert all(f["id_sesion"] in cargadas for f in filas["lectura_biometrica"])
+    assert not {lectura.id_lectura for lectura in sesion.lecturas} & {f["id_lectura"] for f in filas["lectura_biometrica"]}
 
 
 def test_avanzar_el_corte_solo_agrega_filas(d, referencias, cargador):

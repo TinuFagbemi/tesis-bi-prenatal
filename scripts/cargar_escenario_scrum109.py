@@ -578,13 +578,18 @@ def ruta_del_manifiesto(ajustes) -> Path:
 
 def construir_manifiesto(resultado: ResultadoEscenario, base: str, ejecutado_en: datetime, anterior: dict | None) -> dict:
     """Sin secretos ni datos personales: version, corte, referencias y cantidades."""
+    # Por embarazo: sesiones y lecturas de cada tipo, y lecturas por semaforo.
     codigo_por_id = {v: k for k, v in resultado.referencias.semaforos.items()}
-    lecturas_por_sesion = {f["id_sesion"]: f for f in resultado.del_corte["lectura_biometrica"]}
+    sesiones = {f["id_sesion"]: f for f in resultado.del_corte["sesion_monitoreo"]}
     observaciones: dict[str, Counter] = {}
-    for sesion in resultado.del_corte["sesion_monitoreo"]:
+    for sesion in sesiones.values():
         conteo = observaciones.setdefault(str(sesion["id_embarazo"]), Counter())
-        conteo[sesion["tipo_sesion"]] += 1
-        conteo[codigo_por_id[lecturas_por_sesion[sesion["id_sesion"]]["id_semaforo"]]] += 1
+        conteo[f"sesiones_{sesion['tipo_sesion']}"] += 1
+    for lectura in resultado.del_corte["lectura_biometrica"]:
+        sesion = sesiones[lectura["id_sesion"]]
+        conteo = observaciones[str(sesion["id_embarazo"])]
+        conteo[f"lecturas_{sesion['tipo_sesion']}"] += 1
+        conteo[codigo_por_id[lectura["id_semaforo"]]] += 1
     entrada = {
         "corte": resultado.corte.isoformat(),
         "ejecutado_en": ejecutado_en.isoformat(timespec="seconds"),

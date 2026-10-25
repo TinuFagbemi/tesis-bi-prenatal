@@ -5,6 +5,7 @@ Uso desde la raiz del repositorio::
     python scripts/dispositivo_gestante.py capturar                          # movimientos fetales
     python scripts/dispositivo_gestante.py capturar --tipo SIGNOS_MATERNOS
     python scripts/dispositivo_gestante.py capturar --dispositivo DEMO-GESTANTE-02
+    python scripts/dispositivo_gestante.py capturar --tipo SIGNOS_MATERNOS --lecturas 5
 
 **Que representa.** En produccion, una captura la origina el dispositivo
 fisico. Este MVP no tiene hardware, asi que este comando representa ese evento:
@@ -42,6 +43,11 @@ embarazo siguen saliendo de su aprovisionamiento, cada cuenta tiene su propia
 cola y la API solo acepta la sesion si el embarazo pertenece al token con el
 que se sincroniza. El codigo se valida contra un patron cerrado, de modo que no
 puede señalar otra ruta.
+
+**Varias lecturas por sesion.** ``--lecturas N`` (solo signos maternos; por
+omision 1) guarda una sesion con N lecturas conjuntas de FC y SpO2, un minuto
+aparte, en un solo paquete y con una sola clave de idempotencia. Movimientos
+fetales sigue siendo un conteo consolidado, una lectura.
 
 Todos los datos son simulados y completamente ficticios.
 """
@@ -121,6 +127,13 @@ def construir_parser() -> argparse.ArgumentParser:
             "el de provision.json."
         ),
     )
+    capturar.add_argument(
+        "--lecturas",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Lecturas conjuntas de la sesion de signos maternos (por omision 1).",
+    )
     return parser
 
 
@@ -129,6 +142,7 @@ def capturar(
     tipo: TipoSesion,
     ahora: datetime,
     dispositivo: str | None = None,
+    lecturas: int = 1,
 ) -> int:
     try:
         ruta_provision = ruta_de_aprovisionamiento(settings, dispositivo)
@@ -148,6 +162,7 @@ def capturar(
             provision=aprovisionamiento,
             tipo_sesion=tipo,
             ahora=ahora,
+            lecturas=lecturas,
         )
     except (SimulacionNoAplicable, PaqueteInvalido) as fallo:
         print(f"Error: {fallo.detalle}", file=sys.stderr)
@@ -178,7 +193,8 @@ def main(
         argumentos = construir_parser().parse_args(argv)
         configuracion = settings or cargar_settings_gestante()
         return capturar(
-            configuracion, TipoSesion(argumentos.tipo), reloj(), argumentos.dispositivo
+            configuracion, TipoSesion(argumentos.tipo), reloj(), argumentos.dispositivo,
+            argumentos.lecturas,
         )
     except ConfiguracionGestanteInvalida as error:
         print(f"Error: {error}", file=sys.stderr)

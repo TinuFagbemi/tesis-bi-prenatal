@@ -152,10 +152,12 @@ def test_primera_carga_y_reejecucion_identica(cargador, conexion, revision, clav
 def test_avanzar_el_corte_inserta_solo_lo_pendiente(cargador, conexion, revision, clave):
     antes = _cargar_escenario(cargador, conexion, revision, clave, "2026-10-10")
     despues = _cargar_escenario(cargador, conexion, revision, clave, "2026-11-18")
-    pendientes = despues.esperadas["lectura_biometrica"] - antes.esperadas["lectura_biometrica"]
-    assert pendientes > 0
-    assert despues.insertadas["lectura_biometrica"] == pendientes
-    assert despues.insertadas["sesion_monitoreo"] == pendientes
+    for tabla in ("lectura_biometrica", "sesion_monitoreo"):
+        pendientes = despues.esperadas[tabla] - antes.esperadas[tabla]
+        assert pendientes > 0, tabla
+        assert despues.insertadas[tabla] == pendientes, tabla
+    # Cinco lecturas por sesion de signos, una por sesion de movimientos.
+    assert despues.esperadas["lectura_biometrica"] > despues.esperadas["sesion_monitoreo"]
     assert despues.insertadas["paciente"] == 0
 
 
@@ -167,6 +169,24 @@ def test_un_corte_anterior_se_rechaza_sin_borrar(cargador, conexion, revision, c
         _cargar_escenario(cargador, conexion, revision, clave, "2026-10-10")
     punto.rollback()
     assert _filas_del_escenario(conexion, d) == filas
+
+
+def test_en_la_base_cada_sesion_de_signos_tiene_cinco_lecturas_conjuntas(cargador, conexion, revision, clave):
+    _cargar_escenario(cargador, conexion, revision, clave, "2026-11-18")
+    por_tipo = conexion.execute(text(
+        "SELECT s.tipo_sesion::text, count(l.id_lectura) AS n,"
+        "       count(l.hr_valor) AS hr, count(l.spo2_valor) AS spo2, count(l.mov_valor) AS mov"
+        "  FROM operacional.sesion_monitoreo s"
+        "  LEFT JOIN operacional.lectura_biometrica l USING (id_sesion)"
+        " WHERE s.id_sesion BETWEEN 10900001 AND 10999999"
+        " GROUP BY s.id_sesion, s.tipo_sesion"
+    )).all()
+    assert por_tipo
+    for tipo, n, hr, spo2, mov in por_tipo:
+        if tipo == "SIGNOS_MATERNOS":
+            assert (n, hr, spo2, mov) == (5, 5, 5, 0)
+        else:
+            assert (n, hr, spo2, mov) == (1, 0, 0, 1)
 
 
 def test_no_hay_observaciones_futuras_respecto_al_corte(cargador, conexion, revision, clave):

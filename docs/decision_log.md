@@ -2618,3 +2618,28 @@ Guía de uso: [Escenario de demostración de SCRUM-109](escenario_scrum109.md).
   meses, asesorar < 18). Esas recomendaciones no son reglas del sistema; se
   documenta y se prueba la coherencia, sin mover fechas ni inventar un
   desenlace que el modelo no registra.
+- **Cinco lecturas conjuntas por sesión de signos maternos** (versión
+  SCRUM-109.5). El portal mostraba «23 sesiones (23 lecturas)» porque la
+  definición creaba una sola lectura por sesión (`id_lectura = id_sesion`, «misma
+  forma que el simulador»); la base y la API lo reproducían tal cual y el
+  portal, que ya agrupa por sesión un punto por lectura, solo lo mostraba. El
+  modelo admite N lecturas por sesión y una lectura conjunta lleva FC y SpO₂ en
+  la misma fila (`forma_valida`), así que no cambian esquema, API, ETL ni
+  frontend. La definición genera cinco lecturas un minuto aparte con el valor
+  base de la sesión y una variación fija que no cruza bandas de SIM-1.0 (el
+  semáforo lo sigue calculando `clasificar_lectura`); movimientos sigue con un
+  conteo por sesión. Las lecturas tienen identificadores propios por captura,
+  por lo que la base se reconstruyó (el cargador no sobrescribe). Un corte
+  carga una sesión entera o nada.
+- **Captura en vivo con `--lecturas`, sin cambiar el comportamiento por
+  omisión.** No había un parámetro existente para varias lecturas. Se añadió
+  el mínimo: `lecturas=1` por omisión en `construir_paquete_simulado` y
+  `registrar_sesion_simulada`, `--lecturas N` en `dispositivo_gestante.py` y
+  `"lecturas"` en los escenarios de `escenario_demo.py` (1–10, solo signos).
+  Con 1, el paquete es idéntico al anterior. La API no gana ninguna
+  restricción: sigue aceptando de 1 lectura en adelante. Un paquete de cinco
+  lecturas viaja con una sola clave de idempotencia; su reenvío no duplica.
+- **«Semana actual» es la semana en curso** (`días // 7 + 1`) en API, ETL,
+  adaptador, portal, PDF y publicación; no se encontraron diferencias y no se
+  cambió ninguna etiqueta. `fecha_inicio` se documenta como referencia del
+  cómputo gestacional, sin presentarla como una menstruación registrada.

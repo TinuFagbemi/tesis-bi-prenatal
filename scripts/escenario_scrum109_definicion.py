@@ -34,9 +34,13 @@ fijos para toda la historia, tambien para las que aun no se cargaron porque
 son posteriores al corte: avanzar el corte nunca renumera nada.
 
 **El corte.** Las fechas de los embarazos y de cada observacion son fijas. El
-corte solo decide **hasta donde** se carga: una observacion entra si su
-``fecha_hora_captura`` es anterior o igual al corte. Nunca se desplaza la
-historia ni se cambia la fecha del sistema.
+corte solo decide **hasta donde** se carga: una sesion entra, con todas sus
+lecturas, si la ``fecha_hora_captura`` de la ultima es anterior o igual al
+corte. Nunca se desplaza la historia ni se cambia la fecha del sistema.
+
+**Granularidad.** Una sesion de signos maternos tiene cinco lecturas
+conjuntas (FC y SpO2 en cada fila); una de movimientos fetales, un conteo
+consolidado.
 """
 
 from __future__ import annotations
@@ -67,7 +71,7 @@ from app.models.enums import (
 )
 from app.services.ingesta import semana_gestacional
 
-VERSION = "SCRUM-109.4"
+VERSION = "SCRUM-109.5"
 NOMBRE = "Escenario de demostracion SCRUM-109"
 
 # Las fechas clinicas del proyecto son de Panama; el ETL ubica cada lectura en
@@ -141,10 +145,24 @@ BASE_MONITOREO = 10_900_000
 TRAMO_POR_EMBARAZO = 10_000
 
 # Valores biometricos de rutina, en ciclo. Son datos de prueba fijos; su
-# clasificacion la decide ``clasificar_lectura``, no este modulo.
+# clasificacion la decide ``clasificar_lectura``, no este modulo. En signos
+# maternos son el valor base de cada sesion (la primera de sus lecturas).
 HR_DE_RUTINA = (78, 82, 85, 80, 88, 84, 79, 86)
 SPO2_DE_RUTINA = (98, 97, 99, 97, 98, 96, 98, 97)
 MOV_DE_RUTINA = (12, 14, 11, 15, 13, 16, 12, 14)
+
+# Una sesion de signos maternos son cinco lecturas conjuntas (FC y SpO2 en la
+# misma fila), tomadas un minuto aparte. Movimientos fetales: un conteo
+# consolidado por sesion, una sola lectura.
+LECTURAS_POR_SESION_DE_SIGNOS = 5
+INTERVALO_ENTRE_LECTURAS = timedelta(minutes=1)
+# Variacion de cada lectura respecto del valor base de su sesion, en ciclo y
+# rotada por sesion. Son pequeñas a proposito: ninguna saca a una lectura de la
+# banda de SIM-1.0 de su valor base, de modo que cada caso conserva su
+# semaforo (lo comprueban las pruebas con ``clasificar_lectura``). La SpO2 solo
+# baja: subir un punto llevaria un 94 de precaucion al 95 normal.
+DESVIO_HR = (0, 2, -1, 3, 1)
+DESVIO_SPO2 = (0, -1, 0, 0, -1)
 
 
 class ErrorDeDefinicion(RuntimeError):
@@ -356,20 +374,41 @@ EMBARAZOS: tuple[Embarazo, ...] = (
 
 
 @dataclass(frozen=True)
-class Observacion:
-    """Una sesion simulada con su unica lectura (misma forma que el simulador)."""
+class Lectura:
+    """Una lectura consolidada: FC y SpO2 juntas, o un conteo de movimientos."""
 
-    id_sesion: int
-    id_embarazo: int
-    tipo: TipoSesion
+    id_lectura: int
     captura: datetime
     hr: Decimal | None
     spo2: Decimal | None
     mov: int | None
 
     @property
-    def id_lectura(self) -> int:
-        return self.id_sesion
+    def dia(self) -> date:
+        return self.captura.astimezone(ZONA).date()
+
+
+@dataclass(frozen=True)
+class Observacion:
+    """Una sesion simulada con sus lecturas.
+
+    Signos maternos: :data:`LECTURAS_POR_SESION_DE_SIGNOS` lecturas conjuntas
+    seguidas; movimientos: una. ``captura`` es el inicio de la sesion (su
+    primera lectura) y ``fin`` el de la ultima.
+    """
+
+    id_sesion: int
+    id_embarazo: int
+    tipo: TipoSesion
+    lecturas: tuple[Lectura, ...]
+
+    @property
+    def captura(self) -> datetime:
+        return self.lecturas[0].captura
+
+    @property
+    def fin(self) -> datetime:
+        return self.lecturas[-1].captura
 
     @property
     def dia(self) -> date:
@@ -400,25 +439,49 @@ def _valor(alteraciones, tipo, dia, campo, rutina, indice):
 def observaciones_del_embarazo(embarazo: Embarazo) -> list[Observacion]:
     """Signos semanales desde la semana 4 y movimientos semanales desde la 20.
 
-    Antes de la semana 20 no hay **ninguna** sesion de movimiento: la ausencia
-    es la forma de decir «no registrado», nunca un cero.
+    Cada sesion de signos tiene cinco lecturas conjuntas, un minuto aparte,
+    con el valor base de la sesion (rutina o alteracion) y una variacion fija
+    (:data:`DESVIO_HR`, :data:`DESVIO_SPO2`). Cada sesion de movimientos, un
+    solo conteo. Antes de la semana 20 no hay **ninguna** sesion de
+    movimiento: la ausencia es la forma de decir «no registrado», nunca un cero.
+
+    Identificadores: las sesiones se numeran por su inicio y las lecturas por
+    su captura, ambas desde ``BASE_MONITOREO + (id_embarazo - 10900) *
+    TRAMO_POR_EMBARAZO + 1``, cada una en su tabla.
     """
     desplazamiento = embarazo.id_embarazo - 10900
     crudas = []
     for indice, dia in enumerate(_dias(embarazo, SEMANA_INICIO_SIGNOS)):
-        hr = _valor(embarazo.alteraciones, S, dia, "hr", HR_DE_RUTINA, indice + desplazamiento)
-        spo2 = _valor(embarazo.alteraciones, S, dia, "spo2", SPO2_DE_RUTINA, indice + desplazamiento)
-        crudas.append((_en_panama(dia, HORA_SIGNOS), S, Decimal(hr), Decimal(spo2), None))
+        rotacion = indice + desplazamiento
+        hr = _valor(embarazo.alteraciones, S, dia, "hr", HR_DE_RUTINA, rotacion)
+        spo2 = _valor(embarazo.alteraciones, S, dia, "spo2", SPO2_DE_RUTINA, rotacion)
+        inicio = _en_panama(dia, HORA_SIGNOS)
+        valores = [
+            (
+                inicio + k * INTERVALO_ENTRE_LECTURAS,
+                Decimal(hr + DESVIO_HR[(k + rotacion) % len(DESVIO_HR)]),
+                Decimal(spo2 + DESVIO_SPO2[(k + rotacion) % len(DESVIO_SPO2)]),
+                None,
+            )
+            for k in range(LECTURAS_POR_SESION_DE_SIGNOS)
+        ]
+        crudas.append((inicio, S, valores))
     dias_mov = _dias(embarazo, SEMANA_MINIMA_DE_MOVIMIENTO, DESFASE_MOVIMIENTOS_DIAS)
     for indice, dia in enumerate(dias_mov):
         mov = _valor(embarazo.alteraciones, M, dia, "mov", MOV_DE_RUTINA, indice + desplazamiento)
-        crudas.append((_en_panama(dia, HORA_MOVIMIENTOS), M, None, None, mov))
+        inicio = _en_panama(dia, HORA_MOVIMIENTOS)
+        crudas.append((inicio, M, [(inicio, None, None, mov)]))
     crudas.sort(key=lambda c: c[0])
     base = BASE_MONITOREO + desplazamiento * TRAMO_POR_EMBARAZO
-    return [
-        Observacion(base + numero, embarazo.id_embarazo, tipo, captura, hr, spo2, mov)
-        for numero, (captura, tipo, hr, spo2, mov) in enumerate(crudas, start=1)
-    ]
+    observaciones = []
+    siguiente_lectura = base + 1
+    for numero, (_, tipo, valores) in enumerate(crudas, start=1):
+        lecturas = []
+        for captura, hr, spo2, mov in valores:
+            lecturas.append(Lectura(siguiente_lectura, captura, hr, spo2, mov))
+            siguiente_lectura += 1
+        observaciones.append(Observacion(base + numero, embarazo.id_embarazo, tipo, tuple(lecturas)))
+    return observaciones
 
 
 def todas_las_observaciones() -> list[Observacion]:
@@ -476,18 +539,18 @@ def paciente(id_paciente: int) -> Paciente:
     return next(p for p in PACIENTES if p.id_paciente == id_paciente)
 
 
-def clasificar(observacion: Observacion, embarazo: Embarazo, referencias: Referencias):
-    """Semana, fila del catalogo y estados, con las funciones del dominio."""
-    semana = semana_gestacional(embarazo.fecha_inicio, observacion.captura.astimezone(ZONA))
+def clasificar(lectura: Lectura, embarazo: Embarazo, referencias: Referencias):
+    """Semana, fila del catalogo y estados de una lectura, con las funciones del dominio."""
+    semana = semana_gestacional(embarazo.fecha_inicio, lectura.captura.astimezone(ZONA))
     if semana not in referencias.semanas:
         raise ErrorDeDefinicion(
-            f"sesion {observacion.id_sesion}: la semana {semana} no esta en el catalogo."
+            f"lectura {lectura.id_lectura}: la semana {semana} no esta en el catalogo."
         )
     id_tiempo_gest, trimestre = referencias.semanas[semana]
     estados = clasificar_lectura(
-        hr_valor=observacion.hr,
-        spo2_valor=observacion.spo2,
-        mov_valor=observacion.mov,
+        hr_valor=lectura.hr,
+        spo2_valor=lectura.spo2,
+        mov_valor=lectura.mov,
         semana=semana,
         trimestre=trimestre,
     )
@@ -499,7 +562,8 @@ def filas(referencias: Referencias, corte: datetime | None) -> dict[str, list[di
 
     ``corte=None`` devuelve la historia completa (la usa el cargador para
     reconocer las filas del bloque reservado); con un corte, solo las
-    observaciones capturadas hasta el.
+    sesiones cuya ultima lectura se capturo hasta el: una sesion entra entera
+    o no entra.
     """
     validar_definicion()
     tablas: dict[str, list[dict]] = {nombre: [] for nombre in (
@@ -581,23 +645,24 @@ def filas(referencias: Referencias, corte: datetime | None) -> dict[str, list[di
             "fecha_fin": e.fecha_cierre, "activo": not e.cerrado,
         })
         for o in observaciones_del_embarazo(e):
-            if corte is not None and o.captura > corte:
+            if corte is not None and o.fin > corte:
                 continue
-            _, id_tiempo_gest, estados = clasificar(o, e, referencias)
             tablas["sesion_monitoreo"].append({
                 "id_sesion": o.id_sesion, "id_embarazo": e.id_embarazo, "id_dispositivo": e.id_embarazo,
-                "tipo_sesion": o.tipo.value, "fecha_inicio": o.captura, "fecha_fin": o.captura,
+                "tipo_sesion": o.tipo.value, "fecha_inicio": o.captura, "fecha_fin": o.fin,
                 "estado_sesion": EstadoSesion.COMPLETADA.value, "origen_dato": OrigenDato.DISPOSITIVO.value,
             })
-            tablas["lectura_biometrica"].append({
-                "id_lectura": o.id_lectura, "id_sesion": o.id_sesion, "id_tiempo_gest": id_tiempo_gest,
-                "id_semaforo": referencias.semaforos[estados.codigo_global],
-                "fecha_hora_captura": o.captura,
-                # Precarga: no hubo sincronizacion que registrar. Es lo mismo que
-                # deja la ruta en vivo (el paquete viaja con este campo en NULL).
-                "fecha_hora_sincronizacion": None,
-                "hr_valor": o.hr, "spo2_valor": o.spo2, "mov_valor": o.mov,
-            })
+            for lectura in o.lecturas:
+                _, id_tiempo_gest, estados = clasificar(lectura, e, referencias)
+                tablas["lectura_biometrica"].append({
+                    "id_lectura": lectura.id_lectura, "id_sesion": o.id_sesion, "id_tiempo_gest": id_tiempo_gest,
+                    "id_semaforo": referencias.semaforos[estados.codigo_global],
+                    "fecha_hora_captura": lectura.captura,
+                    # Precarga: no hubo sincronizacion que registrar. Es lo mismo que
+                    # deja la ruta en vivo (el paquete viaja con este campo en NULL).
+                    "fecha_hora_sincronizacion": None,
+                    "hr_valor": lectura.hr, "spo2_valor": lectura.spo2, "mov_valor": lectura.mov,
+                })
     return tablas
 
 
@@ -691,7 +756,18 @@ def validar_definicion() -> None:
             semana = semana_gestacional(e.fecha_inicio, o.captura.astimezone(ZONA))
             if o.tipo is M and semana < SEMANA_MINIMA_DE_MOVIMIENTO:
                 raise ErrorDeDefinicion(f"sesion {o.id_sesion}: movimiento antes de la semana 20.")
-            if o.tipo is M and (o.mov is None or o.hr is not None or o.spo2 is not None):
-                raise ErrorDeDefinicion(f"sesion {o.id_sesion}: forma de movimiento invalida.")
-            if o.tipo is S and (o.mov is not None or o.hr is None or o.spo2 is None):
-                raise ErrorDeDefinicion(f"sesion {o.id_sesion}: forma de signos invalida.")
+            esperadas = LECTURAS_POR_SESION_DE_SIGNOS if o.tipo is S else 1
+            if len(o.lecturas) != esperadas:
+                raise ErrorDeDefinicion(f"sesion {o.id_sesion}: se esperaban {esperadas} lectura(s).")
+            capturas = [lectura.captura for lectura in o.lecturas]
+            if capturas != sorted(set(capturas)) or o.fin.astimezone(ZONA).date() != o.dia:
+                raise ErrorDeDefinicion(f"sesion {o.id_sesion}: capturas repetidas, desordenadas o en otro dia.")
+            for lectura in o.lecturas:
+                if not BLOQUE_MONITOREO[0] <= lectura.id_lectura <= BLOQUE_MONITOREO[1]:
+                    raise ErrorDeDefinicion(f"lectura {lectura.id_lectura} fuera de su bloque.")
+                if o.tipo is M and (lectura.mov is None or lectura.hr is not None or lectura.spo2 is not None):
+                    raise ErrorDeDefinicion(f"sesion {o.id_sesion}: forma de movimiento invalida.")
+                if o.tipo is S and (lectura.mov is not None or lectura.hr is None or lectura.spo2 is None):
+                    raise ErrorDeDefinicion(f"sesion {o.id_sesion}: forma de signos invalida.")
+            if o.tipo is S and len({(lectura.hr, lectura.spo2) for lectura in o.lecturas}) < 2:
+                raise ErrorDeDefinicion(f"sesion {o.id_sesion}: cinco copias de la misma lectura.")

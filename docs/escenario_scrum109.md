@@ -13,8 +13,8 @@ capturas en vivo las produce el simulador existente.
 | | Qué es | Dónde vive | Cifras |
 |---|---|---|---|
 | **Dataset canónico** | La muestra aprobada de la tesis. | `data/generated/` → `load_mock_data.py` | 30 pacientes, 732 sesiones, 1.180 lecturas. **No cambia.** |
-| **Precarga del escenario** | La historia del grupo de pacientes del escenario hasta el corte. | `scripts/escenario_scrum109_definicion.py` → `scripts/cargar_escenario_scrum109.py` | Propias (281 programadas hasta el 2026-11-30; 226 sesiones/lecturas con el corte 2026-10-23T21:12:57-05:00); se informan en el manifiesto. |
-| **Medición en vivo** | Lo que se captura durante la demostración. | `dispositivo_gestante.py`, portal, `escenario_demo.py` → API | Las que se hagan; id ≥ 11.000.000. |
+| **Precarga del escenario** | La historia del grupo de pacientes del escenario hasta el corte. | `scripts/escenario_scrum109_definicion.py` → `scripts/cargar_escenario_scrum109.py` | Propias: 281 sesiones y 1.045 lecturas programadas hasta el 2026-11-30; 226 sesiones y 870 lecturas con el corte de la base inicial (2026-10-24T16:49:54-05:00). Se informan en el manifiesto. |
+| **Medición en vivo** | Lo que se captura durante la demostración. | `dispositivo_gestante.py`, portal, `escenario_demo.py` → API | Las que se hagan; id ≥ 11.000.000. Signos: 5 lecturas conjuntas por sesión (`--lecturas 5`); movimientos: 1. |
 
 La precarga **no inventa trazabilidad de ingesta**: sus lecturas tienen
 `fecha_hora_sincronizacion` en NULL —igual que las que llegan por la API, porque
@@ -76,13 +76,15 @@ dataset (`PASSWORD_SIMULADA` del generador; no se repite aquí).
 **Los dos embarazos de Elena: fechas e intervalo.**
 
 - *Qué es `embarazo.fecha_inicio`.* El modelo no lo declara con un nombre
-  clínico, pero el sistema lo usa como el **día 0 del cómputo gestacional**
-  (equivalente a la fecha de la última menstruación), no como la fecha de
-  concepción: la FPP es `fecha_inicio + 280 días` (generador y escenario) y la
-  semana gestacional es `días transcurridos // 7 + 1`
-  (`app.services.ingesta.semana_gestacional`, la misma aritmética del
-  generador). La concepción no se registra; por convención clínica se estima
-  unas 2 semanas después de ese día 0.
+  clínico; el sistema lo usa como la **fecha de referencia del cómputo
+  gestacional** (su día 0), no como la fecha de concepción: la FPP es
+  `fecha_inicio + 280 días` (generador y escenario) y la semana gestacional es
+  `días transcurridos // 7 + 1` (`app.services.ingesta.semana_gestacional`, la
+  misma aritmética del generador). Esa convención es la de contar desde la
+  última menstruación, pero **en estos datos sintéticos no hay ninguna
+  menstruación registrada**: la fecha es un dato de referencia elegido para
+  la historia. La concepción tampoco se registra; por convención clínica se
+  estimaría unas 2 semanas después de ese día 0.
 - *Fechas (definitivas, sin cambios).* Anterior 10901: 2025-01-13 → cierre
   2025-10-13 (273 días; semana 40 por la aritmética del sistema, 39+0
   cumplidas; FPP 2025-10-20), FINALIZADO, G1 P0, seguimiento cerrado ese día.
@@ -115,7 +117,30 @@ la de origen (la cédula).
 4, a las 09:30 de Panamá; movimientos fetales una vez por semana desde la
 semana 20, a las 16:00. Antes de la semana 20 **no existe** ninguna sesión de
 movimiento: la ausencia significa «no registrado» y nunca se escribe un cero.
-Una lectura por sesión, como el simulador.
+**Cada sesión de signos maternos tiene cinco lecturas conjuntas** —FC y SpO₂
+en la misma fila—, de 09:30 a 09:34, un minuto aparte; cada sesión de
+movimientos, un solo conteo consolidado. Los valores son sintéticos y
+reproducibles: el valor base de la sesión (rutina o alteración del caso) más
+una variación fija y rotada (`DESVIO_HR`, `DESVIO_SPO2`) que nunca saca a una
+lectura de la banda de SIM-1.0 de su valor base, así que todas las lecturas de
+una sesión comparten semáforo y cada caso conserva su historia (Rosa, WARNING
+desde el 5 de octubre; Inés, WARNING del 17 de agosto al 6 de septiembre y
+después OK). Las sesiones y las lecturas tienen identificadores propios,
+numerados por inicio y por captura dentro del tramo de cada embarazo. Con un
+corte, una sesión entra entera (si su última lectura es anterior o igual al
+corte) o no entra.
+
+**«Semana actual»: semana en curso.** Todo el sistema usa
+`días desde fecha_inicio // 7 + 1`: la semana 1 son los días 0 a 6. «Semana
+actual 26» el 2026-10-24 para Elena (180 días) significa que va por la semana
+26, con 25 semanas y 5 días cumplidos. La misma aritmética está en la
+validación de la API (`semana_gestacional`), en la conciliación del ETL
+(`(día clínico − fecha_inicio) / 7 + 1`), en el adaptador del portal
+(`semana_actual`), en la vista de inicio y en el PDF (ambos con el mismo
+modelo, `datosDelEmbarazo`), y en los datos publicados (`semana_gestacion` del
+catálogo por `id_tiempo_gest`, comprobado por la API al ingerir). No se
+encontraron diferencias entre esas superficies; la etiqueta no dice «semanas
+cumplidas» y no se cambió.
 
 **Semáforos.** Los decide `app.etl.reglas.clasificar_lectura` (SIM-1.0), la
 misma regla que el ETL usa para conciliar; el escenario solo elige valores. No
@@ -224,13 +249,14 @@ python scripts/cargar_escenario_scrum109.py verificar
 falta regenerarlo. Si se regenera, solo cambia `password_hash` (sal aleatoria
 de Argon2id) y la clave simulada sigue verificando.
 
-**Base inicial de referencia (SCRUM-109.4).** Reconstruida así el 2026-10-24
-(con un primer `cargar --corte 2026-10-10` para comparar con la versión
-anterior al mismo corte), con corte efectivo **2026-10-24T16:49:54-05:00
-(America/Panama)**: 1.180 lecturas canónicas + 226 del escenario, ETL
-`SUCCESS`, sin capturas en vivo ni filas de auditoría. Respaldo:
-`C:\FetalAlert_respaldos\SCRUM-109_base_inicial_medico_demo_20261024` (el
-estado previo, 109.3, está en `SCRUM-109_antes_medico_demo_20261024`).
+**Base inicial de referencia (SCRUM-109.5).** Reconstruida así el 2026-10-24,
+con el **mismo corte** que la 109.4 para poder compararlas
+(`cargar --corte 2026-10-24T16:49:54.157715-05:00`, America/Panama): 732
+sesiones y 1.180 lecturas canónicas + 226 sesiones y 870 lecturas del
+escenario, ETL `SUCCESS` con 2.050 hechos y conciliación 27/27, sin capturas
+en vivo ni filas de auditoría. Respaldo:
+`C:\FetalAlert_respaldos\SCRUM-109_base_inicial_cinco_lecturas_20261024` (el
+estado previo, 109.4, está en `SCRUM-109_antes_cinco_lecturas_20261024`).
 
 ### Conflictos que detiene, sin sobrescribir
 
@@ -297,6 +323,29 @@ Nota: `data/gestante__previa_<marca>/` no está en `.gitignore` y contiene
 SQLite; `test_edge_cli.py::test_ninguna_base_sqlite_esta_versionada` falla
 mientras exista dentro del repositorio. Muévelo fuera o bórralo tras revisarlo.
 
+## Captura en vivo durante el ensayo
+
+Con la protagonista con sesión iniciada en el portal (el envío automático la
+necesita):
+
+```powershell
+python scripts/demo_control.py                                    # 3: simular desconexión
+python scripts/dispositivo_gestante.py capturar --tipo SIGNOS_MATERNOS --lecturas 5
+python scripts/dispositivo_gestante.py capturar                   # movimientos: un conteo
+python scripts/demo_control.py                                    # 4: reconexión; 6: ETL
+```
+
+Cada captura es **un** paquete en la cola, con **una** clave de idempotencia:
+la de signos lleva cinco lecturas conjuntas, un minuto aparte, que terminan en
+el instante de la captura; la de movimientos, un conteo. Reenviar el mismo
+paquete con su clave devuelve la misma sesión (`Idempotency-Replayed: true`)
+sin crear lecturas; con otro contenido, 409. `--lecturas` es opcional y vale 1
+por omisión, de modo que el comportamiento de siempre del dispositivo
+simulado, del portal y de los demás escenarios no cambia; la API sigue
+admitiendo cualquier cantidad de lecturas por sesión. En
+`escenarios_demo/S109.json`, `"lecturas": 5` hace lo mismo con
+`escenario_demo.py`.
+
 ## Publicación médica y administrativa
 
 - **Paciente** (portal y `/api/v1/clinico`): la protagonista ve sus dos
@@ -329,18 +378,35 @@ mientras exista dentro del repositorio. Muévelo fuera o bórralo tras revisarlo
 
 | Superficie (corte 2026-10-24T16:49:54-05:00 de la base inicial, sin capturas) | Valor esperado |
 |---|---|
-| `itzel.barria@example.com` (UPN) | 5 pacientes, 5 embarazos, 170 lecturas, todas del escenario (no entran las 56 del embarazo finalizado) |
+| `itzel.barria@example.com` (UPN) | 5 pacientes, 5 embarazos, 670 lecturas, todas del escenario (no entran las 200 del embarazo finalizado) |
 | `medico05` (UPN) | 8 pacientes, 8 embarazos, 334 lecturas; ninguna del escenario |
 | `medico01` / `02` / `03` / `04` | 3 / 3 / 3 / 3 pacientes y embarazos; 127 / 115 / 116 / 113 lecturas; ninguna del escenario |
-| `v_lectura` (sin RLS) | 1.406 lecturas (1.180 canónicas + 226 del escenario), 36 embarazos |
-| `v_resumen_administrativo` | 34 celdas publicadas, 1.021 lecturas: Chiriquí 10/286, Darién 14/453, Veraguas 10/282 |
+| `v_lectura` (sin RLS) | 2.050 lecturas (1.180 canónicas + 870 del escenario), 36 embarazos |
+| `v_resumen_administrativo` | 34 celdas publicadas, 1.441 lecturas: Chiriquí 10/286, Darién 14/873, Veraguas 10/282 |
 
-Respecto de SCRUM-109.3 (mismo corte de observaciones) solo cambia quién ve
-las pacientes del escenario: `medico05` pasa de 13/13/504 a 8/8/334 y la
-médica de la demo recibe las 5/5/170. `v_lectura` y las celdas
-administrativas no cambian: el administrador sigue viendo el conjunto
-ampliado —canónico más demo— sin identidades y con el mínimo de 5 embarazos
-por celda. Este entorno ampliado **no es** la muestra de la tesis (30
+Por embarazo del escenario, con ese corte (sesiones / lecturas):
+
+| Embarazo | Paciente | Signos maternos | Movimientos | WARNING | Última lectura |
+|---|---|---|---|---|---|
+| 10901 (finalizado) | Elena | 36 / 180 | 20 / 20 | 10 | OK, 2025-10-08 |
+| 10902 | Elena | 23 / 115 | 7 / 7 | 10 | OK, 2026-10-21 |
+| 10903 | Marta | 31 / 155 | 15 / 15 | 0 | OK, 2026-10-21 |
+| 10904 | Rosa | 25 / 125 | 9 / 9 | 18 | **WARNING**, 2026-10-21 |
+| 10905 | Inés | 28 / 140 | 12 / 12 | 18 | OK, 2026-10-21 |
+| 10906 | Clara | 18 / 90 | 2 / 2 | 0 | OK, 2026-10-21 |
+
+Una captura de ensayo de signos (`--lecturas 5`) suma 5 lecturas y una de
+movimientos 1; tras el ETL, a Itzel y a `v_lectura`. Las celdas
+administrativas de octubre siguen suprimidas (menos de 5 embarazos).
+
+Estas cifras **sustituyen** a las de SCRUM-109.4 (Itzel 170 lecturas,
+`v_lectura` 1.406, administración 1.021 lecturas y Darién 453), que contaban
+una lectura por sesión de signos. Con el mismo corte, las sesiones son las
+mismas (226) y solo cambian las lecturas de signos (×5). Pacientes,
+embarazos y permisos no cambian: `medico05` 8/8/334, la médica de la demo
+5/5, y las mismas 34 celdas administrativas publicadas —ninguna celda nueva,
+ninguna con menos de 5 embarazos—: el administrador sigue viendo el conjunto
+ampliado —canónico más demo— sin identidades. Este entorno ampliado **no es** la muestra de la tesis (30
 gestantes, 732 sesiones y 1.180 lecturas), que sigue intacta en sus filas.
 
 ## Power BI: comprobaciones pendientes (manuales)
@@ -365,7 +431,8 @@ Lo comprobado por SQL y HTTP (cifras de la tabla anterior, permisos por rol)
 3. **Relaciones** entre `v_embarazo`, `v_lectura`, `v_entitlement_medico`,
    `v_embarazo_medico`, `v_entitlement_paciente_medico` y `v_paciente_medico`.
 4. **RLS** con «Ver como» `itzel.barria@example.com`: 5 pacientes, 5
-   embarazos y 170 lecturas, nombres y cédulas solo de esas cinco; con
+   embarazos y 670 lecturas (5 por sesión de signos), nombres y cédulas solo
+   de esas cinco; con
    `medico05@example.com`: 8/8/334 y ninguna paciente del escenario; los
    permisos de embarazos y de pacientes (incluidos nombres y cédulas) deben
    salir de las vistas de entitlement, no de un filtro de página.
@@ -435,6 +502,14 @@ abiertos, el PR de SCRUM-109 mostrará también sus commits; debe fusionarse
   la carga), seguimientos y afiliaciones ajenas sobre la médica de la demo, y
   control negativo: la base rechaza dos seguimientos PRINCIPAL superpuestos.
   Tiene su propio paso en CI.
+- Granularidad (SCRUM-109.5): cinco lecturas conjuntas por sesión de signos y
+  una por sesión de movimientos (definición y base), semáforo común dentro de
+  cada sesión, identificadores por captura, corte que nunca parte una sesión,
+  última lectura de Rosa WARNING y de Inés OK. Captura en vivo:
+  `test_gestante_movimientos.py` (paquete de 5 lecturas, una por omisión,
+  movimientos con un solo conteo), `test_gestante_dispositivo.py`
+  (`--lecturas 5`: una captura, una clave) y `test_escenario_demo.py`
+  (`"lecturas"` en los escenarios).
 - `scripts/reproducir_ci_local.py`: reproduce en local los pasos del job de
   CI contra un PostgreSQL desechable; se detiene en el primer fallo y borra los
   reportes JUnit previos para que el guardián solo lea los de la ejecución en

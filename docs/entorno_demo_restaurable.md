@@ -15,7 +15,10 @@ Todos los datos son simulados y completamente ficticios.
 | `scripts/entorno_demo.py respaldar \| verificar \| restaurar --carpeta X` | Respaldo de la base y de `data/gestante`, comparación con el respaldo y restauración. |
 
 Un escenario es un JSON con las gestantes por su dispositivo y cuántas sesiones
-captura cada una (una lectura por sesión):
+captura cada una. Cada sesión lleva una lectura; con `"lecturas": N` (opcional,
+1–10; SCRUM-109), las sesiones de signos maternos llevan N lecturas conjuntas de
+FC y SpO₂ y las de movimientos siguen con un solo conteo (lo mismo que
+`dispositivo_gestante.py capturar --tipo SIGNOS_MATERNOS --lecturas N`):
 
 ```json
 {"nombre": "C-varias-gestantes", "concurrente": true,

@@ -24,6 +24,7 @@ import json
 import sqlite3
 import threading
 from contextlib import closing
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -141,6 +142,33 @@ def test_capturar_deja_una_sola_captura_pendiente_en_la_cola_de_la_cuenta(
     # Nada del paquete sale por pantalla.
     salida = capsys.readouterr().out
     assert "PENDIENTE" in salida and "mov_valor" not in salida
+
+
+def test_cinco_lecturas_de_signos_son_una_sola_captura_con_una_clave(tmp_path, dispositivo, monkeypatch):
+    settings = _settings(tmp_path)
+    _sin_red(monkeypatch)
+
+    assert _capturar(dispositivo, settings, "--tipo", "SIGNOS_MATERNOS", "--lecturas", "5") == (
+        dispositivo.CODIGO_DE_EXITO
+    )
+
+    [fila] = _outbox(settings)
+    assert fila["estado"] == "PENDIENTE" and fila["clave_idempotencia"]
+    paquete = json.loads(fila["payload_json"])
+    assert paquete["tipo_sesion"] == "SIGNOS_MATERNOS"
+    assert len(paquete["lecturas"]) == 5
+    assert all(l["hr_valor"] and l["spo2_valor"] and l["mov_valor"] is None for l in paquete["lecturas"])
+    # La cola guarda las fechas en forma canonica (UTC con «Z»): se comparan instantes.
+    instante = lambda texto: datetime.fromisoformat(texto.replace("Z", "+00:00"))  # noqa: E731
+    assert instante(paquete["fecha_fin"]) == instante(paquete["lecturas"][-1]["fecha_hora_captura"]) == AHORA
+
+
+def test_movimientos_con_varias_lecturas_no_se_captura(tmp_path, dispositivo, capsys):
+    settings = _settings(tmp_path)
+
+    assert _capturar(dispositivo, settings, "--lecturas", "5") == dispositivo.CODIGO_DE_ERROR
+    assert "conteo consolidado" in capsys.readouterr().err
+    assert not movimientos.ruta_para_la_cuenta(settings, ID_USUARIO_DE_PRUEBA).exists()
 
 
 def test_capturar_no_necesita_sesion_ni_token(tmp_path, dispositivo):
