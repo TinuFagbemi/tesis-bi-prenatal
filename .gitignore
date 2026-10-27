@@ -220,6 +220,12 @@ data/edge/
 # contenido del proyecto -- y ademas guarda identificadores de sesion.
 data/gestante/
 
+# Carpetas que aparta scripts/entorno_demo.py al restaurar: los archivos locales
+# anteriores (__previa_) y una copia descartada (__fallida_). Tienen el mismo
+# contenido que data/gestante/, que nunca se versiona.
+data/gestante__previa_*/
+data/gestante__fallida_*/
+
 # Reportes JUnit que generan localmente las suites de pytest (--junitxml).
 # Son artefactos de una ejecucion, nunca contenido versionado.
 pytest-*.xml

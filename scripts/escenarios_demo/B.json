@@ -1,0 +1,13 @@
+{
+  "nombre": "B-varias-mediciones",
+  "gestantes": [
+    {
+      "dispositivo": "DEMO-GESTANTE-02",
+      "sesiones": 4,
+      "tipo": [
+        "SIGNOS_MATERNOS",
+        "MOVIMIENTOS_FETALES"
+      ]
+    }
+  ]
+}
