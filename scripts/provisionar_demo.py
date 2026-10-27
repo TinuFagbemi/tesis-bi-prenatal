@@ -15,10 +15,10 @@ coinciden.
 
 La solucion es aprovisionar un episodio de demostracion anclado al reloj real,
 **sin alterar el dataset canonico**: no se modifica ni se borra una sola fila
-suya. Se agregan filas nuevas y se reutiliza lo que ya existe --una cuenta
-PACIENTE sin embarazo en curso, un dispositivo DISPONIBLE de su clinica y un
-medico ya afiliado a esa clinica--, de modo que todas las reglas del dominio se
-cumplan de verdad en vez de esquivarse.
+suya. Se agregan filas nuevas --un dispositivo propio de la demo, el embarazo,
+su asignacion y su seguimiento-- y se reutiliza lo que ya existe --una cuenta
+PACIENTE sin embarazo en curso y un medico ya afiliado a su clinica--, de modo
+que todas las reglas del dominio se cumplan de verdad en vez de esquivarse.
 
 **Idempotente.** Ejecutarlo dos veces no crea dos episodios: reconoce el que ya
 creo por su codigo de dispositivo y lo reutiliza.
@@ -42,7 +42,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import tempfile
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -81,6 +83,15 @@ class ErrorDeAprovisionamiento(RuntimeError):
         super().__init__(detalle)
 
 
+class EpisodioDemoNoIdentificable(ErrorDeAprovisionamiento):
+    """El episodio de demostracion no existe o no se identifica sin ambiguedad.
+
+    La lanza :func:`localizar_episodio_demo`, que solo lee: quien la recibe no
+    debe crear nada para «arreglarlo». Crear el episodio es decision de quien
+    opera, con ``provisionar``.
+    """
+
+
 def _url_de_mantenimiento() -> str:
     """La credencial del migrador, la misma que usa el cargador del dataset.
 
@@ -108,7 +119,7 @@ def _fecha_de_inicio(hoy: date) -> date:
     return hoy - timedelta(days=(SEMANA_INICIAL - 1) * DIAS_POR_SEMANA)
 
 
-def _leer_catalogos(conexion) -> dict:
+def leer_catalogos(conexion) -> dict:
     semaforos = {
         fila.codigo_nivel: fila.id_semaforo
         for fila in conexion.execute(
@@ -163,6 +174,80 @@ def _buscar_demo_existente(conexion) -> dict | None:
         "fecha_inicio": fila.fecha_inicio,
         "id_usuario": fila.id_usuario,
         "email": fila.email,
+    }
+
+
+def localizar_episodio_demo(conexion) -> dict:
+    """El episodio de demostracion, exigiendo que sea uno y solo uno. Solo lee.
+
+    A diferencia de :func:`_buscar_demo_existente` --que ``provisionar`` usa
+    para reconocer lo que ya creo y que se queda con la asignacion mas
+    reciente--, aqui cada eslabon tiene que ser unico: un dispositivo con el
+    codigo de la demo, una asignacion suya, un embarazo, una cuenta vinculada a
+    su paciente y esa cuenta con rol PACIENTE. Ante cero o mas de uno no se
+    elige: se lanza :class:`EpisodioDemoNoIdentificable`. Lo usa Demo Control
+    (SCRUM-104) para reconstruir el archivo sin pasar nunca por la ruta que
+    crea filas. No devuelve el correo.
+    """
+
+    def _uno(sql: str, parametros: dict, que: str):
+        filas = conexion.execute(text(sql), parametros).all()
+        if len(filas) != 1:
+            raise EpisodioDemoNoIdentificable(
+                "El episodio de demostracion no se identifica sin ambiguedad: se "
+                f"esperaba exactamente un(a) {que} y hay {len(filas)}. No se crea "
+                "ni se elige nada; revisa el aprovisionamiento."
+            )
+        return filas[0]
+
+    dispositivo = _uno(
+        "SELECT id_dispositivo, estado FROM operacional.dispositivo"
+        " WHERE codigo_dispositivo = :codigo",
+        {"codigo": CODIGO_DISPOSITIVO_DEMO},
+        f"dispositivo {CODIGO_DISPOSITIVO_DEMO}",
+    )
+    asignacion = _uno(
+        "SELECT id_asignacion, id_embarazo, fecha_inicio, fecha_fin, activo"
+        "  FROM operacional.asignacion_dispositivo WHERE id_dispositivo = :d",
+        {"d": dispositivo.id_dispositivo},
+        "asignacion del dispositivo de la demo",
+    )
+    embarazo = _uno(
+        "SELECT id_embarazo, id_paciente, id_clinica, fecha_inicio,"
+        "       fecha_probable_parto, estado_embarazo"
+        "  FROM operacional.embarazo WHERE id_embarazo = :e",
+        {"e": asignacion.id_embarazo},
+        "embarazo asignado",
+    )
+    cuenta = _uno(
+        "SELECT u.id_usuario, r.nombre_rol, u.activo"
+        "  FROM operacional.usuario_paciente up"
+        "  JOIN operacional.usuario u ON u.id_usuario = up.id_usuario"
+        "  JOIN operacional.rol r ON r.id_rol = u.id_rol"
+        " WHERE up.id_paciente = :p",
+        {"p": embarazo.id_paciente},
+        "cuenta vinculada a la paciente",
+    )
+    if cuenta.nombre_rol != "PACIENTE":
+        raise EpisodioDemoNoIdentificable(
+            "La cuenta vinculada al episodio de demostracion no tiene rol "
+            "PACIENTE. No se crea ni se elige nada."
+        )
+    return {
+        "id_dispositivo": dispositivo.id_dispositivo,
+        "estado_dispositivo": dispositivo.estado,
+        "id_asignacion": asignacion.id_asignacion,
+        "asignacion_inicio": asignacion.fecha_inicio,
+        "asignacion_fin": asignacion.fecha_fin,
+        "asignacion_activa": asignacion.activo,
+        "id_embarazo": embarazo.id_embarazo,
+        "id_paciente": embarazo.id_paciente,
+        "id_clinica": embarazo.id_clinica,
+        "fecha_inicio": embarazo.fecha_inicio,
+        "fecha_probable_parto": embarazo.fecha_probable_parto,
+        "estado_embarazo": embarazo.estado_embarazo,
+        "id_usuario": cuenta.id_usuario,
+        "cuenta_activa": cuenta.activo,
     }
 
 
@@ -317,9 +402,9 @@ def _provisionar(conexion, hoy: date) -> dict:
     }
 
 
-def _escribir_archivo(ruta: Path, demo: dict, catalogos: dict) -> None:
-    ruta.parent.mkdir(parents=True, exist_ok=True)
-    contenido = {
+def contenido_de_provision(demo: dict, catalogos: dict) -> dict:
+    """Lo que lleva el archivo: identificadores y catalogos, ningun dato personal."""
+    return {
         "version": VERSION_SOPORTADA,
         "generado_en": datetime.now(timezone.utc).isoformat(),
         "cuenta": {"id_usuario": demo["id_usuario"]},
@@ -330,9 +415,37 @@ def _escribir_archivo(ruta: Path, demo: dict, catalogos: dict) -> None:
         "dispositivo": {"id_dispositivo": demo["id_dispositivo"]},
         "catalogos": catalogos,
     }
-    ruta.write_text(
-        json.dumps(contenido, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+
+
+def escribir_provision(ruta: Path, demo: dict, catalogos: dict) -> None:
+    """Escribe el archivo de forma atomica: o queda el anterior, o el nuevo.
+
+    Se escribe en un temporal de la misma carpeta, se fuerza a disco y se
+    sustituye con ``os.replace``, que es atomico dentro de un volumen. Un corte
+    a mitad de escritura no deja nunca un ``provision.json`` truncado. Lo usan
+    ``provisionar`` y la reconstruccion de Demo Control (SCRUM-104).
+    """
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    texto = (
+        json.dumps(contenido_de_provision(demo, catalogos), indent=2, ensure_ascii=False)
+        + "\n"
     )
+    descriptor, temporal = tempfile.mkstemp(
+        prefix=f".{ruta.name}.", suffix=".tmp", dir=ruta.parent
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as archivo:
+            archivo.write(texto)
+            archivo.flush()
+            os.fsync(archivo.fileno())
+        os.replace(temporal, ruta)
+    except BaseException:
+        Path(temporal).unlink(missing_ok=True)
+        raise
+
+
+def _escribir_archivo(ruta: Path, demo: dict, catalogos: dict) -> None:
+    escribir_provision(ruta, demo, catalogos)
 
 
 def _informar(demo: dict, ruta: Path, escrito: bool) -> None:
@@ -352,7 +465,7 @@ def _informar(demo: dict, ruta: Path, escrito: bool) -> None:
 def orden_provisionar(ruta: Path) -> int:
     motor = create_engine(_url_de_mantenimiento(), future=True)
     with motor.begin() as conexion:
-        catalogos = _leer_catalogos(conexion)
+        catalogos = leer_catalogos(conexion)
         demo = _provisionar(conexion, date.today())
     _escribir_archivo(ruta, demo, catalogos)
     _informar(demo, ruta, escrito=True)

@@ -203,6 +203,35 @@ PostgreSQL al confirmar o al revertir; no hay `pg_advisory_unlock`. Después:
 7. conciliación completa;
 8. commit solo si todo es correcto; rollback ante cualquier diferencia.
 
+## Previsualización de la próxima carga
+
+`python scripts/etl_analitico.py previsualizar` (SCRUM-104) muestra qué
+procesaría la siguiente ejecución, sin escribir. No es un segundo ETL ni una
+ejecución parcial: `previsualizar_sin_escribir`, en
+`backend/app/etl/ejecucion.py`, llama a las mismas dos funciones que la carga
+—`_preparar_dimensiones` y `_preparar_hechos`, es decir, la extracción, el
+anti-join de lecturas nuevas y la transformación con las reglas SIM-1.0— y se
+detiene ahí. No hay una segunda copia de ningún umbral.
+
+| Propiedad | Cómo se garantiza |
+| --- | --- |
+| No escribe | Transacción `REPEATABLE READ` declarada `READ ONLY`: PostgreSQL rechaza `INSERT`, `UPDATE`, `DELETE`, DDL y `nextval` (SQLSTATE 25006). No llama a `carga` ni a `conciliacion`. |
+| No interfiere | No pide el candado del ETL. Lee su estado de `pg_locks` para informarlo. |
+| No registra nada | El ETL no tiene tabla de ejecuciones; la previsualización tampoco crea una. |
+| No inventa | Un origen que las reglas rechazan produce el mismo error que la ejecución, con código 2. |
+
+La salida son líneas `clave=valor`: el número de candidatas, las filas de
+dimensiones y bridge que se revalidarían, y una línea por candidata con sus
+identificadores, su fecha clínica, su semana y trimestre, el médico
+responsable, el estado de cada métrica, el semáforo derivado y el de origen.
+No incluye valores biométricos ni datos personales.
+
+**Candidata no es hecho confirmado.** La previsualización acierta lo que la
+ejecución intentaría cargar; que se confirme depende todavía de la carga, de
+los seudónimos y de la conciliación completa, y de que el origen no cambie
+entre una y otra. Tampoco anticipa cuántas filas de dimensión se insertarían
+o actualizarían: eso lo decide el *upsert*, que no se ejecuta.
+
 ## Conciliación
 
 `backend/app/etl/conciliacion.py`, en SQL e independiente de la transformación.

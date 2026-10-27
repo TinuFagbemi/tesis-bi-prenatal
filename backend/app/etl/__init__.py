@@ -11,7 +11,8 @@ transaction. The modules split the work the way the pipeline does:
 * :mod:`app.etl.transformacion` -- operational rows into analytic rows;
 * :mod:`app.etl.carga` -- type 1 upserts and insert-only facts;
 * :mod:`app.etl.conciliacion` -- independent SQL checks between both schemas;
-* :mod:`app.etl.ejecucion` -- the lock, the transaction and the summary.
+* :mod:`app.etl.ejecucion` -- the lock, the transaction, the summary and the
+  read-only preview of the next load.
 
 The entry point is ``scripts/etl_analitico.py``.
 """
@@ -25,18 +26,25 @@ from app.etl.conciliacion import (
 )
 from app.etl.ejecucion import (
     AISLAMIENTO,
+    AVISO_DE_CANDIDATA,
     CLAVE_DEL_CANDADO,
     RESULTADO_EXITO,
     RESULTADO_FALLO,
+    RESULTADO_PREVISUALIZACION,
     CandadoOcupado,
+    CandidataDeCarga,
     CargaInconsistente,
     ConciliacionFallida,
+    Previsualizacion,
     ResultadoEjecucion,
+    candado_ocupado,
     conciliar_sin_escribir,
     describir_error_de_base,
     ejecutar_etl,
     formatear_conciliacion,
+    formatear_previsualizacion,
     formatear_resumen,
+    previsualizar_sin_escribir,
 )
 from app.etl.modelos import TABLAS_ANALITICAS
 from app.etl.reglas import (
@@ -55,10 +63,12 @@ from app.etl.reglas import (
 __all__ = [
     # Constantes
     "AISLAMIENTO",
+    "AVISO_DE_CANDIDATA",
     "CHEQUEOS",
     "CLAVE_DEL_CANDADO",
     "RESULTADO_EXITO",
     "RESULTADO_FALLO",
+    "RESULTADO_PREVISUALIZACION",
     "TABLAS_ANALITICAS",
     "VERSION_SIM_1_0",
     # Errores
@@ -74,17 +84,22 @@ __all__ = [
     "LecturaInvalida",
     "ReglaNoDefinida",
     "VersionDeReglasDesconocida",
-    # Carga y conciliación
+    # Carga, conciliación y previsualización
+    "CandidataDeCarga",
     "InformeDeConciliacion",
+    "Previsualizacion",
     "ResultadoEjecucion",
     "ResultadoUpsert",
     "Verificacion",
+    "candado_ocupado",
     "conciliar",
     "conciliar_sin_escribir",
     "describir_error_de_base",
     "ejecutar_etl",
     "formatear_conciliacion",
+    "formatear_previsualizacion",
     "formatear_resumen",
     "insertar_hechos",
+    "previsualizar_sin_escribir",
     "upsert_tipo_1",
 ]

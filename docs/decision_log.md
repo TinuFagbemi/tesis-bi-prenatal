@@ -2383,3 +2383,144 @@ SCRUM-97 no cierra SCRUM-71.
 Décima capa en serie: `tests/test_cuentas_postgresql.py` con
 `SCRUM97_TEST_DATABASE_URL`, reporte `pytest-scrum97.xml`, excluida del bloque
 offline, y el guardián de omitidas pasa de ocho a nueve reportes.
+
+## SCRUM-104 — Demo Control: preparación y controles básicos de sustentación
+
+Consola interna para preparar y conducir la demostración técnica. La guía de uso
+está en [Demo Control](demo_control.md); aquí quedan las decisiones y por qué se
+tomaron.
+
+### Una capa de orquestación, no una aplicación
+
+`scripts/demo_control.py` no contiene ninguna regla del dominio. La
+clasificación, la sincronización, la carga y la conciliación siguen donde
+estaban; Demo Control las invoca. El ETL real corre en su propio proceso
+—`etl_analitico.py ejecutar`—, de modo que su transacción, su candado y su
+conciliación no pasan por código nuevo. Una prueba recorre el fuente del script
+y falla si aparece un umbral o una función de carga.
+
+La auditoría y las consultas de observación se quedan en Adminer (SCRUM-103).
+Demo Control tampoco calcula los valores de referencia (`id_ultima_sesion_previa`,
+`id_ultimo_log_previo`, `ultima_secuencia_publicada_previa` ni `seudonimo_embarazo_demo`).
+
+### El reset no escribe en PostgreSQL
+
+Se descartó borrar las filas de los ensayos anteriores. El hecho analítico es
+de solo inserción y la conciliación compara `operacional` con `analitico`:
+borrar una sesión de demostración ya cargada haría fallar la siguiente
+ejecución del ETL, y borrar también el hecho, la dimensión y el seudónimo sería
+modificar el modelo analítico para que la demostración «se vea limpia». Las
+consultas de Adminer ya aíslan la captura nueva con valores de referencia, así
+que una base que acumula ensayos no estorba.
+
+El reset reconstruye únicamente `provision.json`, leyendo el episodio y los
+catálogos en una transacción de solo lectura. **No invoca
+`provisionar_demo.py provisionar`**: ese comando inserta filas si no encuentra
+el episodio, y un reset que promete no escribir no puede depender de que una
+comprobación previa siga siendo cierta un instante después. Para eso se añadió
+`localizar_episodio_demo`, que solo lee y exige un episodio inequívoco —a
+diferencia de `_buscar_demo_existente`, que se queda con la asignación más
+reciente—, y la escritura del archivo pasó a ser atómica para los dos usos.
+
+### La cola con capturas sin entregar no se toca
+
+Una cola con eventos `PENDIENTE`, `FALLIDO` o con un intento abierto produce
+`REQUIERE PREPARACIÓN` y una explicación de cómo resolverla sincronizando.
+Archivarla automáticamente retiraría de la cola activa capturas que todavía no
+llegaron al servidor; se diseñó un procedimiento seguro, pero su implementación
+quedó diferida a una autorización específica. El menú no ofrece esa opción.
+
+### La previsualización es una orden del CLI del ETL
+
+`etl_analitico.py previsualizar` vive junto a `ejecutar` y `conciliar`, con la
+misma credencial, el mismo saneo de errores y los mismos códigos de salida. El
+refactor que la hizo posible es mínimo: el cuerpo de la carga se separó en
+`_preparar_dimensiones` y `_preparar_hechos`, sin cambiar el orden de ningún
+paso, y la previsualización llama a esas dos funciones y se detiene. Corre en
+una transacción `REPEATABLE READ READ ONLY`, sin candado, igual que
+`conciliar_sin_escribir`.
+
+Muestra clasificaciones y no valores: el CLI del ETL nunca imprime un valor
+biométrico, y la previsualización conserva ese contrato. Los valores se ven en
+la consulta A de Adminer.
+
+No se prometió lo que no se puede saber: una candidata no es un hecho
+confirmado, y la salida lo dice. Tampoco se anticipa cuántas filas de dimensión
+se insertarían o actualizarían, porque eso lo decide el *upsert* y calcularlo
+aparte habría sido duplicarlo.
+
+### El destino se identifica por la instancia, no por el nombre
+
+Antes de cualquier operación sobre Docker o el ETL se valida el destino, y se
+falla cerrado. Comparar el nombre de la base en las tres URLs no basta: en una
+computadora de desarrollo puede haber otro PostgreSQL escuchando. Se
+comprueba que el contenedor `db` lo creó Compose desde este directorio y que
+las conexiones llegan a él, comparando `inet_server_addr()` con la IP del
+contenedor en la red del proyecto. El contenedor `api` se da por desfasado si
+su `config-hash` difiere del que Compose calcula con el `.env` actual, o si su
+`DATABASE_URL` —leída y comparada solo en memoria— no es la del `.env`.
+
+### Desconectar es detener `api`, y comprobarlo
+
+Las opciones 3 y 4 solo pueden ejecutar `docker compose stop api` y
+`docker compose start api`; el resto de subcomandos está fuera de una lista
+blanca que se comprueba antes de lanzar nada. Después de detener, se verifica
+que la URL que usa el portal dejó de responder: si otra instancia de la API la
+atiende, la simulación no es efectiva y se dice. Después de iniciar, se espera
+a `GET /health` y se vuelve a leer Docker: la conexión solo se da por
+restablecida si además el contenedor `api` del proyecto está en marcha, y se
+aclara que `/health` no es una comprobación integral de PostgreSQL.
+
+Las dos opciones exigen antes que el portal apunte al servicio `api` de ese
+proyecto, con una única comprobación compartida. Si apunta a otra API, ni se
+detiene ni se inicia nada: una respuesta de esa otra instancia no dice nada
+sobre el servicio de Compose.
+
+### La verificación no puede ser más laxa que la ejecución
+
+La opción 1 empieza por la misma validación del destino que las opciones con
+efectos. Un «listo» que después la ejecución real desmintiera sería peor que
+no verificar. Por la misma razón, el portal de la gestante apagado es una
+advertencia y no un dato informativo —sin él no hay recorrido—, mientras que
+Adminer, que es opcional, sigue siéndolo.
+
+### Una interrupción no prueba nada
+
+Tras un Ctrl+C dentro de una opción no se afirma ningún estado: Docker o el
+ETL pueden haber terminado, no haber empezado o seguir en otro proceso. Se
+indica qué opción se interrumpió y se pide comprobar la API y los datos antes
+de repetirla.
+
+El token de la gestante caduca a los 30 minutos y puede vencer con la API
+detenida. Se advierte; no se alarga ni se omite la autenticación.
+
+### Vigencia del episodio de demostración
+
+El embarazo de demostración queda en la semana 28 el día en que se
+aprovisiona, y el catálogo llega a la 40. La verificación calcula e informa el
+último día en que la API admitirá una captura, y advierte en las dos últimas
+semanas. No se supone una fecha de sustentación. Renovar el episodio no es
+parte de este ticket.
+
+### Pruebas
+
+- `test_demo_control.py`, sin servidor: Docker, HTTP, procesos y conexiones
+  son dobles que además vigilan, y la cola SQLite y el archivo de
+  aprovisionamiento son reales.
+- `test_etl_postgresql.py`: la previsualización no escribe —se compara el
+  contenido de cada tabla analítica, privada y operacional y el valor de cada
+  secuencia, antes y después—, no toma el candado, y predice fila por fila lo
+  que el ETL carga. Las opciones 5 y 6 se prueban con el CLI real.
+- `test_provisionar_demo_postgresql.py`: la verificación y el reset contra
+  PostgreSQL real no cambian ninguna fila, y el dataset canónico se compara
+  **fila por fila**, no por conteos, con su estado previo al aprovisionamiento.
+- `test_etl_cli.py`: códigos y salida de `previsualizar`.
+
+No se modificó `docker-compose.yml` ni el workflow de CI: las pruebas nuevas
+contra PostgreSQL se añadieron a suites que el CI ya ejecuta.
+
+### Fuera de este ticket
+
+El recorrido completo de la demostración con el portal, el nodo, Adminer y
+Power BI (SCRUM-106); el archivado de colas; una interfaz web; cualquier cambio
+en Power BI, en RLS o en la autenticación.
