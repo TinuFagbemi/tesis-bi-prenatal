@@ -22,16 +22,27 @@ mismo contenido. Las SQLite se comparan por contenido (``iterdump``), no por
 bytes.
 
 **Restaurar no borra nada.** Restaura el dump en una base temporal y compara su
-huella con el manifiesto; solo si coincide, renombra la base activa a
-``<base>__previa_<marca>`` (sin conexiones permitidas, como archivo historico) y
-pone la restaurada en su lugar. Los archivos locales actuales se apartan a
-``<carpeta>__previa_<marca>`` antes de copiar los del respaldo. Al final se
-vuelve a comparar todo con el manifiesto. Si un paso falla, se detiene y dice en
-que estado quedo.
+huella con el manifiesto. Solo si coincide, aparta los archivos locales actuales a
+``<carpeta>__previa_<marca>`` y copia los del respaldo --antes de tocar la base
+activa, para que un archivo en uso detenga todo sin cambios--; despues renombra la
+base activa a ``<base>__previa_<marca>`` y pone la restaurada en su lugar, y por
+ultimo le quita a la anterior el permiso de conexion. Al final se vuelve a
+comparar todo con el manifiesto.
+
+**Si un paso falla**, se compensa lo hecho sin repetir la operacion que fallo:
+la base activa recupera su nombre (se comprueba por su oid), la temporal se
+descarta y la carpeta original vuelve a su sitio; lo que ocupaba su lugar se
+aparta a ``<carpeta>__fallida_<marca>``. Si la compensacion tambien falla, se
+informa el estado conocido y los pasos manuales, nunca un exito. Si todo se
+restauro pero la anterior no pudo aislarse, el resultado es "completada con
+aislamiento pendiente", con su propio codigo de salida.
 
 **Lo que exige antes de restaurar.** Que nadie mas este conectado a la base --la
-API detenida (Demo Control, opcion 3), Adminer sin sesiones-- y que el portal de
-la gestante este apagado, porque sus archivos se van a reemplazar.
+API detenida (Demo Control, opcion 3), Adminer sin sesiones-- y que **todas** las
+instancias del portal de la gestante esten apagadas, en cualquier host o puerto,
+porque sus archivos se van a reemplazar. Solo se comprueba el puerto configurado
+y que no haya archivos auxiliares de SQLite: un portal en otro puerto que no
+este usando sus archivos en ese momento no se detecta.
 
 **Nunca imprime** una URL de conexion, una contrasena ni el contenido de un
 archivo; las contrasenas de los roles no forman parte del respaldo.
@@ -80,6 +91,7 @@ demo_control = _cargar_script("demo_control")
 CODIGO_DE_EXITO = 0
 CODIGO_DE_ERROR = 1
 CODIGO_DIFERENCIAS = 3
+CODIGO_AISLAMIENTO_PENDIENTE = 4
 
 ARCHIVO_DUMP = "base.dump"
 ARCHIVO_GLOBALES = "roles_y_membresias_sin_claves.sql"
@@ -97,6 +109,16 @@ OPCIONES_DE_LECTURA = "-c default_transaction_read_only=on -c timezone=UTC"
 
 class ErrorDeEntorno(RuntimeError):
     """Una precondicion no se cumple o un paso fallo. Se explica y se detiene."""
+
+
+class ErrorDeRestauracion(ErrorDeEntorno):
+    """``restaurar`` no termino. Lleva el estado conocido de la base y de los archivos."""
+
+    def __init__(self, motivo: str, estado: list[str], pasos_manuales: list[str] | None = None):
+        self.motivo = motivo
+        self.estado = list(estado)
+        self.pasos_manuales = list(pasos_manuales or [])
+        super().__init__(motivo)
 
 
 def _nombre_seguro(nombre: str) -> str:
@@ -151,6 +173,8 @@ class Destino:
             resultado = subprocess.run(  # noqa: S603 -- argumentos fijos, sin shell
                 comando, stdin=fuente, stdout=destino, stderr=subprocess.PIPE, timeout=PLAZO, check=False
             )
+        except FileNotFoundError:
+            raise ErrorDeEntorno("No se encontro el ejecutable de Docker.") from None
         finally:
             if fuente:
                 fuente.close()
@@ -400,29 +424,225 @@ def otras_sesiones(destino: Destino, base: str) -> list[str]:
     return sorted({fila[0] for fila in filas})
 
 
+def _describir(error: BaseException) -> str:
+    """Tipo y causa de un fallo, sin URLs ni credenciales."""
+    if isinstance(error, subprocess.TimeoutExpired):
+        return f"TimeoutExpired: docker exec no respondio en {PLAZO} s"
+    if isinstance(error, OSError):
+        partes = [error.strerror or str(error)]
+        if error.filename:
+            partes.append(str(error.filename))
+        return f"{type(error).__name__}: " + sanear_mensaje(" ".join(p for p in partes if p))
+    texto = sanear_mensaje(str(error))
+    return f"{type(error).__name__}: {texto}" if texto else type(error).__name__
+
+
+# Lo que puede fallar al hablar con PostgreSQL a traves de ``docker exec``.
+_FALLOS_DE_BASE = (ErrorDeEntorno, subprocess.TimeoutExpired, OSError)
+
+
+def _oids(destino: Destino, nombres: list[str]) -> dict[str, str | None] | None:
+    """El oid de cada base (None si no existe), o None si no se pudo consultar.
+
+    El oid identifica a una base aunque cambie de nombre: es lo que permite
+    comprobar que, tras una compensacion, la activa es la misma de antes.
+    """
+    lista = ", ".join(f"'{_nombre_seguro(n)}'" for n in nombres)
+    try:
+        filas = destino.psql(f"SELECT datname, oid FROM pg_database WHERE datname IN ({lista})")
+    except _FALLOS_DE_BASE:
+        return None
+    encontrados = {fila[0]: fila[1] for fila in filas}
+    return {nombre: encontrados.get(nombre) for nombre in nombres}
+
+
+def _admite_conexiones(destino: Destino, base: str) -> bool | None:
+    """``datallowconn`` de la base, o None si no se pudo consultar."""
+    try:
+        filas = destino.psql(f"SELECT datallowconn FROM pg_database WHERE datname = '{_nombre_seguro(base)}'")
+    except _FALLOS_DE_BASE:
+        return None
+    return None if not filas else filas[0][0] != "f"
+
+
+def _auxiliares_de_sqlite(datos: Path) -> list[str]:
+    if not datos.exists():
+        return []
+    return sorted(
+        p.relative_to(datos).as_posix() for p in datos.rglob("*") if p.is_file() and p.name.endswith(SUFIJOS_AUXILIARES)
+    )
+
+
+def _devolver_archivos(datos: Path, apartados: Path | None, fallida: Path) -> list[str]:
+    """Vuelve a poner la carpeta original en su sitio. Nada se borra.
+
+    Lo que ocupe su lugar (una copia del respaldo, completa o a medias) se
+    aparta a ``fallida``. Devuelve el estado de los archivos, para informarlo.
+    """
+    try:
+        if datos.exists():
+            datos.rename(fallida)
+        if apartados is not None:
+            apartados.rename(datos)
+    except OSError as error:
+        raise ErrorDeRestauracion(
+            f"No se pudieron devolver los archivos locales a su sitio ({_describir(error)}).",
+            estado=[
+                f"Archivos locales: la carpeta original sigue en {apartados}." if apartados and apartados.exists()
+                else f"Archivos locales: revisar {datos} y {apartados}.",
+                f"Archivos locales: {datos} " + ("existe" if datos.exists() else "no existe") + ".",
+            ],
+            pasos_manuales=[f"Mover {apartados} de vuelta a {datos} cuando ningun proceso los use."],
+        ) from None
+    estado = [f"Archivos locales: devueltos a {datos}, sin cambios."]
+    if fallida.exists():
+        estado.append(f"Archivos locales: la copia incompleta o descartada quedo en {fallida}.")
+    return estado
+
+
+def _devolver_conservando(datos: Path, apartados: Path | None, fallida: Path, motivo: str,
+                          estado_previo: list[str]) -> list[str]:
+    """``_devolver_archivos`` sin perder lo ya sabido si tambien falla."""
+    try:
+        return estado_previo + _devolver_archivos(datos, apartados, fallida)
+    except ErrorDeRestauracion as error:
+        raise ErrorDeRestauracion(f"{motivo} {error.motivo}", estado=estado_previo + error.estado,
+                                  pasos_manuales=error.pasos_manuales) from None
+
+
+def _descartar_temporal(destino: Destino, temporal: str) -> str:
+    """Elimina la base temporal de esta restauracion: es una copia recien hecha del respaldo."""
+    try:
+        destino.psql(f'DROP DATABASE IF EXISTS "{temporal}"')
+    except _FALLOS_DE_BASE as error:
+        return (f"PostgreSQL: la base temporal '{temporal}' no se pudo eliminar ({_describir(error)}); "
+                "es una copia del respaldo y puede eliminarse a mano.")
+    return f"PostgreSQL: la base temporal '{temporal}' se elimino."
+
+
+def _preparar_archivos(datos: Path, apartados: Path, fallida: Path, origen: Path) -> Path | None:
+    """Paso 2: aparta los archivos actuales y copia los del respaldo, o no cambia nada.
+
+    Va antes del intercambio de bases: si un proceso tiene abierta una SQLite
+    (en Windows, ``rename`` falla con ``PermissionError``) la restauracion se
+    detiene sin haber tocado PostgreSQL.
+    """
+    apartada = False
+    try:
+        if datos.exists():
+            datos.rename(apartados)
+            apartada = True
+    except OSError as error:
+        raise ErrorDeRestauracion(
+            f"No se pudo apartar {datos} ({_describir(error)}). Es probable que alguna instancia del "
+            "portal de la gestante o del dispositivo la este usando.",
+            estado=[f"Archivos locales: sin cambios en {datos}."],
+            pasos_manuales=["Detener todas las instancias del portal de la gestante, en cualquier host o puerto, y repetir."],
+        ) from None
+    try:
+        if origen.exists():
+            shutil.copytree(origen, datos)
+        else:
+            datos.mkdir(parents=True)
+    except OSError as error:
+        motivo = f"No se pudieron copiar los archivos del respaldo ({_describir(error)})."
+        estado = _devolver_conservando(datos, apartados if apartada else None, fallida, motivo, [])
+        raise ErrorDeRestauracion(motivo, estado=estado) from None
+    return apartados if apartada else None
+
+
+def _compensar_intercambio(destino: Destino, temporal: str, previa: str, oid_activa: str, oid_temporal: str,
+                           datos: Path, apartados: Path | None, fallida: Path, error: BaseException) -> None:
+    """Un ``RENAME`` del paso 3 fallo. Lee el estado real y lo compensa, o explica que no puede.
+
+    No repite la operacion que fallo: consulta ``pg_database`` y, segun lo que
+    encuentre, devuelve la base activa a su nombre o reconoce que el intercambio
+    llego a completarse.
+    """
+    motivo = f"Fallo el intercambio de bases ({_describir(error)})."
+    base = destino.base
+    bases = _oids(destino, [base, previa, temporal])
+    manuales = [
+        f"Consultar: SELECT datname, oid FROM pg_database WHERE datname LIKE '{base}%';",
+        f"Si '{base}' no existe y '{previa}' si: ALTER DATABASE \"{previa}\" RENAME TO \"{base}\";",
+        f"Archivos locales: mover {datos} a {fallida} y {apartados} a {datos}." if apartados
+        else f"Archivos locales: revisar {datos}.",
+    ]
+    if bases is None:
+        raise ErrorDeRestauracion(motivo, estado=[
+            "PostgreSQL: estado DESCONOCIDO; no se pudo consultar el cluster.",
+            f"Archivos locales: ya son los del respaldo; los anteriores estan en {apartados}.",
+        ], pasos_manuales=manuales)
+    activa, anterior, nueva = bases[base], bases[previa], bases[temporal]
+
+    if activa == oid_temporal and anterior == oid_activa and nueva is None:
+        return  # El intercambio llego a completarse: se sigue con el paso 4.
+
+    if activa == oid_activa and anterior is None:
+        estado = ["PostgreSQL: la base activa no llego a cambiar de nombre."]
+    elif activa is None and anterior == oid_activa:
+        try:
+            destino.psql(f'ALTER DATABASE "{previa}" RENAME TO "{base}"')
+        except _FALLOS_DE_BASE as segundo:
+            raise ErrorDeRestauracion(motivo, estado=[
+                f"PostgreSQL: NO HAY BASE ACTIVA '{base}'. La anterior esta como '{previa}' "
+                f"y la restaurada como '{temporal}'. La compensacion tambien fallo ({_describir(segundo)}).",
+                f"Archivos locales: ya son los del respaldo; los anteriores estan en {apartados}.",
+            ], pasos_manuales=manuales) from None
+        recuperada = _oids(destino, [base])
+        if recuperada is None or recuperada[base] != oid_activa:
+            raise ErrorDeRestauracion(motivo, estado=[
+                f"PostgreSQL: se intento devolver '{previa}' a '{base}', pero no se pudo confirmar "
+                "que la base activa sea la original.",
+                f"Archivos locales: ya son los del respaldo; los anteriores estan en {apartados}.",
+            ], pasos_manuales=manuales)
+        estado = [f"PostgreSQL: compensado; '{base}' recupero su identidad original (oid {oid_activa})."]
+    else:
+        raise ErrorDeRestauracion(motivo, estado=[
+            f"PostgreSQL: estado inesperado (oids: {base}={activa}, {previa}={anterior}, {temporal}={nueva}); "
+            "no se compenso automaticamente.",
+            f"Archivos locales: ya son los del respaldo; los anteriores estan en {apartados}.",
+        ], pasos_manuales=manuales)
+
+    estado.append(_descartar_temporal(destino, temporal))
+    estado = _devolver_conservando(datos, apartados, fallida, motivo, estado)
+    raise ErrorDeRestauracion(motivo + " La restauracion NO se realizo.", estado=estado)
+
+
 def restaurar(destino: Destino, carpeta: Path, datos: Path, portal_en_marcha: bool,
               marca: str | None = None, respaldo_de: str | None = None) -> dict:
     manifiesto = comprobar_sumas(carpeta)
     _exigir_misma_base(manifiesto, destino, respaldo_de)
     if portal_en_marcha:
-        raise ErrorDeEntorno("El portal de la gestante esta en marcha: detenlo antes de restaurar sus archivos.")
+        raise ErrorDeEntorno(
+            "El portal de la gestante esta en marcha: detenlo, junto con cualquier otra instancia "
+            "en otro host o puerto, antes de restaurar sus archivos."
+        )
     sesiones = otras_sesiones(destino, destino.base)
     if sesiones:
         raise ErrorDeEntorno(
             "Hay sesiones abiertas en la base: " + ", ".join(sesiones)
             + ". Deten la API (opcion 3 de Demo Control) y cierra Adminer antes de restaurar."
         )
+    auxiliares = _auxiliares_de_sqlite(datos)
+    if auxiliares:
+        raise ErrorDeEntorno(
+            "Hay archivos auxiliares de SQLite en la carpeta local (" + ", ".join(auxiliares[:3])
+            + "): algun proceso la esta usando o se cerro mal. Deten todas las instancias del portal, "
+            "en cualquier host o puerto, y repite."
+        )
 
     marca = marca or datetime.now(timezone.utc).strftime("%Y%m%dt%H%M%Sz")
     temporal = _nombre_seguro(f"{destino.base}__restaurando")
     previa = _nombre_seguro(f"{destino.base}__previa_{marca}")
     apartados = datos.with_name(f"{datos.name}__previa_{marca}")
+    fallida = datos.with_name(f"{datos.name}__fallida_{marca}")
     if destino.existe(temporal):
         raise ErrorDeEntorno(f"Ya existe '{temporal}' de un intento anterior; revisala antes de seguir.")
-    if destino.existe(previa) or apartados.exists():
+    if destino.existe(previa) or apartados.exists() or fallida.exists():
         raise ErrorDeEntorno("Ya existe un estado previo con esta marca de tiempo.")
 
-    # 1. Restaurar en una base temporal y comprobarla antes de tocar la activa.
+    # 1. Restaurar en una base temporal y comprobarla antes de tocar nada mas.
     propietario = _nombre_seguro(manifiesto["huella"]["propietario"])
     destino.psql(f'CREATE DATABASE "{temporal}" OWNER "{propietario}"')
     try:
@@ -431,34 +651,64 @@ def restaurar(destino: Destino, carpeta: Path, datos: Path, portal_en_marcha: bo
         diferencias = comparar_huellas(manifiesto["huella"], huella_de_la_base(destino, temporal))
         if diferencias:
             raise ErrorDeEntorno("La base restaurada no coincide con el manifiesto: " + "; ".join(diferencias[:5]))
+        identidades = _oids(destino, [destino.base, temporal])
+        if identidades is None or not identidades[destino.base] or not identidades[temporal]:
+            raise ErrorDeEntorno(f"No se pudo identificar la base activa '{destino.base}' antes del intercambio.")
     except BaseException:
         destino.psql(f'DROP DATABASE IF EXISTS "{temporal}"')
         raise
+    oid_activa, oid_temporal = identidades[destino.base], identidades[temporal]
 
-    # 2. Intercambio. La activa pasa a archivo historico sin conexiones.
+    # 2. Archivos locales, antes del intercambio: se apartan y se copian los del respaldo.
+    try:
+        apartados = _preparar_archivos(datos, apartados, fallida, carpeta / CARPETA_LOCAL)
+    except ErrorDeRestauracion as error:
+        error.estado.insert(0, _descartar_temporal(destino, temporal))
+        error.estado.insert(0, "PostgreSQL: la base activa no se toco.")
+        raise
+
+    # 3. Intercambio de bases. La activa pasa a archivo historico.
     if otras_sesiones(destino, destino.base):
-        destino.psql(f'DROP DATABASE IF EXISTS "{temporal}"')
-        raise ErrorDeEntorno("Alguien se conecto a la base durante la restauracion; no se cambio nada.")
-    destino.psql(f'ALTER DATABASE "{destino.base}" RENAME TO "{previa}"')
-    destino.psql(f'ALTER DATABASE "{temporal}" RENAME TO "{destino.base}"')
-    destino.psql(f'ALTER DATABASE "{previa}" ALLOW_CONNECTIONS false')
+        motivo = "Alguien se conecto a la base durante la restauracion."
+        estado = ["PostgreSQL: la base activa no se toco.", _descartar_temporal(destino, temporal)]
+        estado = _devolver_conservando(datos, apartados, fallida, motivo, estado)
+        raise ErrorDeRestauracion(motivo + " La restauracion NO se realizo.", estado=estado)
+    try:
+        destino.psql(f'ALTER DATABASE "{destino.base}" RENAME TO "{previa}"')
+        destino.psql(f'ALTER DATABASE "{temporal}" RENAME TO "{destino.base}"')
+    except _FALLOS_DE_BASE as error:
+        _compensar_intercambio(destino, temporal, previa, oid_activa, oid_temporal, datos, apartados, fallida, error)
 
-    # 3. Archivos locales: los actuales se apartan, no se sobrescriben ni se borran.
-    if datos.exists():
-        datos.rename(apartados)
-    else:
-        apartados = None
-    origen = carpeta / CARPETA_LOCAL
-    if origen.exists():
-        shutil.copytree(origen, datos)
-    else:
-        datos.mkdir(parents=True)
+    # 4. Aislar la base historica. Si no se confirma, la restauracion no es conforme.
+    aislamiento_pendiente = None
+    try:
+        destino.psql(f'ALTER DATABASE "{previa}" ALLOW_CONNECTIONS false')
+    except _FALLOS_DE_BASE as error:
+        aislamiento_pendiente = f"no se pudo bloquear el acceso a '{previa}' ({_describir(error)})"
+    if aislamiento_pendiente is None and _admite_conexiones(destino, previa) is not False:
+        aislamiento_pendiente = f"no se pudo confirmar que '{previa}' rechace conexiones"
+    elif aislamiento_pendiente and _admite_conexiones(destino, previa) is False:
+        aislamiento_pendiente = None  # El ALTER se aplico aunque su respuesta se perdiera.
 
-    # 4. Comprobacion final contra el manifiesto.
+    # 5. Comprobacion final contra el manifiesto.
+    try:
+        diferencias = verificar(destino, carpeta, datos, respaldo_de)
+    except (*_FALLOS_DE_BASE, ValueError) as error:
+        raise ErrorDeRestauracion(
+            f"La restauracion se aplico, pero no se pudo verificar contra el manifiesto ({_describir(error)}).",
+            estado=[
+                f"PostgreSQL: '{destino.base}' es ya la restaurada; la anterior es '{previa}'"
+                + (f" ({aislamiento_pendiente})." if aislamiento_pendiente else ", sin conexiones."),
+                f"Archivos locales: ya son los del respaldo; los anteriores estan en {apartados}.",
+            ],
+            pasos_manuales=[f"Repetir la comprobacion: entorno_demo.py verificar --carpeta {carpeta}"
+                            + (f" --respaldo-de {respaldo_de}" if respaldo_de else "")],
+        ) from None
     return {
         "previa": previa,
         "archivos_apartados": apartados,
-        "diferencias": verificar(destino, carpeta, datos, respaldo_de),
+        "diferencias": diferencias,
+        "aislamiento_pendiente": aislamiento_pendiente,
     }
 
 
@@ -507,8 +757,10 @@ def main(argv: list[str] | None = None) -> int:
             )
             resultado = restaurar(destino, argumentos.carpeta, datos, portal_en_marcha=portal,
                                   respaldo_de=argumentos.respaldo_de)
+            pendiente = resultado["aislamiento_pendiente"]
             print(f"Restaurada '{destino.base}' desde {argumentos.carpeta}")
-            print(f"  el estado anterior se conserva como la base '{resultado['previa']}' (sin conexiones)")
+            print(f"  el estado anterior se conserva como la base '{resultado['previa']}'"
+                  + (" (SIN AISLAR: todavia admite conexiones)" if pendiente else " (sin conexiones)"))
             if resultado["archivos_apartados"]:
                 print(f"  los archivos locales anteriores estan en {resultado['archivos_apartados']}")
             diferencias = resultado["diferencias"]
@@ -518,15 +770,32 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  - {diferencia}")
             return CODIGO_DIFERENCIAS
         print("IDENTICO al manifiesto: tablas, secuencias, RLS, vistas, funciones, permisos, roles y archivos locales.")
+        if argumentos.orden == "restaurar" and pendiente:
+            print(f"RESTAURACION COMPLETADA CON AISLAMIENTO PENDIENTE: {pendiente}.")
+            print(f"  Ejecutar como administrador: ALTER DATABASE \"{resultado['previa']}\" ALLOW_CONNECTIONS false;")
+            return CODIGO_AISLAMIENTO_PENDIENTE
         return CODIGO_DE_EXITO
+    except ErrorDeRestauracion as error:
+        print(f"Error: {error.motivo}", file=sys.stderr)
+        print("RESTAURACION NO COMPLETADA. Estado conocido:", file=sys.stderr)
+        for linea in error.estado:
+            print(f"  - {linea}", file=sys.stderr)
+        if error.pasos_manuales:
+            print("Pasos manuales:", file=sys.stderr)
+            for paso in error.pasos_manuales:
+                print(f"  - {paso}", file=sys.stderr)
+        return CODIGO_DE_ERROR
     except ErrorDeEntorno as error:
         print(f"Error: {error}", file=sys.stderr)
         return CODIGO_DE_ERROR
     except demo_control.EntornoNoValidado as error:
         print("Error: " + "; ".join(error.motivos), file=sys.stderr)
         return CODIGO_DE_ERROR
-    except (FileNotFoundError, subprocess.TimeoutExpired) as error:
-        print(f"Error: Docker no responde ({type(error).__name__}).", file=sys.stderr)
+    except subprocess.TimeoutExpired:
+        print(f"Error: Docker no respondio en {PLAZO} s.", file=sys.stderr)
+        return CODIGO_DE_ERROR
+    except OSError as error:
+        print(f"Error de archivos: {_describir(error)}", file=sys.stderr)
         return CODIGO_DE_ERROR
 
 

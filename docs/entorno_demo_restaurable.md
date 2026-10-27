@@ -27,15 +27,32 @@ captura cada una (una lectura por sesión):
 ## Qué garantiza la restauración
 
 - **Comprueba antes de cambiar.** El dump se restaura en `<base>__restaurando` y
-  se compara con el manifiesto. Solo si coincide se intercambia con la activa.
+  se compara con el manifiesto. Solo si coincide se sigue.
+- **Archivos primero.** Los archivos locales se apartan a
+  `data/gestante__previa_<marca>` y se copian los del respaldo **antes** de tocar
+  la base activa: si una SQLite está en uso (en Windows, `PermissionError`), la
+  restauración se detiene sin haber cambiado nada.
 - **No borra.** La base anterior queda como `<base>__previa_<marca>`, sin conexiones
-  permitidas. Los archivos locales anteriores quedan en `data/gestante__previa_<marca>`.
+  permitidas. Ninguna de las dos carpetas apartadas se versiona (`.gitignore`).
+- **Compensa si falla a mitad de camino.** No repite la operación que falló:
+  consulta el estado real y, si hace falta, devuelve la base activa a su nombre
+  (se comprueba por su oid), descarta la temporal y devuelve la carpeta original
+  a su sitio. Lo que ocupaba su lugar se aparta a `data/gestante__fallida_<marca>`.
+  Si la compensación también falla, informa `RESTAURACION NO COMPLETADA` con el
+  estado conocido y los pasos manuales (código 1), nunca un éxito.
+- **Aislamiento.** Si todo se restauró pero no se pudo confirmar que la base
+  anterior rechaza conexiones, el resultado es `RESTAURACION COMPLETADA CON
+  AISLAMIENTO PENDIENTE` (código 4), con la orden que falta ejecutar.
 - **Comprueba después.** Tablas fila por fila, secuencias, políticas y estado de
   RLS, vistas, funciones, permisos, roles y membresías, más las SQLite por
   contenido. Cualquier diferencia se informa con código de salida 3.
 - **Se niega** si hay sesiones abiertas en la base (API, Adminer, Power BI), si el
-  portal está en marcha, si el respaldo está alterado (`SHA256SUMS`) o si el
-  respaldo es de otra base y no se declaró con `--respaldo-de`.
+  portal responde en el puerto configurado, si hay archivos auxiliares de SQLite
+  (`-wal`, `-shm`, `-journal`) en la carpeta local, si el respaldo está alterado
+  (`SHA256SUMS`) o si es de otra base y no se declaró con `--respaldo-de`.
+- **Límite:** solo comprueba el puerto configurado. Un portal lanzado con otro
+  `--host` o `--puerto` que no esté usando sus archivos en ese instante no se
+  detecta, así que hay que detener **todas** sus instancias antes de restaurar.
 - No guarda contraseñas: los roles se respaldan con `--no-role-passwords`.
 
 La huella se calcula con `psql` dentro del contenedor, como superusuario y en solo
@@ -44,7 +61,8 @@ tablas con FORCE ROW LEVEL SECURITY. Las filas se ordenan con `COLLATE "C"`.
 
 ## Secuencia del día D
 
-1. Demo Control, opción 3 (detener la API). Cerrar Adminer, Power BI Desktop y el portal.
+1. Demo Control, opción 3 (detener la API). Cerrar Adminer, Power BI Desktop y
+   **todas** las instancias del portal, en cualquier host o puerto.
 2. Poner en uso la base limpia:
 
    ```powershell
