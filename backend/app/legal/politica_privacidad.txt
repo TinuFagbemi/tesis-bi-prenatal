@@ -1,0 +1,59 @@
+# Política de privacidad de FetalAlert
+
+## 1. Quién trata tus datos
+
+FetalAlert es un servicio de seguimiento prenatal que se ofrece a través de tu clínica. Tus datos los tratan la clínica y el equipo de FetalAlert, conforme a la Ley 81 de 2019 sobre Protección de Datos Personales de Panamá y su reglamento, el Decreto Ejecutivo 285 de 2021.
+
+## 2. Para qué usamos tus datos
+
+- Crear tu cuenta y permitirte consultar tus mediciones y tu historial en el portal.
+- Que el médico asignado a tu embarazo revise tus mediciones y su evolución.
+- Elaborar estadísticas agregadas para la gestión de la clínica, sin identificarte.
+
+No vendemos tus datos ni los usamos con fines comerciales.
+
+## 3. Datos que recogemos al crear tu cuenta
+
+- Nombres y apellidos, cédula y fecha de nacimiento.
+- El correo de acceso que te asigna el personal de FetalAlert. No es tu correo personal: sirve para identificar tu cuenta e iniciar sesión.
+- Un número de celular.
+- Tu contraseña no se almacena en texto legible. Guardamos una representación protegida mediante Argon2id para verificarla cuando inicias sesión.
+- La versión de esta política y de los términos que aceptaste, con la fecha y hora en que lo hiciste.
+
+Si es tu primera vez en FetalAlert, tu cuenta empieza sin embarazos ni mediciones. Se añaden cuando el personal de salud registra tu embarazo y te asigna un dispositivo FetalAlert.
+
+Si ya usaste FetalAlert en un embarazo anterior, ya tienes una cuenta: no crees otra. Inicia sesión con ella y, cuando el personal de salud registre tu nuevo embarazo, verás en tu historial los registros del embarazo anterior y los del nuevo.
+
+## 4. Datos de salud
+
+Las mediciones de tu dispositivo (frecuencia cardíaca, saturación de oxígeno y movimientos fetales) y los datos de tu embarazo son datos sensibles. Al aceptar esta política das tu consentimiento previo, informado e inequívoco para que se traten con los fines del punto 2.
+
+## 5. Quién puede verlos
+
+- **Tú**, con tu cuenta, puedes consultar en el portal tus embarazos y mediciones.
+- **El médico con seguimiento vigente de tu embarazo** puede identificarte en el tablero clínico: ve tu nombre, cédula, celular, correo de acceso y fecha de nacimiento, junto con los datos de ese embarazo. Si deja de tener esa asignación, deja de verlos. Mientras no tengas un embarazo con un médico asignado, no apareces en ese tablero.
+- **El personal administrativo** solo ve cifras agregadas por provincia, mes y nivel de alerta, y nunca grupos de menos de cinco embarazos. Esas cifras no te identifican.
+- **El personal técnico autorizado** que administra el sistema puede acceder a la base de datos para mantenerla y resolver incidencias.
+
+## 6. Cómo protegemos tu información
+
+- Cada persona entra con su propia cuenta, y lo que puede hacer depende de su rol.
+- La base de datos limita cada consulta a la información que esa cuenta tiene autorizada.
+- Las estadísticas usan seudónimos en lugar de tu nombre y tu cédula.
+- La aplicación registra la creación de cuentas, los inicios de sesión y las consultas clínicas, sin copiar tus mediciones ni tu contraseña. Las consultas de los tableros clínicos se hacen directamente sobre la base de datos y no quedan en ese registro.
+
+Ninguna medida de seguridad elimina todos los riesgos, pero trabajamos para reducirlos.
+
+## 7. Tus derechos
+
+Puedes pedir acceso, rectificación, cancelación u oposición sobre tus datos (derechos ARCO). Haz tu solicitud al personal de salud de tu clínica. En el portal ya puedes consultar tus datos en cualquier momento.
+
+Tu cuenta no se puede eliminar desde el portal. La clínica puede desactivarla: una cuenta desactivada ya no permite entrar, y su historial se conserva para la trazabilidad de tu seguimiento.
+
+## 8. Cambios
+
+Si esta política cambia, tendrá una versión nueva y te pediremos que vuelvas a aceptarla.
+
+## 9. Alcance de esta versión
+
+Esta versión de FetalAlert es un prototipo académico, desarrollado como parte de una tesis y usado en demostraciones. No es un servicio clínico en operación: todos sus datos son simulados y no corresponden a personas reales. No escribas en ella tus datos reales ni los de otra persona.

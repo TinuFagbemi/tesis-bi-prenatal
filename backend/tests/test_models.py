@@ -47,6 +47,8 @@ TABLAS_ESPERADAS = {
     "usuario_paciente",
     "usuario_medico",
     "auditoria_log",
+    # Autorregistro (SCRUM-110): que version de que texto acepto cada cuenta.
+    "aceptacion_documento",
 }
 
 PRIMARY_KEYS_ESPERADAS = {
@@ -73,6 +75,7 @@ PRIMARY_KEYS_ESPERADAS = {
     "usuario_paciente": ("id_usuario",),
     "usuario_medico": ("id_usuario",),
     "auditoria_log": ("id_log",),
+    "aceptacion_documento": ("id_aceptacion",),
 }
 
 FOREIGN_KEYS_ESPERADAS = {
@@ -102,6 +105,7 @@ FOREIGN_KEYS_ESPERADAS = {
     ("usuario_medico", "id_usuario"): ("usuario", "id_usuario"),
     ("usuario_medico", "id_medico"): ("medico", "id_medico"),
     ("auditoria_log", "id_usuario"): ("usuario", "id_usuario"),
+    ("aceptacion_documento", "id_usuario"): ("usuario", "id_usuario"),
 }
 
 # Deletion policy of every foreign key. CASCADE belongs to rows that cannot exist
@@ -140,6 +144,8 @@ ONDELETE_ESPERADOS = {
     ("usuario_medico", "id_usuario"): "CASCADE",
     ("usuario_paciente", "id_paciente"): "CASCADE",
     ("usuario_paciente", "id_usuario"): "CASCADE",
+    # Una aceptacion es evidencia, como la traza: no desaparece con la cuenta.
+    ("aceptacion_documento", "id_usuario"): "RESTRICT",
 }
 
 # Only these columns may be NULL. Anything absent here must be NOT NULL.
@@ -180,6 +186,7 @@ COLUMNAS_NULLABLE_ESPERADAS = {
         "nombre_entidad_afectada",
         "id_entidad_afectada",
     },
+    "aceptacion_documento": set(),
 }
 
 TIPOS_DE_CONTACTO_ESPERADOS = ["CELULAR", "TELEFONO_DOMICILIO", "CORREO_ALTERNO"]
@@ -220,11 +227,12 @@ def test_configure_mappers_sin_errores():
 # --------------------------------------------------------------------------
 
 
-def test_metadata_contiene_exactamente_las_23_tablas_operacionales():
+def test_metadata_contiene_exactamente_las_24_tablas_operacionales():
     registradas = {t.name for t in Base.metadata.tables.values()}
 
     assert registradas == TABLAS_ESPERADAS
-    assert len(Base.metadata.tables) == 23
+    # 24 desde SCRUM-110: aceptacion_documento.
+    assert len(Base.metadata.tables) == 24
 
 
 def test_todas_las_tablas_pertenecen_al_esquema_operacional():

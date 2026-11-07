@@ -9,12 +9,14 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
+    UniqueConstraint,
     func,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+from app.models.enums import DocumentoLegal, enum_column
 
 if TYPE_CHECKING:
     from app.models.catalogos import Rol
@@ -156,3 +158,56 @@ class AuditoriaLog(Base):
     )
 
     usuario: Mapped["Usuario | None"] = relationship(back_populates="logs_auditoria")
+
+
+class AceptacionDocumento(Base):
+    """One acceptance of one versioned legal text by one account (SCRUM-110).
+
+    Written once, by ``seguridad.autorregistrar_paciente``, in the same
+    transaction that creates the account: a self-registered account without its
+    two acceptances cannot exist, and an acceptance without its account cannot
+    either.
+
+    **What is recorded is what the server knows, not what the client claims.**
+    ``version`` is the one the server had in force and checked the request
+    against; ``sha256`` is the digest of that text as the server holds it; and
+    ``fecha_hora`` is PostgreSQL's ``now()``, never a client clock.
+
+    **Who accepted.** The account in ``id_usuario`` -- the patient herself. A
+    physician who helps her fill in the form in person has no technical identity
+    in this operation and is not recorded, so nothing here attributes the
+    acceptance to anyone else.
+
+    RESTRICT on the account, like the audit trail: an acceptance is evidence and
+    must outlive any attempt to delete the account it belongs to.
+    """
+
+    __tablename__ = "aceptacion_documento"
+    __table_args__ = (
+        UniqueConstraint(
+            "id_usuario",
+            "documento",
+            "version",
+            name="uq_aceptacion_documento_id_usuario_documento_version",
+        ),
+        CheckConstraint(r"sha256 ~ '^[0-9a-f]{64}$'", name="sha256_hex"),
+        CheckConstraint("btrim(version) <> ''", name="version_no_vacia"),
+    )
+
+    id_aceptacion: Mapped[int] = mapped_column(Integer, primary_key=True)
+    id_usuario: Mapped[int] = mapped_column(
+        ForeignKey("usuario.id_usuario", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    documento: Mapped[DocumentoLegal] = mapped_column(
+        enum_column(DocumentoLegal, name="documento_legal"),
+        nullable=False,
+    )
+    version: Mapped[str] = mapped_column(String(40), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    fecha_hora: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )

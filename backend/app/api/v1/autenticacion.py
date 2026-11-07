@@ -33,6 +33,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.api.v1.cuentas import RUTAS_CON_CREDENCIALES_DE_CUENTAS
+from app.api.v1.registro import RUTAS_CON_CREDENCIALES_DE_REGISTRO
 from app.api.dependencias import (
     CONTEXTO_AUTENTICACION,
     DESAFIO_SIN_CREDENCIAL,
@@ -59,9 +60,14 @@ MENSAJE_CREDENCIALES_INVALIDAS = "Credenciales invalidas."
 # Rutas cuyo cuerpo lleva una credencial. El manejador de abajo les quita el eco
 # del valor rechazado; ninguna otra ruta cambia de comportamiento. Desde SCRUM-97
 # incluye las dos rutas de provision de cuentas, cuyo cuerpo lleva una
-# contrasena inicial.
+# contrasena inicial, y desde SCRUM-110 la del autorregistro, que lleva la
+# contrasena y su confirmacion.
 RUTAS_CON_CREDENCIALES = frozenset(
-    {f"{router.prefix}/token", *RUTAS_CON_CREDENCIALES_DE_CUENTAS}
+    {
+        f"{router.prefix}/token",
+        *RUTAS_CON_CREDENCIALES_DE_CUENTAS,
+        *RUTAS_CON_CREDENCIALES_DE_REGISTRO,
+    }
 )
 
 # Clave que Pydantic usa para devolver el valor que no paso la validacion.

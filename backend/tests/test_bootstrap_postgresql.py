@@ -1642,7 +1642,8 @@ def test_con_las_membresias_limpias_la_migracion_completa(base_para_migrar):
     Sin esta, «aborta» podria ser cierto por cualquier motivo, incluso porque el
     preflight rechace un cluster correcto. Aqui no se contamina nada y la
     revision se aplica entera: cabeza nueva, schema, nueve helpers, veintiuna
-    politicas, el indice y el GRANT a la API.
+    politicas, el indice y el GRANT a la API. Como se migra hasta el head, se
+    cuentan tambien la funcion de autorregistro y su politica (SCRUM-110).
     """
     url, observador = base_para_migrar
 
@@ -1652,7 +1653,9 @@ def test_con_las_membresias_limpias_la_migracion_completa(base_para_migrar):
     assert estado["revision"] == _cabeza_alembic()
     assert _la_revision_de_rls_esta_en_la_cadena()
     assert estado["schema_seguridad"] == 1
-    assert estado["helpers"] == 9
-    assert estado["politicas"] == 21
+    # 9 helpers de SCRUM-98 + seguridad.autorregistrar_paciente (SCRUM-110).
+    assert estado["helpers"] == 10
+    # 21 politicas de SCRUM-98 + pol_autorregistro (SCRUM-110).
+    assert estado["politicas"] == 22
     assert estado["indice"] == 1
     assert estado["grant_api"] is True

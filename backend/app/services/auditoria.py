@@ -107,6 +107,13 @@ class AccionAuditada(str, enum.Enum):
     CUENTA_MEDICO_PROVISIONADA = "CUENTA_MEDICO_PROVISIONADA"
     CUENTA_DESACTIVADA = "CUENTA_DESACTIVADA"
     CUENTA_REACTIVADA = "CUENTA_REACTIVADA"
+    # Self-registration of a patient (SCRUM-110). There is no authenticated
+    # caller, so the actor is the account the registration just created: the
+    # patient registered herself, and recording a physician or an administrator
+    # would attribute to them an act nobody authorised in their name. The target
+    # is ``usuario`` + that same id. Written inside the business transaction, so
+    # it exists if and only if the profile, account, link and acceptances do.
+    CUENTA_PACIENTE_AUTORREGISTRADA = "CUENTA_PACIENTE_AUTORREGISTRADA"
     # Clinical context (SCRUM-98). Written when an authenticated account cannot
     # be resolved to the clinical profile its role requires: a missing link, a
     # link the role does not allow, or more than one. The request is refused

@@ -88,8 +88,8 @@ def sesion() -> SesionDeAuditoria:
 # ---------------------------------------------------------------------------
 
 
-def test_el_catalogo_tiene_exactamente_once_acciones():
-    """Cuatro de SCRUM-70, cuatro del ciclo de cuentas de SCRUM-97 y tres de SCRUM-98.
+def test_el_catalogo_tiene_exactamente_doce_acciones():
+    """Cuatro de SCRUM-70, cuatro de SCRUM-97, tres de SCRUM-98 y una de SCRUM-110.
 
     El conjunto se escribe entero y no se cuenta: lo que vigila es que nadie
     anada un codigo sin decidir en que transaccion se escribe ni quien puede
@@ -104,6 +104,9 @@ def test_el_catalogo_tiene_exactamente_once_acciones():
         "CUENTA_MEDICO_PROVISIONADA",
         "CUENTA_DESACTIVADA",
         "CUENTA_REACTIVADA",
+        # SCRUM-110: el autorregistro de una paciente. El actor es la cuenta
+        # recien creada, en la transaccion que la crea: nadie mas lo hizo.
+        "CUENTA_PACIENTE_AUTORREGISTRADA",
         # SCRUM-98: una cuenta autenticada cuyo rol clinico no resuelve a un
         # perfil. Se escribe en transaccion propia, porque el handler que
         # bloquea no llega a ejecutarse.

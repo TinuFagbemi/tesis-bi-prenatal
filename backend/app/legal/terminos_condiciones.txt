@@ -1,0 +1,48 @@
+# Términos y condiciones de FetalAlert
+
+## 1. Qué es FetalAlert
+
+FetalAlert es un servicio de seguimiento prenatal. Un dispositivo FetalAlert mide tu frecuencia cardíaca, tu saturación de oxígeno y los movimientos de tu bebé; en este portal consultas tus mediciones y tu historial, y el médico asignado a tu embarazo las revisa.
+
+## 2. Tu cuenta
+
+- Creas tu cuenta acompañada por el personal de salud, que te asigna tu correo de acceso.
+- Tus datos deben ser verdaderos y estar al día. Si alguno cambia, avisa al personal de tu clínica.
+- Tu contraseña es personal: no la compartas con nadie.
+- Cada persona tiene una sola cuenta, y cada cédula y cada correo de acceso pueden registrarse una sola vez.
+- La cuenta queda activa al terminar el registro, y puedes iniciar sesión de inmediato con tu correo de acceso y tu contraseña.
+- Es una cuenta de paciente: solo te da acceso a tu propia información.
+
+## 3. No sustituye la atención médica
+
+FetalAlert no ofrece diagnóstico, tratamiento ni atención de urgencias, y no sustituye tus controles prenatales. Las alertas de colores son una ayuda para revisar tus mediciones y no son una valoración médica.
+
+Si tienes dolor, sangrado, fiebre, notas que tu bebé se mueve menos de lo habitual o te sientes mal, no esperes a una alerta: acude a tu centro de salud o a urgencias.
+
+## 4. Envío de las mediciones
+
+Cuando no hay conexión, tus mediciones se guardan y se envían más tarde. Por eso pueden tardar en aparecer en el portal y en llegar a tu médico. Tu médico no las revisa en tiempo real.
+
+## 5. Uso adecuado
+
+Usa FetalAlert solo para tu propio seguimiento. No intentes entrar con la cuenta de otra persona ni acceder a información que no es tuya.
+
+## 6. Disponibilidad
+
+Procuramos que el servicio esté disponible, pero puede interrumpirse por mantenimiento o por fallos técnicos.
+
+## 7. Desactivación
+
+Tu cuenta no se puede eliminar desde el portal. La clínica puede desactivarla si lo solicitas o si se usa en contra de estos términos.
+
+## 8. Privacidad
+
+El tratamiento de tus datos se describe en la política de privacidad, que aceptas junto con estos términos.
+
+## 9. Cambios
+
+Si estos términos cambian, tendrán una versión nueva y te pediremos que vuelvas a aceptarlos.
+
+## 10. Alcance de esta versión
+
+Esta versión de FetalAlert es un prototipo académico, desarrollado como parte de una tesis y usado en demostraciones. No es un servicio clínico en operación ni está validado clínicamente: todos sus datos son simulados y no corresponden a personas reales. No escribas en ella tus datos reales ni los de otra persona.

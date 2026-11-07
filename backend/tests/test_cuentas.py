@@ -1046,12 +1046,14 @@ def test_el_ci_ejecuta_la_suite_postgresql_de_cuentas_y_la_vigila():
     # pytest-scrum98-pub.xml (proteccion analitica), 15 con SCRUM-72
     # mediante pytest-scrum72-provision.xml (aprovisionamiento de la demo
     # sobre su base desechable) y 16 desde que SCRUM-99 anadio
-    # pytest-scrum99-pub.xml (publicacion clinica autorizada). Sigue siendo
+    # pytest-scrum99-pub.xml (publicacion clinica autorizada), y 17 con
+    # pytest-scrum110.xml (autorregistro como fetalalert_api). Sigue siendo
     # un numero exacto y no un ">=" a proposito: lo que vigila es que nadie
     # retire un reporte del guardian al anadir el suyo.
     assert '"pytest-scrum72-provision.xml": "SCRUM72_PROVISION_TEST_DATABASE_URL"' in guardian
     assert '"pytest-scrum99-pub.xml": "SCRUM99_PUB_TEST_DATABASE_URL"' in guardian
-    assert guardian.count('.xml": "SCRUM') == 16
+    assert '"pytest-scrum110.xml": "SCRUM110_TEST_DATABASE_URL"' in guardian
+    assert guardian.count('.xml": "SCRUM') == 17
 
 
 def test_la_migracion_no_usa_marcadores_que_psycopg_o_sqlalchemy_interpreten(sql_upgrade):

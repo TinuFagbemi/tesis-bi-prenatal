@@ -44,8 +44,10 @@ from tests.test_models import ONDELETE_ESPERADOS, TABLAS_ESPERADAS
 # sprint stacks on top of it. SCRUM-63 adds the second: idempotencia_solicitud.
 # SCRUM-69 adds the third, the analytic schema, which touches nothing here.
 # SCRUM-97 adds the fourth: ck_usuario_email_canonico and the role/link
-# triggers, on tables that already existed.
-CANTIDAD_DE_REVISIONES_ESPERADA = 6
+# triggers, on tables that already existed. SCRUM-98 and SCRUM-99 add the fifth
+# and the sixth, and SCRUM-110 the seventh: aceptacion_documento and the
+# self-registration function.
+CANTIDAD_DE_REVISIONES_ESPERADA = 7
 
 # Shape of the deployed schema, pinned so a silent drift in either the models or
 # the revisions fails here. UNIQUE went from 18 to 17 when the 1:1 between
@@ -70,17 +72,22 @@ APORTE_DEL_MAPA = {
     # cifra cuenta.
 }
 
+# SCRUM-110 anade aceptacion_documento: una tabla con su PRIMARY KEY, una llave
+# foranea hacia usuario con ON DELETE RESTRICT, un UNIQUE de tres columnas, tres
+# CHECK (el del enum documento_legal, sha256_hex y version_no_vacia) y el indice
+# de id_usuario.
 CANTIDADES_ESPERADAS = {
-    "tablas": 23,
-    "primary_key": 23,
-    "foreign_key": 26,
-    "on_delete_restrict": 16,
+    "tablas": 24,
+    "primary_key": 24,
+    "foreign_key": 27,
+    "on_delete_restrict": 17,
     "on_delete_cascade": 10,
-    "unique": 18,
-    "check": 31,
+    "unique": 19,
+    "check": 34,
     # 14 desde SCRUM-98: ix_lectura_biometrica_id_sesion, que la politica de
-    # esa tabla necesita y que la cascada del borrado tampoco tenia.
-    "indices": 14,
+    # esa tabla necesita y que la cascada del borrado tampoco tenia. 15 desde
+    # SCRUM-110: ix_aceptacion_documento_id_usuario.
+    "indices": 15,
 }
 
 CREATE_TABLE = re.compile(
