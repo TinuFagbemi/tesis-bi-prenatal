@@ -38,8 +38,10 @@ JS = DIRECTORIO_FRONTEND / "app.js"
 # Las graficas: las mismas salvaguardas de todo el frontend (sin
 # almacenamiento, sin endpoints del prototipo, sin clasificar lecturas).
 GRAFICAS = DIRECTORIO_FRONTEND / "graficas.js"
+# «Crear cuenta» (SCRUM-110): las mismas salvaguardas, y las suyas al final.
+REGISTRO = DIRECTORIO_FRONTEND / "registro.js"
 
-ARCHIVOS = (HTML, CSS, JS, GRAFICAS)
+ARCHIVOS = (HTML, CSS, JS, GRAFICAS, REGISTRO)
 
 
 def leer(ruta: Path) -> str:
@@ -441,10 +443,22 @@ def test_el_identificador_de_episodio_nunca_se_fabrica_en_la_pagina():
     assert "episodio.id_embarazo" in contenido
 
 
-def test_se_declara_que_los_datos_son_simulados():
+def test_se_declara_que_es_un_prototipo_con_datos_simulados():
+    # SCRUM-110: la tarjeta «Datos simulados» se retiró de «Acerca de». La
+    # pantalla sigue declarando el prototipo académico (tarjeta «Alcance»), y la
+    # aclaración de los datos simulados vive en los textos legales que el
+    # registro muestra antes de aceptar.
     contenido = leer(HTML)
-    assert "simulados" in contenido
-    assert "académico" in contenido
+    assert "Datos simulados" not in contenido
+    assert "Prototipo académico" in contenido
+    assert "No está validado clínicamente" in contenido
+
+    from app.legal import DOCUMENTOS_VIGENTES
+
+    for documento in DOCUMENTOS_VIGENTES.values():
+        texto = documento.texto.lower()
+        assert "prototipo académico" in texto
+        assert "datos son simulados" in texto
 
 
 # ---------------------------------------------------------------------------
@@ -597,3 +611,87 @@ def test_el_panel_pinta_una_sola_lectura_coherente():
         "lectura.semana_gestacion",
     ):
         assert campo in contenido, campo
+
+
+# ---------------------------------------------------------------------------
+# «Crear cuenta» (SCRUM-110, R2)
+# ---------------------------------------------------------------------------
+
+
+def test_registro_solo_habla_con_el_adaptador_local():
+    contenido = leer(REGISTRO)
+
+    assert "http://" not in contenido
+    assert "https://" not in contenido
+    assert "'/adaptador/registro'" in contenido
+    assert "'/adaptador/registro/documentos'" in contenido
+    assert "/api/v1/" not in contenido
+
+
+def test_registro_no_inyecta_marcado():
+    """Los textos legales y los mensajes se pintan con textContent."""
+    contenido = leer(REGISTRO)
+
+    assert "innerHTML" not in contenido
+    assert "insertAdjacentHTML" not in contenido
+    assert "outerHTML" not in contenido
+
+
+def test_registro_se_carga_sin_tocar_los_scripts_del_pie():
+    html = leer(HTML)
+    cabeza = html.split("</head>", 1)[0]
+
+    assert '<script src="registro.js" defer></script>' in cabeza
+
+
+def test_el_formulario_tiene_los_campos_del_contrato_y_los_limites_de_las_columnas():
+    """Los ``maxlength`` salen del modelo: si una columna cambia, esto falla."""
+    import re
+
+    from app.models.clinico import Paciente, TelefonoPaciente
+    from app.schemas.autenticacion import LONGITUD_MAXIMA_PASSWORD
+    from app.schemas.registro import AutorregistroEntrada
+    from app.services.correo import LONGITUD_MAXIMA_EMAIL
+
+    html = leer(HTML)
+    longitud = lambda modelo, columna: modelo.__table__.c[columna].type.length  # noqa: E731
+    esperados = {
+        "primer_nombre": longitud(Paciente, "primer_nombre"),
+        "segundo_nombre": longitud(Paciente, "segundo_nombre"),
+        "apellido_paterno": longitud(Paciente, "apellido_paterno"),
+        "apellido_materno": longitud(Paciente, "apellido_materno"),
+        "cedula": longitud(Paciente, "cedula"),
+        "email": LONGITUD_MAXIMA_EMAIL,
+        "celular": longitud(TelefonoPaciente, "valor_contacto"),
+        "password": LONGITUD_MAXIMA_PASSWORD,
+        "confirmacion_password": LONGITUD_MAXIMA_PASSWORD,
+    }
+    for nombre, maximo in esperados.items():
+        etiqueta = re.search(rf'<input[^>]*id="reg-{nombre}"[^>]*>', html)
+        assert etiqueta, nombre
+        assert f'name="{nombre}"' in etiqueta.group(0), nombre
+        assert f'maxlength="{maximo}"' in etiqueta.group(0), nombre
+    # Cada campo de texto del contrato tiene su control en el formulario.
+    for nombre in AutorregistroEntrada.model_fields:
+        if not nombre.startswith(("acepta_", "version_")):
+            assert f'id="reg-{nombre}"' in html, nombre
+
+
+def test_las_casillas_empiezan_desmarcadas_y_no_hay_rol_ni_estado_en_el_formulario():
+    import re
+
+    html = leer(HTML)
+    for casilla in ("reg-acepta-politica", "reg-acepta-terminos"):
+        etiqueta = re.search(rf'<input[^>]*id="{casilla}"[^>]*>', html).group(0)
+        assert 'type="checkbox"' in etiqueta
+        assert "checked" not in etiqueta
+    formulario = html.split('id="form-registro"', 1)[1].split("</form>", 1)[0]
+    for prohibido in ('name="rol"', 'name="activo"', "id_paciente", "id_usuario", "id_clinica"):
+        assert prohibido not in formulario, prohibido
+
+
+def test_el_login_ya_no_dice_que_las_cuentas_las_crea_el_personal():
+    html = leer(HTML)
+
+    assert "Las cuentas las crea el personal" not in html
+    assert 'id="btn-crear-cuenta"' in html

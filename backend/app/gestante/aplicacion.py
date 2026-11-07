@@ -51,6 +51,9 @@ RUTAS_CON_CREDENCIALES = frozenset(
         # La misma contrasena que el inicio de sesion (correccion previa a R3,
         # SCRUM-110).
         "/adaptador/reautenticar",
+        # Ademas de la contrasena, los datos personales del formulario
+        # (SCRUM-110, R2).
+        "/adaptador/registro",
     }
 )
 
