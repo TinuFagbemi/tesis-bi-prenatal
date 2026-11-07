@@ -400,9 +400,9 @@ def crear_router(contexto: ContextoAdaptador) -> APIRouter:
 
     # -- Archivos de la interfaz ----------------------------------------
     #
-    # Se sirven como cuatro rutas explicitas y no como un directorio montado.
-    # Son cuatro archivos conocidos, asi que no existe un nombre que el cliente
-    # pueda elegir y, con ello, no existe recorrido de rutas que impedir.
+    # Se sirven como rutas explicitas y no como un directorio montado. Son
+    # archivos conocidos, asi que no existe un nombre que el cliente pueda
+    # elegir y, con ello, no existe recorrido de rutas que impedir.
 
     def archivo(nombre: str, tipo: str) -> FileResponse:
         # ``no-cache`` obliga a revalidar con el ETag en cada carga. Sin esta
@@ -431,6 +431,22 @@ def crear_router(contexto: ContextoAdaptador) -> APIRouter:
         # Las graficas se sirven desde aqui y no desde una CDN: la pagina tiene
         # que poder dibujarlas sin internet cuando ya tiene los datos.
         return archivo("graficas.js", "text/javascript; charset=utf-8")
+
+    @router.get("/resumen_pdf.js", include_in_schema=False)
+    def resumen_pdf() -> FileResponse:
+        return archivo("resumen_pdf.js", "text/javascript; charset=utf-8")
+
+    # El motor del PDF de «Guardar mi resumen» (pdfmake y sus fuentes, en
+    # frontend/gestante/vendor/). Tambien desde aqui y no desde una CDN: la
+    # descarga tiene que funcionar sin internet y sin enviar datos fuera. La
+    # pagina lo pide solo al descargar, no en cada visita.
+    @router.get("/vendor/pdfmake.min.js", include_in_schema=False)
+    def motor_pdf() -> FileResponse:
+        return archivo("vendor/pdfmake.min.js", "text/javascript; charset=utf-8")
+
+    @router.get("/vendor/vfs_fonts.js", include_in_schema=False)
+    def fuentes_pdf() -> FileResponse:
+        return archivo("vendor/vfs_fonts.js", "text/javascript; charset=utf-8")
 
     # -- Inicio de sesion ------------------------------------------------
 

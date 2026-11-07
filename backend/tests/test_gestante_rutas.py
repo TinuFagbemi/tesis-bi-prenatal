@@ -170,6 +170,9 @@ def iniciar_sesion(cliente: TestClient, **cuerpo):
         ("/styles.css", "--clr-purple", "text/css"),
         ("/app.js", "adaptador", "text/javascript"),
         ("/graficas.js", "FetalAlertGraficas", "text/javascript"),
+        ("/resumen_pdf.js", "FetalAlertResumenPdf", "text/javascript"),
+        ("/vendor/pdfmake.min.js", "pdfMake", "text/javascript"),
+        ("/vendor/vfs_fonts.js", "Roboto-Regular.ttf", "text/javascript"),
     ],
 )
 def test_sirve_los_archivos_de_la_interfaz(tmp_path, ruta, fragmento, tipo):
@@ -182,6 +185,16 @@ def test_sirve_los_archivos_de_la_interfaz(tmp_path, ruta, fragmento, tipo):
     # Revalidar siempre: un app.js en caché anterior a una corrección seguiría
     # ejecutándose sin que nadie lo note.
     assert respuesta.headers["cache-control"] == "no-cache"
+
+
+@pytest.mark.parametrize(
+    "ruta", ["/vendor/LICENCIAS.md", "/vendor/otro.js", "/pruebas/app.comportamiento.test.js"]
+)
+def test_solo_se_sirven_los_archivos_previstos(tmp_path, ruta):
+    """Rutas explicitas, no un directorio montado: nada mas sale de frontend/."""
+    cliente, _, _, _ = construir_cliente(tmp_path)
+
+    assert cliente.get(ruta).status_code == 404
 
 
 def test_la_interfaz_se_sirve_aunque_la_api_central_no_responda(tmp_path):

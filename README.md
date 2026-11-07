@@ -1911,6 +1911,19 @@ consulta. Las fechas se muestran en español
 y en hora de Panamá, sea cual sea el navegador; las fechas de calendario
 (`fecha_inicio`) no cambian de día por la zona horaria.
 
+### Guardar mi resumen
+
+En «Mi historial», **Guardar mi resumen** abre una vista previa del embarazo
+elegido allí y **Descargar PDF** descarga el documento con la estética de la
+interfaz: el resumen (últimos valores y hasta 10 lecturas) o el historial
+completo del período. El PDF se genera en el dispositivo con pdfmake, que el
+portal sirve desde `frontend/gestante/vendor/` (sin CDN ni servicios
+externos) y solo carga al descargar. Se arma con lo ya consultado y no se
+guarda nada en el navegador. Si mientras se prepara se cambia el contenido,
+se sale del resumen o se confirma el cierre de sesión, esa descarga no se
+entrega. Contenido, límites, pruebas y comprobaciones manuales pendientes en
+`docs/gestante_guardar_resumen.md`.
+
 ### Estado de conexión y sesión con el servidor
 
 No hay indicador permanente en el encabezado (la píldora «Conectada al
