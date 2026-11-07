@@ -2524,3 +2524,178 @@ contra PostgreSQL se añadieron a suites que el CI ya ejecuta.
 El recorrido completo de la demostración con el portal, el nodo, Adminer y
 Power BI (SCRUM-106); el archivado de colas; una interfaz web; cualquier cambio
 en Power BI, en RLS o en la autenticación.
+
+## SCRUM-110 — Autorregistro de pacientes (fase R1: backend)
+
+### Autorregistro, no habilitación
+
+La paciente crea su propia cuenta desde «Crear cuenta». Un médico puede
+ayudarla en persona a llenar el formulario, pero no inicia sesión, no aprueba
+nada y no figura como autor. Por eso la operación es una ruta nueva sin sesión
+previa, `POST /api/v1/registro/pacientes`, y no una ampliación de
+`/api/v1/cuentas`: esas rutas siguen siendo solo de ADMIN, y MEDICO no gana
+ningún permiso.
+
+### Una función, no privilegios para el proceso web
+
+`fetalalert_api` no tiene privilegios sobre `operacional.paciente` ni
+`telefono_paciente` desde SCRUM-98, y sigue sin tenerlos. Recibe solo
+`EXECUTE` sobre `seguridad.autorregistrar_paciente`, una función SECURITY
+DEFINER que pertenece a `fetalalert_provision_owner` y fija la forma de lo que
+se crea: perfil nuevo, celular principal, cuenta PACIENTE activa, vínculo y las
+dos aceptaciones. No recibe un identificador de perfil, así que no puede
+vincular una cuenta a un perfil existente, y no recibe rol ni estado.
+
+Se reutiliza `fetalalert_provision_owner` en lugar de crear un rol nuevo: ya
+es el dueño de los helpers de provisión de SCRUM-97, crear una cuenta es la
+misma responsabilidad, y un rol nuevo obligaría a cambiar el bootstrap de roles
+en cada entorno. Recibe INSERT en las cinco tablas, USAGE en sus cuatro
+secuencias y una política INSERT en `usuario_paciente` dirigida solo a él.
+
+### Una transacción
+
+La función hace todas las inserciones en una sentencia; el router añade la
+auditoría en la misma transacción y confirma una sola vez. Cualquier fallo —de
+la función, de la auditoría o del trigger diferido de rol y vínculo en el
+commit— revierte todo. La respuesta 201 solo sale después del commit.
+
+### Auditoría sin atribuciones falsas
+
+`CUENTA_PACIENTE_AUTORREGISTRADA` tiene como actor a la cuenta recién creada:
+la paciente se registró a sí misma. No se registra a ningún médico ni
+administrador, porque ninguno autorizó la operación.
+
+### Aceptaciones versionadas
+
+Los textos viven en `backend/app/legal/` como `.txt` (`.dockerignore` excluye
+`*.md` de la imagen) y se sirven con `GET /api/v1/registro/documentos`. El
+servidor exige `true` en las dos casillas y la versión vigente de cada texto, y
+guarda en `aceptacion_documento` la versión, el SHA-256 del texto que él sirve
+y la fecha de PostgreSQL. Cambiar un texto obliga a cambiar su versión: una
+prueba fija las huellas.
+
+### Validaciones: las del modelo, y tres más justificadas
+
+Longitudes leídas de las columnas; correo con el mismo tipo que el inicio de
+sesión, guardado igual en el perfil y en la cuenta. Además: rechazar
+obligatorios vacíos o solo con espacios, guardar opcionales vacíos como NULL y
+exigir una fecha de nacimiento real y no futura (día clínico de Panamá). No hay
+rango de edad, formato de cédula ni política de contraseña nuevos, y la
+contraseña no se recorta ni se transforma.
+
+### Duplicados, carreras y abuso
+
+Las restricciones UNIQUE de cédula, correo del perfil y correo de la cuenta
+deciden los duplicados y las carreras; la respuesta es un único 409 genérico
+que no dice cuál de los dos valores ya existía. Un límite por origen y global,
+en una ventana deslizante en memoria (10 y 30 por 15 minutos por omisión),
+corta antes de validar y de hashear. Tras el adaptador local del portal todas
+las solicitudes llegan desde la misma dirección: en la práctica el límite es
+global para el portal. Un reinicio de la API lo vacía.
+
+### Lo que la respuesta y los logs no llevan
+
+El 201 lleva dos identificadores, el rol y el estado. El 422 de esta ruta no
+devuelve valores, como el del inicio de sesión. Los logs registran solo la
+clase y el SQLSTATE de un error.
+
+### Despliegue
+
+Requiere `alembic upgrade head` en el entorno de la demostración. Un respaldo
+del PR #24 tomado antes de esa migración no tiene la tabla ni la función: el
+baseline común habrá que volver a tomarlo después de aplicarla.
+
+### Alembic no debe mostrar la URL de conexión
+
+`alembic/env.py` pasa `ALEMBIC_DATABASE_URL` a `set_main_option`, que usa la
+interpolación de configparser y reserva `%`. Una contraseña con caracteres
+reservados llega a la URL codificada con `%`. configparser la rechazaba con un
+error cuyo mensaje incluía la URL completa, contraseña incluida, y eso ocurrió
+durante la validación local de R1. Ahora `env.py` duplica `%` antes de
+guardarla, que es el escape que configparser deshace al leer: la URL llega
+intacta al motor. `test_config_secretos.py` renderiza las migraciones con una
+URL que lleva `%`, comprueba que la clave no aparece en ninguna salida y que la
+URL que queda en la configuración es la original. Esa prueba falla con el
+`env.py` anterior.
+
+### Fuera de esta fase
+
+El formulario y los modales (R2) y la validación completa con tres ciclos de
+registro, inicio de sesión y restauración (R3).
+
+## SCRUM-110 — Autorregistro de pacientes (fase R2: formulario en el portal)
+
+### Un archivo propio y un panel dentro del inicio de sesión
+
+«Crear cuenta» vive en `registro.js`, no en `app.js`. El formulario y su
+desenlace son paneles dentro de `vista-login`, así que `app.js` los muestra y
+los oculta con esa vista sin saber que existen. Hay dos razones. El registro no
+comparte estado con el portal: no hay sesión. Y el PR #22 reescribe buena parte
+de `app.js`: con `app.js` sin tocar, las dos ramas no compiten por las mismas
+líneas.
+
+### El adaptador valida antes de reenviar
+
+`POST /adaptador/registro` aplica `AutorregistroEntrada`, el mismo contrato de
+R1, antes de llamar a la API. No es una segunda regla de negocio: el cupo de
+registro es compartido por todo el portal, y un formulario que de todos modos
+iba a ser rechazado no debe gastarlo. El servidor vuelve a validarlo todo.
+
+### «No se envió» y «no se sabe» son desenlaces distintos
+
+Una cuenta que se crea y cuya respuesta se pierde no puede presentarse como un
+fallo. El cliente HTTP clasifica por la excepción de httpx:
+
+- conexión rechazada, conexión agotada o pool sin conexión libre significan que
+  la petición no salió (503, «no se envió»);
+- cualquier otra excepción significa que pudo llegar (504, «no sabemos si se
+  creó»).
+
+En el navegador, perder la conexión con el adaptador cuenta también como «no se
+sabe». Nunca se reenvía automáticamente. Se propone iniciar sesión para
+comprobarlo, y reenviar exige escribir de nuevo la contraseña, que se vacía al
+enviar. La prueba real lo confirmó: con la respuesta cortada por un proxy, la
+cuenta existía y el inicio de sesión funcionó.
+
+### Ningún texto del servidor llega a la pantalla
+
+Los mensajes son de `registro.js`. Del 422 solo pasan los nombres de campo que
+el formulario conoce, filtrados primero en el adaptador.
+
+### Leer no es aceptar
+
+Abrir un documento no marca su casilla. Las dos casillas empiezan
+desmarcadas y deshabilitadas hasta que llegan los textos. Sin textos no se
+puede aceptar ni enviar.
+
+### Textos del portal que dejaron de ser ciertos
+
+El inicio de sesión y «Acerca de» decían que las cuentas las crea el personal.
+Ahora dicen que cada gestante crea la suya, siempre acompañada por el personal
+de salud, que le asigna su correo de acceso.
+
+### Revisión manual de la interfaz y decisiones finales
+
+La interfaz se revisó a mano antes de publicar, con el backend real y una base
+temporal ya eliminada. De esa revisión salen cuatro decisiones:
+
+- **El acompañamiento es la norma.** El formulario dice que el personal de
+  salud acompaña a la gestante mientras llena sus datos, no que «puede»
+  hacerlo.
+- **El correo es asignado.** Se llama «correo de acceso» y solo el registro
+  exige el formato `pacienteNN@example.com` («paciente», al menos dos dígitos,
+  dominio exacto `example.com`), el de las cuentas del dataset. La regla está
+  en el servidor (`PATRON_EMAIL_REGISTRO`) y en el formulario, con un mensaje
+  fijo que da un ejemplo; un 422 del servidor sobre el correo muestra ese mismo
+  mensaje. El inicio de sesión y las cuentas existentes no cambian.
+- **La pantalla no lleva avisos de datos ficticios.** Se retiraron la nota del
+  formulario y la tarjeta «Datos simulados» de «Acerca de». La tarjeta
+  «Alcance» sigue diciendo que es un prototipo académico no validado
+  clínicamente.
+- **Los textos legales hablan como los de un servicio, sin dejar de decir la
+  verdad.** La versión `2026-11-v3` cita la Ley 81 de 2019, el consentimiento
+  para datos de salud y los derechos ARCO, y describe quién ve qué. Solo
+  promete lo que el sistema hace, y cierra con «Alcance de esta versión»:
+  prototipo académico, datos simulados, no es un servicio clínico en
+  operación. Las versiones `v1` y `v2` no se publicaron; la `v2` solo llegó a
+  aceptarse en la base temporal de la revisión.
