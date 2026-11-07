@@ -2699,3 +2699,34 @@ temporal ya eliminada. De esa revisión salen cuatro decisiones:
   prototipo académico, datos simulados, no es un servicio clínico en
   operación. Las versiones `v1` y `v2` no se publicaron; la `v2` solo llegó a
   aceptarse en la base temporal de la revisión.
+
+## SCRUM-110 — Autorregistro de pacientes (fase R3: registro y restauración)
+
+### El mecanismo de restauración, tal cual
+
+R3 usó `scripts/entorno_demo.py` (PR #24) sin modificarlo, sobre una base
+exclusiva y con el portal en su configuración por omisión. Así, la barrera que
+impide restaurar con el portal en marcha se ejercita como en la demostración.
+El baseline salió del generador oficial, con la migración del registro aplicada
+y cuatro episodios de demostración sin mediciones.
+
+### La misma cédula y el mismo correo en cada ciclo
+
+Si una restauración dejara la cuenta del ensayo, el siguiente registro con los
+mismos datos respondería 409. Los tres ciclos registraron con 201 y obtuvieron
+los mismos identificadores, porque las secuencias también vuelven al baseline.
+
+### El esquema `seguridad` se comprueba aparte
+
+La huella del mecanismo no incluye `seguridad`, donde está la función de
+registro. La restauración lo recupera, pero la comparación no lo vigila. R3
+comparó en cada ciclo sus funciones, propietarios y permisos, y los privilegios
+de `fetalalert_api`. Añadir `seguridad` a `ESQUEMAS` queda propuesto, sin
+aplicar: no es un fallo de la restauración y el mecanismo tiene su propio
+responsable.
+
+### Un equipo validado no es el otro
+
+R3 se validó en un equipo. El ensayo en el equipo de presentación necesita su
+propio baseline con la migración y se registra aparte; este resultado no lo
+sustituye.

@@ -145,13 +145,30 @@ El PR #22 («Guardar mi resumen») modifica `app.js`, `index.html`, `styles.css`
 
 ## 5. Despliegue en el entorno de la demostración
 
-Hasta que se apruebe, no se ha aplicado en ninguna base.
+Hasta que se apruebe, solo se ha aplicado en bases desechables y en la base exclusiva de la validación R3. No se ha aplicado en la base de la demostración de ningún equipo.
 
 1. Detener la API.
 2. Con la credencial de mantenimiento: `cd backend; alembic upgrade head`. El rol `fetalalert_provision_owner` ya existe desde SCRUM-98; el bootstrap de roles no cambia.
 3. Reconstruir la imagen y arrancar la API: `docker compose up -d --build api`.
 
 **Consecuencia para el baseline común (PR #24).** Un respaldo tomado antes de la migración no tiene la tabla ni la función. Restaurarlo con el código nuevo dejaría la API sin poder registrar. El baseline común se vuelve a tomar después de aplicar la migración, y Demo Control seguirá informando FAIL en «Migraciones» hasta que la base esté en el head.
+
+### Validación con restauración (R3)
+
+Validé el registro junto con el mecanismo de restauración del PR #24, sin modificarlo, en mi computadora y sobre una base exclusiva. El baseline salió del generador oficial: migración al head, carga y `provisionar_demo.py --gestantes 4`, y su respaldo se tomó con `entorno_demo.py respaldar`.
+
+Hice tres ciclos con la misma cédula y el mismo correo. Cada uno siguió estos pasos:
+
+1. Registro desde el portal, inicio de sesión inmediato, portal vacío y cierre de sesión.
+2. Comprobación en PostgreSQL del perfil, la cuenta, el celular, el vínculo y las aceptaciones.
+3. Servicios detenidos y `entorno_demo.py restaurar`, con resultado IDÉNTICO.
+4. Comprobación de que la cuenta desapareció y de que totales, archivos del portal, esquema `seguridad` y permisos de la API coinciden con el baseline.
+
+El siguiente registro con los mismos datos volvió a funcionar.
+
+**Límite de la huella del PR #24.** No incluye el esquema `seguridad`, donde vive `seguridad.autorregistrar_paciente`. La restauración lo recupera (el volcado es completo), pero `verificar` no detectaría una diferencia en él; R3 lo comprobó aparte en cada ciclo. Añadir `seguridad` a `ESQUEMAS` queda como mejora propuesta, sin aplicar.
+
+**No cubre el equipo de presentación**, que debe construir su baseline con la migración y repetir el ensayo. El detalle está en `docs/validacion_scrum110_r3/INFORME.md`.
 
 ## 6. Pruebas
 
@@ -170,4 +187,6 @@ La limpieza por identificadores de esa suite es una herramienta de prueba: el en
 
 **Recorrido contra el backend real (R2).** Chrome headless recorrió el navegador, el adaptador real, un proxy de prueba, la API real y PostgreSQL en una base desechable. Hizo dos pasadas, una de ellas sobre el código final. Las capturas de escritorio y móvil, los registros y las comprobaciones en la base están en `docs/validacion_scrum110_r2/`.
 
-**Pendiente para CI, sin cambios desde R1:** `test_migration_postgresql.py` (exige `scrum52_validacion_tmp`), `test_bootstrap_postgresql.py` (crea y borra roles del servidor) y las demás suites de PostgreSQL con guardián propio. No se han ejecutado en local y no se declaran aprobadas.
+**Suites que solo corren en CI:** `test_migration_postgresql.py` (exige `scrum52_validacion_tmp`), `test_bootstrap_postgresql.py` (crea y borra roles del servidor) y las demás suites de PostgreSQL con guardián propio. No se ejecutan en local; su resultado es el del CI del PR, donde pasaron.
+
+**Validación con restauración (R3).** Tres ciclos reales de registro, inicio de sesión, verificación y restauración con `entorno_demo.py`, en una base exclusiva de mi equipo (§5). La evidencia resumida está en `docs/validacion_scrum110_r3/INFORME.md`.
