@@ -4,7 +4,8 @@
     {
       "dispositivo": "DEMO-SCRUM72-01",
       "sesiones": 1,
-      "tipo": "SIGNOS_MATERNOS"
+      "tipo": "SIGNOS_MATERNOS",
+      "lecturas": 5
     }
   ]
 }

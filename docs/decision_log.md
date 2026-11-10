@@ -2524,3 +2524,34 @@ contra PostgreSQL se añadieron a suites que el CI ya ejecuta.
 El recorrido completo de la demostración con el portal, el nodo, Adminer y
 Power BI (SCRUM-106); el archivado de colas; una interfaz web; cualquier cambio
 en Power BI, en RLS o en la autenticación.
+
+## Historial de paciente01 y PBIX de validación
+
+### El historial entra por la API, no por SQL
+
+`scripts/historial_demo.py` envía cada sesión a `POST /api/v1/sesiones-monitoreo`
+como paciente01, con claves de idempotencia deterministas. Así pasa por las
+mismas comprobaciones de rol, propiedad, dispositivo, semana e idempotencia que
+una captura real, y repetir la carga no duplica nada. Solo cubre semanas
+completas: la semana en curso queda libre para las capturas en vivo.
+
+### Cinco lecturas por sesión de signos maternos en los escenarios A, B y C
+
+Se tomó del commit `10106c3` de SCRUM-109 la parte compartida de «lecturas por
+sesión», sin modificarla. Así, las capturas en vivo tienen la misma forma que el
+dataset y el historial. Sin el campo `lecturas`, la captura es la de siempre.
+
+### El PBIX de validación se versiona
+
+En SCRUM-99 el PBIX quedó fuera del repositorio. Ahora se incorpora
+`powerbi/FetalAlert_validacion_final.pbix`, con su SHA-256 en
+`docs/powerbi_validacion.md`, para que la validación del rol `Medico` y del
+resumen administrativo se pueda reproducir sobre el mismo archivo. Es un binario:
+los cambios se revisan abriéndolo, no por diferencias de texto. En el archivo
+no aparecen las contraseñas de PostgreSQL ni las del `.env` con que se
+comprobó, y cada equipo cambia el origen y usa su propia clave de
+`fetalalert_powerbi`.
+
+El archivo reúne las perspectivas médica y administrativa. No se crea un rol de
+administración ni un modelo exclusivamente administrativo: quedan para el
+despliegue, y la separación por páginas no separa el acceso.

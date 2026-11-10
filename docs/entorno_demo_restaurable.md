@@ -14,14 +14,18 @@ Todos los datos son simulados y completamente ficticios.
 | `scripts/escenario_demo.py ejecutar ESCENARIO.json` | Captura, inicia sesión con la cuenta de cada gestante, sincroniza y verifica la llegada única. `verificar REGISTRO.json`, después del ETL, comprueba también los hechos. |
 | `scripts/entorno_demo.py respaldar \| verificar \| restaurar --carpeta X` | Respaldo de la base y de `data/gestante`, comparación con el respaldo y restauración. |
 
-Un escenario es un JSON con las gestantes por su dispositivo y cuántas sesiones
-captura cada una (una lectura por sesión):
+Un escenario es un JSON con las gestantes por su dispositivo, cuántas sesiones
+captura cada una y de qué tipo. Con `"lecturas": 5`, cada sesión de signos
+maternos lleva 5 lecturas, una por minuto y cada una con FC y SpO₂, como el
+dataset y el historial de paciente01. Cada sesión de movimientos fetales lleva
+un único conteo. El campo es opcional: sin él, cada sesión lleva una lectura.
+A, B y C lo usan.
 
 ```json
 {"nombre": "C-varias-gestantes", "concurrente": true,
  "gestantes": [
-   {"dispositivo": "DEMO-SCRUM72-01", "sesiones": 2, "tipo": "SIGNOS_MATERNOS"},
-   {"dispositivo": "DEMO-GESTANTE-03", "sesiones": 3, "tipo": ["MOVIMIENTOS_FETALES", "SIGNOS_MATERNOS"]}]}
+   {"dispositivo": "DEMO-SCRUM72-01", "sesiones": 2, "tipo": "SIGNOS_MATERNOS", "lecturas": 5},
+   {"dispositivo": "DEMO-GESTANTE-03", "sesiones": 3, "tipo": ["MOVIMIENTOS_FETALES", "SIGNOS_MATERNOS"], "lecturas": 5}]}
 ```
 
 ## Qué garantiza la restauración
@@ -84,11 +88,11 @@ Están en `scripts/escenarios_demo/`. Se ejecutan con
 `python scripts/escenario_demo.py ejecutar scripts/escenarios_demo/A.json`, y
 después del ETL se comprueban con `verificar <registro>`.
 
-| Escenario | Gestantes | Sesiones | Embarazos |
-|---|---|---|---|
-| A | `DEMO-SCRUM72-01` | 1 | 130 |
-| B | `DEMO-GESTANTE-02` | 4, alternando signos maternos y movimientos fetales | 131 |
-| C | `DEMO-SCRUM72-01`, `-03` y `-04`, a la vez | 2, 3 y 5 | 130, 132 y 133 |
+| Escenario | Gestantes | Sesiones | Lecturas | Embarazos |
+|---|---|---|---|---|
+| A | `DEMO-SCRUM72-01` | 1 de signos maternos | 5 | 130 |
+| B | `DEMO-GESTANTE-02` | 4, alternando signos maternos y movimientos fetales | 5 + 1 + 5 + 1 = 12 | 131 |
+| C | `DEMO-SCRUM72-01`, `-03` y `-04`, a la vez | 2, 3 y 5 | 10, 1 + 5 + 1 = 7 y 25 | 130, 132 y 133 |
 
 En Power BI, con «Ver como rol Medico», `medico01@example.com` ve los embarazos
 130 a 132 y `medico03@example.com` ve el 133. En `v_resumen_administrativo` las
@@ -131,14 +135,17 @@ equipos.
 3. `python scripts/bootstrap_roles.py aplicar`, después
    `cd backend; alembic upgrade head; cd ..` y por último
    `python scripts/load_mock_data.py`. Debe informar 1180 lecturas.
-4. `python scripts/provisionar_demo.py provisionar --gestantes 4`.
+4. `python scripts/provisionar_demo.py provisionar --gestantes 4`. Después, con la
+   API en marcha, `python scripts/historial_demo.py cargar`: el historial de
+   paciente01 en el embarazo 130 (ver `docs/historial_demo_paciente01.md`).
 5. `docker compose up -d api` y `python scripts/etl_analitico.py ejecutar`.
 6. Demo Control, opción 1: `LISTO PARA DEMO`.
 7. Con la API detenida: `python scripts/entorno_demo.py respaldar --carpeta <respaldo>`.
    Ese respaldo es la base limpia de **ese** equipo.
-8. Power BI Desktop: conectar a `127.0.0.1:<POSTGRES_PORT>`, a la base del `.env`,
-   con `fetalalert_powerbi` y sin cifrado (el servidor tiene `ssl=off`).
-   Importar las vistas de `publicacion` (ver `docs/proteccion_analitica.md` §8).
+8. Power BI Desktop: abrir `powerbi/FetalAlert_validacion_final.pbix` y cambiar su
+   origen a `127.0.0.1:<POSTGRES_PORT>` y a la base del `.env`, con
+   `fetalalert_powerbi`, su clave local y sin cifrado (el servidor tiene
+   `ssl=off`). Los pasos están en `docs/powerbi_validacion.md`.
 
 ### Validación antes de darlo por listo
 
