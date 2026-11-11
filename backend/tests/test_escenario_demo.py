@@ -57,7 +57,7 @@ def test_un_escenario_valido_se_carga(esc, tmp_path):
 
 @pytest.mark.parametrize(
     "archivo, gestantes, sesiones",
-    [("A.json", 1, 1), ("B.json", 1, 4), ("C.json", 3, 10)],
+    [("A.json", 1, 2), ("B.json", 1, 4), ("C.json", 3, 10)],
 )
 def test_los_escenarios_de_la_sustentacion_son_validos(esc, archivo, gestantes, sesiones):
     escenario = esc.cargar_escenario(RUTA_SCRIPT.parent / "escenarios_demo" / archivo)

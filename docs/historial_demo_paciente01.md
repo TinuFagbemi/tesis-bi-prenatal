@@ -99,10 +99,10 @@ nada más de esa rama: ni el escenario `S109.json` ni sus scripts.
 | `backend/app/gestante/movimientos.py` | `registrar_sesion_simulada(..., lecturas=1)` lo pasa a la función anterior. |
 | `scripts/dispositivo_gestante.py` | Opción `--lecturas N` (por omisión 1). |
 | `scripts/escenario_demo.py` | Campo opcional `"lecturas"` por gestante (validado 1–10), espaciado de sesiones según las lecturas y `verificar` con las lecturas esperadas por sesión (los registros antiguos, sin ese dato, valen 1). |
-| `scripts/escenarios_demo/A.json` | `"lecturas": 5` (paciente01, `DEMO-SCRUM72-01`). |
+| `scripts/escenarios_demo/A.json` | `"lecturas": 5` (paciente01, `DEMO-SCRUM72-01`), y dos sesiones: una de signos maternos y una de movimientos fetales (5 + 1 lecturas). |
 | `scripts/escenarios_demo/B.json` | `"lecturas": 5` (`DEMO-GESTANTE-02`), por coherencia con el dataset aunque esta gestante no tiene historial nuevo. |
 | `scripts/escenarios_demo/C.json` | `"lecturas": 5` en sus tres gestantes, por la misma razón. |
-| `docs/entorno_demo_restaurable.md` | La frase «una lectura por sesión» y el ejemplo de escenario ahora describen `"lecturas"`; la tabla de escenarios indica cuántas lecturas añade cada uno (A 5, B 12, C 10 + 7 + 25). |
+| `docs/entorno_demo_restaurable.md` | La frase «una lectura por sesión» y el ejemplo de escenario ahora describen `"lecturas"`; la tabla de escenarios indica cuántas lecturas añade cada uno (A 5 + 1, B 12, C 10 + 7 + 25). |
 | `README.md` | Uso de `--lecturas 5` en el dispositivo, y fila del embarazo 130 con el historial y las capturas simuladas (antes decía «solo las sesiones registradas desde el portal»). |
 
 Pruebas añadidas en `test_gestante_movimientos.py`, `test_gestante_dispositivo.py`

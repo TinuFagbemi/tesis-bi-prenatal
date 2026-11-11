@@ -2,7 +2,10 @@
 
 Permite ejecutar la demostración tantas veces como haga falta y volver siempre al
 mismo punto de partida: el dataset canónico (1180 lecturas, 1180 hechos) más N
-episodios de demostración, sin lecturas, auditoría ni idempotencia residuales.
+episodios de demostración, sin auditoría ni idempotencia residuales. Todos los
+episodios empiezan sin lecturas, salvo el de paciente01 (embarazo 130), que trae
+el historial simulado de sus semanas completas; sus conteos dependen de la fecha
+de carga y están en `docs/historial_demo_paciente01.md`.
 Todos los datos son simulados y completamente ficticios.
 
 ## Piezas
@@ -90,7 +93,7 @@ después del ETL se comprueban con `verificar <registro>`.
 
 | Escenario | Gestantes | Sesiones | Lecturas | Embarazos |
 |---|---|---|---|---|
-| A | `DEMO-SCRUM72-01` | 1 de signos maternos | 5 | 130 |
+| A | `DEMO-SCRUM72-01` | 2: signos maternos y movimientos fetales | 5 + 1 = 6 | 130 |
 | B | `DEMO-GESTANTE-02` | 4, alternando signos maternos y movimientos fetales | 5 + 1 + 5 + 1 = 12 | 131 |
 | C | `DEMO-SCRUM72-01`, `-03` y `-04`, a la vez | 2, 3 y 5 | 10, 1 + 5 + 1 = 7 y 25 | 130, 132 y 133 |
 
@@ -135,8 +138,9 @@ equipos.
 3. `python scripts/bootstrap_roles.py aplicar`, después
    `cd backend; alembic upgrade head; cd ..` y por último
    `python scripts/load_mock_data.py`. Debe informar 1180 lecturas.
-4. `python scripts/provisionar_demo.py provisionar --gestantes 4`. Después, con la
-   API en marcha, `python scripts/historial_demo.py cargar`: el historial de
+4. `python scripts/provisionar_demo.py provisionar --gestantes 4`. Después,
+   `docker compose up -d api` (la carga entra por la API) y
+   `python scripts/historial_demo.py cargar`: el historial de
    paciente01 en el embarazo 130 (ver `docs/historial_demo_paciente01.md`).
 5. `docker compose up -d api` y `python scripts/etl_analitico.py ejecutar`.
 6. Demo Control, opción 1: `LISTO PARA DEMO`.
