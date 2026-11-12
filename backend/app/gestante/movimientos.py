@@ -91,6 +91,7 @@ def registrar_sesion_simulada(
     provision: Provision,
     tipo_sesion: TipoSesion,
     ahora: datetime,
+    lecturas: int = 1,
 ) -> CapturaRegistrada:
     """Construye el paquete con referencias reales y lo captura sin tocar la red.
 
@@ -98,10 +99,11 @@ def registrar_sesion_simulada(
     embarazo son a los que este dispositivo sirve-- y por eso esta funcion no
     recibe un token: no lo necesita para escribir en el disco de este
     dispositivo, y ese es justamente el punto de que la captura funcione sin
-    conexion.
+    conexion. ``lecturas`` es el numero de lecturas conjuntas de una sesion de
+    signos maternos (ver :func:`construir_paquete_simulado`); por omision, una.
     """
     paquete = construir_paquete_simulado(
-        provision=provision, tipo_sesion=tipo_sesion, ahora=ahora
+        provision=provision, tipo_sesion=tipo_sesion, ahora=ahora, lecturas=lecturas
     )
 
     ruta = ruta_para_la_cuenta(settings, id_usuario)

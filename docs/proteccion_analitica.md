@@ -361,9 +361,12 @@ roles: comprueba que existan y que sean lo que dicen ser, y aborta si no.
 
 ## 8. Configuración manual en Power BI Service
 
-El repositorio **no contiene** un artefacto Power BI versionable —ni `.pbix`, ni
-`.pbip`, ni modelo semántico—, así que lo que sigue queda pendiente de hacerse a
-mano. **Nada de esto está configurado todavía.**
+El repositorio contiene el informe de Power BI Desktop con el que se validaron
+estas vistas, sus relaciones y el rol `Medico`:
+`powerbi/FetalAlert_validacion_final.pbix` (ver `docs/powerbi_validacion.md`).
+Ese archivo es un `.pbix` binario, no un proyecto `.pbip` ni un modelo semántico
+comparable por diferencias. Lo que sigue en Power BI Service queda pendiente de
+hacerse a mano. **Nada de esto está configurado todavía en el servicio.**
 
 ### 8.1 Origen de datos
 

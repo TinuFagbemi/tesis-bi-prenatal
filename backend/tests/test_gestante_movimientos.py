@@ -365,6 +365,57 @@ def test_no_se_registra_movimiento_antes_de_la_semana_veinte():
     )
 
 
+def test_por_omision_la_sesion_lleva_una_sola_lectura_en_el_instante_de_la_captura():
+    for tipo in TipoSesion:
+        paquete = construir_paquete_simulado(provision=provision_de_prueba(), tipo_sesion=tipo, ahora=AHORA)
+        assert len(paquete["lecturas"]) == 1
+        assert paquete["fecha_inicio"] == paquete["fecha_fin"] == AHORA.isoformat()
+        assert paquete["lecturas"][0]["fecha_hora_captura"] == AHORA.isoformat()
+
+
+def test_cinco_lecturas_conjuntas_de_signos_en_una_sesion():
+    prov = provision_de_prueba()
+    paquete = construir_paquete_simulado(
+        provision=prov, tipo_sesion=TipoSesion.SIGNOS_MATERNOS, ahora=AHORA, lecturas=5
+    )
+    validado = SesionMonitoreoEntrada.model_validate(paquete)
+
+    lecturas = validado.lecturas
+    assert len(lecturas) == 5
+    # Conjuntas: FC y SpO2 en cada fila; la primera es la de siempre.
+    assert all(l.hr_valor is not None and l.spo2_valor is not None and l.mov_valor is None for l in lecturas)
+    assert (lecturas[0].hr_valor, lecturas[0].spo2_valor) == (HR_SIMULADO, SPO2_SIMULADO)
+    assert len({(l.hr_valor, l.spo2_valor) for l in lecturas}) == 5
+    capturas = [l.fecha_hora_captura for l in lecturas]
+    assert capturas[-1] == AHORA
+    assert [b - a for a, b in zip(capturas, capturas[1:])] == [timedelta(minutes=1)] * 4
+    assert validado.fecha_inicio == capturas[0] and validado.fecha_fin == capturas[-1]
+    fila = prov.semana(SEMANA_DE_PRUEBA)
+    for l in lecturas:
+        estados = clasificar_lectura(
+            hr_valor=l.hr_valor, spo2_valor=l.spo2_valor, mov_valor=None,
+            semana=SEMANA_DE_PRUEBA, trimestre=fila.trimestre,
+        )
+        assert l.id_semaforo == SEMAFOROS[estados.codigo_global]
+
+
+@pytest.mark.parametrize("lecturas", [0, 11])
+def test_una_cantidad_de_lecturas_fuera_de_rango_no_se_registra(lecturas):
+    with pytest.raises(SimulacionNoAplicable):
+        construir_paquete_simulado(
+            provision=provision_de_prueba(), tipo_sesion=TipoSesion.SIGNOS_MATERNOS, ahora=AHORA,
+            lecturas=lecturas,
+        )
+
+
+def test_movimientos_sigue_siendo_un_conteo_por_sesion():
+    with pytest.raises(SimulacionNoAplicable, match="conteo consolidado"):
+        construir_paquete_simulado(
+            provision=provision_de_prueba(), tipo_sesion=TipoSesion.MOVIMIENTOS_FETALES, ahora=AHORA,
+            lecturas=5,
+        )
+
+
 # ===========================================================================
 # CAPTURA Y ESTADO LOCAL (SQLite real, app.edge real, sin dobles)
 # ===========================================================================

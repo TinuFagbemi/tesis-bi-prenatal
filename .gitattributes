@@ -1,2 +1,5 @@
 # Copias de terceros: se conservan byte a byte (sus SHA-256 están en LICENCIAS.md).
 frontend/gestante/vendor/*.js -text
+
+# Informes de Power BI: binarios, sin conversión de fin de línea ni diff de texto.
+*.pbix binary
