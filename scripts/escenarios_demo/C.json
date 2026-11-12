@@ -5,7 +5,8 @@
     {
       "dispositivo": "DEMO-SCRUM72-01",
       "sesiones": 2,
-      "tipo": "SIGNOS_MATERNOS"
+      "tipo": "SIGNOS_MATERNOS",
+      "lecturas": 5
     },
     {
       "dispositivo": "DEMO-GESTANTE-03",
@@ -13,12 +14,14 @@
       "tipo": [
         "MOVIMIENTOS_FETALES",
         "SIGNOS_MATERNOS"
-      ]
+      ],
+      "lecturas": 5
     },
     {
       "dispositivo": "DEMO-GESTANTE-04",
       "sesiones": 5,
-      "tipo": "SIGNOS_MATERNOS"
+      "tipo": "SIGNOS_MATERNOS",
+      "lecturas": 5
     }
   ]
 }

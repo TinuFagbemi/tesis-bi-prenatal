@@ -57,7 +57,7 @@ def test_un_escenario_valido_se_carga(esc, tmp_path):
 
 @pytest.mark.parametrize(
     "archivo, gestantes, sesiones",
-    [("A.json", 1, 1), ("B.json", 1, 4), ("C.json", 3, 10)],
+    [("A.json", 1, 2), ("B.json", 1, 4), ("C.json", 3, 10)],
 )
 def test_los_escenarios_de_la_sustentacion_son_validos(esc, archivo, gestantes, sesiones):
     escenario = esc.cargar_escenario(RUTA_SCRIPT.parent / "escenarios_demo" / archivo)
@@ -75,6 +75,24 @@ def test_los_tipos_se_alternan_por_sesion(esc, tmp_path):
     assert [gestante.tipo_de_la_sesion(i) for i in range(3)] == [
         TipoSesion.SIGNOS_MATERNOS, TipoSesion.MOVIMIENTOS_FETALES, TipoSesion.SIGNOS_MATERNOS
     ]
+    # Sin "lecturas": una por sesion, como siempre.
+    assert [gestante.lecturas_de_la_sesion(i) for i in range(3)] == [1, 1, 1]
+
+
+def test_lecturas_se_aplica_a_signos_y_movimientos_sigue_con_un_conteo(esc, tmp_path):
+    escenario = esc.cargar_escenario(_escenario(tmp_path, {"gestantes": [
+        _gestante(sesiones=3, tipo=["SIGNOS_MATERNOS", "MOVIMIENTOS_FETALES"], lecturas=5)
+    ]}))
+
+    assert [escenario.gestantes[0].lecturas_de_la_sesion(i) for i in range(3)] == [5, 1, 5]
+
+
+@pytest.mark.parametrize("nombre", ["A.json", "B.json", "C.json"])
+def test_los_escenarios_de_la_demo_capturan_cinco_lecturas_por_sesion_de_signos(esc, nombre):
+    """Como el historial de paciente01 y el dataset: 5 lecturas de FC y SpO2 por sesion."""
+    escenario = esc.cargar_escenario(RUTA_SCRIPT.parent / "escenarios_demo" / nombre)
+
+    assert all(g.lecturas == 5 for g in escenario.gestantes)
 
 
 @pytest.mark.parametrize(
@@ -92,6 +110,10 @@ def test_los_tipos_se_alternan_por_sesion(esc, tmp_path):
         {"gestantes": [_gestante(tipo="DESCONOCIDO")]},
         {"gestantes": [_gestante(tipo=[])]},
         {"gestantes": [_gestante(), _gestante()]},
+        {"gestantes": [_gestante(lecturas=0)]},
+        {"gestantes": [_gestante(lecturas=11)]},
+        {"gestantes": [_gestante(lecturas=True)]},
+        {"gestantes": [_gestante(lecturas="5")]},
         {"nombre": "../fuera", "gestantes": [_gestante()]},
     ],
 )

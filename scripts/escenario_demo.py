@@ -27,14 +27,16 @@ contrasena ficticia del dataset se lee del generador sin ejecutarlo y nunca se
 imprime ni se guarda; el token vive en memoria.
 
 **Un escenario** es un JSON con las gestantes, por su dispositivo de
-demostracion, y cuantas sesiones de que tipo captura cada una (una lectura por
-sesion)::
+demostracion, y cuantas sesiones de que tipo captura cada una. Cada sesion
+lleva una lectura; con ``"lecturas": N`` (opcional, de 1 a 10), las de signos
+maternos llevan N lecturas conjuntas de FC y SpO2 y las de movimientos siguen
+con un conteo::
 
     {"nombre": "C-varias", "concurrente": true,
      "gestantes": [
        {"dispositivo": "DEMO-SCRUM72-01", "sesiones": 2, "tipo": "SIGNOS_MATERNOS"},
        {"dispositivo": "DEMO-GESTANTE-02", "sesiones": 3,
-        "tipo": ["SIGNOS_MATERNOS", "MOVIMIENTOS_FETALES"]}]}
+        "tipo": ["SIGNOS_MATERNOS", "MOVIMIENTOS_FETALES"], "lecturas": 5}]}
 
 Todos los datos son simulados y completamente ficticios.
 """
@@ -61,6 +63,7 @@ import httpx  # noqa: E402  -- tras ajustar sys.path
 from sqlalchemy import text  # noqa: E402
 
 from app.gestante import movimientos, provision  # noqa: E402
+from app.gestante.simulacion import MAXIMO_DE_LECTURAS_SIMULADAS  # noqa: E402
 from app.gestante.central import ClienteCentralHTTP, EstadoRespuesta  # noqa: E402
 from app.gestante.config import GestanteSettings, cargar_settings_gestante  # noqa: E402
 from app.models.enums import TipoSesion  # noqa: E402
@@ -101,9 +104,14 @@ class GestanteDelEscenario:
     dispositivo: str
     sesiones: int
     tipos: tuple[TipoSesion, ...]
+    # Lecturas conjuntas de cada sesion de signos maternos; movimientos, una.
+    lecturas: int = 1
 
     def tipo_de_la_sesion(self, indice: int) -> TipoSesion:
         return self.tipos[indice % len(self.tipos)]
+
+    def lecturas_de_la_sesion(self, indice: int) -> int:
+        return self.lecturas if self.tipo_de_la_sesion(indice) is TipoSesion.SIGNOS_MATERNOS else 1
 
 
 @dataclass(frozen=True)
@@ -142,7 +150,11 @@ def cargar_escenario(ruta: Path) -> Escenario:
             raise ErrorDeEscenario(f"La gestante {numero}: tipo de sesion no reconocido.") from None
         if not tipos:
             raise ErrorDeEscenario(f"La gestante {numero}: falta el tipo de sesion.")
-        gestantes.append(GestanteDelEscenario(dispositivo, sesiones, tipos))
+        lecturas = entrada.get("lecturas", 1)
+        maximo = MAXIMO_DE_LECTURAS_SIMULADAS
+        if isinstance(lecturas, bool) or not isinstance(lecturas, int) or not 1 <= lecturas <= maximo:
+            raise ErrorDeEscenario(f"La gestante {numero}: 'lecturas' debe ser un entero entre 1 y {maximo}.")
+        gestantes.append(GestanteDelEscenario(dispositivo, sesiones, tipos, lecturas))
     if not gestantes:
         raise ErrorDeEscenario("El escenario no tiene gestantes.")
     if len({g.dispositivo for g in gestantes}) != len(gestantes):
@@ -233,15 +245,17 @@ def capturar(escenario: Escenario, settings: GestanteSettings, reloj=None) -> di
         gestante, aprovisionamiento = par
         claves = []
         for indice in range(gestante.sesiones):
-            # Una sesion por minuto hacia atras: todas anteriores a "ahora",
-            # en orden, y dentro de la misma semana gestacional.
-            instante = base - timedelta(minutes=gestante.sesiones - 1 - indice)
+            # Una sesion cada tantos minutos como lecturas, hacia atras: todas
+            # anteriores a "ahora", en orden, sin solaparse, y dentro de la
+            # misma semana gestacional.
+            instante = base - timedelta(minutes=gestante.lecturas * (gestante.sesiones - 1 - indice))
             capturada = movimientos.registrar_sesion_simulada(
                 settings,
                 id_usuario=aprovisionamiento.id_usuario,
                 provision=aprovisionamiento,
                 tipo_sesion=gestante.tipo_de_la_sesion(indice),
                 ahora=instante,
+                lecturas=gestante.lecturas_de_la_sesion(indice),
             )
             claves.append(capturada.clave)
         return claves
@@ -263,6 +277,7 @@ def capturar(escenario: Escenario, settings: GestanteSettings, reloj=None) -> di
                 "id_embarazo": a.id_embarazo,
                 "id_dispositivo": a.id_dispositivo,
                 "tipos": [gestante.tipo_de_la_sesion(i).value for i in range(gestante.sesiones)],
+                "lecturas_por_sesion": [gestante.lecturas_de_la_sesion(i) for i in range(gestante.sesiones)],
                 "claves": claves,
                 "antes": antes[a.id_embarazo],
             }
@@ -358,6 +373,8 @@ def verificar(registro: dict, settings: GestanteSettings) -> list[dict]:
         for entrada in registro["gestantes"]:
             claves = entrada["claves"]
             esperadas = len(claves)
+            # Registros anteriores a "lecturas": una por sesion.
+            lecturas_esperadas = dict(zip(claves, entrada.get("lecturas_por_sesion") or [1] * esperadas))
             estados = _estados_de_la_cola(settings, entrada["id_usuario"], claves)
             filas = conexion.execute(
                 text(
@@ -396,7 +413,8 @@ def verificar(registro: dict, settings: GestanteSettings) -> list[dict]:
                 "esperadas": esperadas,
                 "enviadas_en_cola": sum(1 for e, _ in estados.values() if e == "ENVIADO"),
                 "llegadas_unicas": llegadas_unicas,
-                "una_lectura_por_sesion": all(f.lecturas == 1 for f in filas),
+                "lecturas_por_sesion_correctas": all(f.lecturas == lecturas_esperadas[f.clave] for f in filas),
+                "lecturas_esperadas": sum(lecturas_esperadas.values()),
                 "pertenecen_al_embarazo": pertenecen,
                 "coinciden_con_la_cola": coinciden_con_la_cola,
                 "sesiones": len({f.id_sesion for f in filas}),
@@ -410,11 +428,13 @@ def verificar(registro: dict, settings: GestanteSettings) -> list[dict]:
                 and len(filas) == esperadas
                 and pertenecen
                 and coinciden_con_la_cola
-                and resultado["una_lectura_por_sesion"]
+                and resultado["lecturas_por_sesion_correctas"]
                 and resultado["sesiones"] == esperadas
-                and resultado["lecturas"] == esperadas
+                and resultado["lecturas"] == resultado["lecturas_esperadas"]
             )
-            resultado["etl_completo"] = hechos == esperadas and resultado["embarazo_publicado_completo"]
+            resultado["etl_completo"] = (
+                hechos == resultado["lecturas_esperadas"] and resultado["embarazo_publicado_completo"]
+            )
             resultados.append(resultado)
     return resultados
 

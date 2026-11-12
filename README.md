@@ -159,6 +159,7 @@ tesis-bi-prenatal/
 ├── data/                # datasets y bases locales generados; no se versionan
 ├── docs/                # decision log, Definition of Done y especificaciones
 ├── frontend/gestante/   # interfaz que el navegador de la paciente descarga
+├── powerbi/             # informe Power BI Desktop de validación (docs/powerbi_validacion.md)
 ├── scripts/             # comandos: generador, cargador, ETL, nodo edge y portal
 ├── docker-compose.yml   # PostgreSQL y API para el entorno local
 ├── .env.example
@@ -1763,7 +1764,13 @@ periódica. No es un control de la paciente.
 ```powershell
 python scripts/dispositivo_gestante.py capturar                          # MOVIMIENTOS_FETALES
 python scripts/dispositivo_gestante.py capturar --tipo SIGNOS_MATERNOS
+python scripts/dispositivo_gestante.py capturar --tipo SIGNOS_MATERNOS --lecturas 5
 ```
+
+- Una sesión de signos maternos lleva una lectura, o N con `--lecturas N`
+  (1–10): una por minuto, cada una con FC y SpO₂. Los escenarios de
+  demostración usan 5, como el dataset. Una sesión de movimientos fetales
+  lleva siempre un único conteo.
 
 - Lee `provision.json` y toma de ahí, y solo de ahí, la cuenta, el embarazo,
   el dispositivo y los catálogos. No acepta `id_usuario`, `id_embarazo`,
@@ -1968,14 +1975,15 @@ La cuenta que aprovisiona `provisionar_demo.py` en el entorno local es la de
 
 | Embarazo | Origen | Estado | Qué contiene |
 |---|---|---|---|
-| 130 | Agregado por `provisionar_demo.py` (inicio 2026-03-19) | `ACTIVO` | Solo las sesiones registradas desde el portal. Su 12 es la constante `MOV_SIMULADO` de `app.gestante.simulacion`: **no procede del dataset ni es una medición**. FC y SpO₂ son nulos porque una sesión de movimientos no los mide. |
+| 130 | Agregado por `provisionar_demo.py` (inicio = día del aprovisionamiento − 27 semanas; 2026-03-19 en la revisión de SCRUM-72) | `ACTIVO` | El historial de `scripts/historial_demo.py` (semanas completas anteriores a la actual; ver `docs/historial_demo_paciente01.md`) y las capturas simuladas de la demostración. Su 12 es la constante `MOV_SIMULADO` de `app.gestante.simulacion`: **no procede del dataset ni es una medición**. FC y SpO₂ son nulos porque una sesión de movimientos no los mide. |
 | 100 | Dataset canónico (`data/generated`) | `FINALIZADO` | 41 lecturas en 25 sesiones. La última (id 679, 2025-10-01) solo midió movimientos; 20 lecturas de signos maternos tienen FC y SpO₂, por ejemplo la 110: 2025-09-08 17:13 UTC, FC 86, SpO₂ 97, semana 36, verde. |
 
 Hay tres procedencias y no se mezclan: las **lecturas canónicas** del dataset
 (embarazo 100 y el resto de `data/generated`), el **episodio de demostración**
 que agrega el aprovisionamiento (embarazo 130, su dispositivo y su seguimiento)
-y los **registros locales de movimiento** que la paciente crea desde el portal
-(sesiones del embarazo 130, con la constante `MOV_SIMULADO`).
+y, dentro de ese episodio, su **historial simulado** (`historial_demo.py`) y las
+**capturas simuladas** del dispositivo o de los escenarios (con los valores fijos
+de `app.gestante.simulacion`, entre ellos `MOV_SIMULADO`).
 
 **Trazabilidad que ya existe.** Un registro local sincronizado se guarda con
 `origen_dato = DISPOSITIVO`, igual que una sesión canónica, pero la base ya lo

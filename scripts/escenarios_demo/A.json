@@ -3,8 +3,12 @@
   "gestantes": [
     {
       "dispositivo": "DEMO-SCRUM72-01",
-      "sesiones": 1,
-      "tipo": "SIGNOS_MATERNOS"
+      "sesiones": 2,
+      "tipo": [
+        "SIGNOS_MATERNOS",
+        "MOVIMIENTOS_FETALES"
+      ],
+      "lecturas": 5
     }
   ]
 }
