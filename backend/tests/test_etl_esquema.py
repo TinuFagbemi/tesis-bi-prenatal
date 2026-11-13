@@ -245,11 +245,12 @@ def test_las_nueve_estructuras_del_modelo_v6_existen():
     assert all(tabla.schema == SCHEMA_ANALITICO for tabla in TABLAS_ANALITICAS)
 
 
-def test_el_contrato_operacional_de_23_tablas_no_cambia():
+def test_el_contrato_operacional_de_24_tablas_no_cambia():
     operacionales = {tabla.name for tabla in Base.metadata.tables.values()}
 
     assert operacionales == TABLAS_ESPERADAS
-    assert len(Base.metadata.tables) == 23
+    # 24 desde SCRUM-110 (aceptacion_documento), que el ETL no extrae.
+    assert len(Base.metadata.tables) == 24
     assert operacionales.isdisjoint(tabla.name for tabla in TABLAS_ANALITICAS)
     assert all(t.schema == SCHEMA_OPERACIONAL for t in Base.metadata.tables.values())
 

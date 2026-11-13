@@ -164,6 +164,38 @@ def test_alembic_renderiza_la_migracion_sin_secreto():
     assert resultado.returncode == 0, resultado.stderr
 
 
+# Una clave con caracteres reservados llega a la URL codificada con ``%``.
+# Es ficticia, pero la prueba la trata como si no lo fuera: no debe aparecer en
+# ninguna salida.
+CLAVE_CON_PORCENTAJE = "clave%21ficticia%40de%25prueba"
+URL_CON_PORCENTAJE = (
+    f"postgresql+psycopg://usuario:{CLAVE_CON_PORCENTAJE}@localhost:5432/base"
+)
+
+# Renderiza y, despues, compara la URL que ``env.py`` dejo en el Config con la
+# del entorno, sin imprimir ninguna de las dos.
+RENDERIZAR_Y_COMPARAR_URL = (
+    RENDERIZAR_ALEMBIC_SIN_CONFTEST
+    + ";import os,sys;"
+    "sys.exit(0 if c.get_main_option('sqlalchemy.url')"
+    " == os.environ['ALEMBIC_DATABASE_URL'] else 3)"
+)
+
+
+def test_alembic_acepta_una_url_con_porcentaje_sin_mostrarla():
+    """configparser reserva ``%``: sin escaparlo, Alembic fallaba y su mensaje
+    de error mostraba la URL con la clave (SCRUM-110).
+
+    Codigo 3: la URL llego cambiada al Config. Cualquier otro distinto de 0:
+    fallo el render.
+    """
+    resultado = ejecutar(RENDERIZAR_Y_COMPARAR_URL, ALEMBIC_DATABASE_URL=URL_CON_PORCENTAJE)
+
+    salida = resultado.stdout + resultado.stderr
+    assert CLAVE_CON_PORCENTAJE not in salida, "la clave aparecio en la salida"
+    assert resultado.returncode == 0, f"codigo de salida {resultado.returncode}"
+
+
 def test_el_etl_y_el_cargador_se_importan_sin_secreto():
     resultado = ejecutar(
         "import app.etl, app.loader; print(bool(app.etl and app.loader))"

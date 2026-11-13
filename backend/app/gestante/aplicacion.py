@@ -43,8 +43,19 @@ from app.gestante.sesion import ahora_utc
 
 TITULO = "FetalAlert — adaptador de la interfaz de la gestante"
 
-# Rutas de esta aplicacion cuyo cuerpo lleva una credencial. Hoy es una.
-RUTAS_CON_CREDENCIALES = frozenset({"/adaptador/iniciar-sesion"})
+# Rutas de esta aplicacion cuyo cuerpo lleva una credencial: su 422 no puede
+# devolver lo que recibio.
+RUTAS_CON_CREDENCIALES = frozenset(
+    {
+        "/adaptador/iniciar-sesion",
+        # La misma contrasena que el inicio de sesion (correccion previa a R3,
+        # SCRUM-110).
+        "/adaptador/reautenticar",
+        # Ademas de la contrasena, los datos personales del formulario
+        # (SCRUM-110, R2).
+        "/adaptador/registro",
+    }
+)
 
 # Clave con la que Pydantic devuelve el valor que no paso la validacion.
 CAMPO_DE_ECO = "input"

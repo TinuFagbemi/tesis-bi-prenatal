@@ -719,9 +719,10 @@ def test_cada_helper_fija_su_search_path_con_pg_temp_al_final(engine):
         "JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='seguridad'",
     )
 
-    # Nueve: cinco de contexto, dos contadores de vinculos para el trigger de
-    # coherencia y dos de estado de perfil para la provision.
-    assert len(configs) == 9
+    # Diez: cinco de contexto, dos contadores de vinculos para el trigger de
+    # coherencia, dos de estado de perfil para la provision y, desde SCRUM-110,
+    # la funcion de autorregistro. Todas con el mismo search_path.
+    assert len(configs) == 10
     for config in configs:
         assert config == "search_path=pg_catalog, operacional, pg_temp"
         assert config.endswith("pg_temp")

@@ -41,6 +41,18 @@ EXPIRACION_MINIMA_MINUTOS = 1
 EXPIRACION_MAXIMA_MINUTOS = 1440
 EXPIRACION_POR_OMISION_MINUTOS = 30
 
+# Limits of the self-registration endpoint (SCRUM-110), the only write that
+# answers without an authenticated caller. Each accepted request costs an
+# Argon2id hash and four inserts, so it is bounded twice: per observed origin
+# and in total, over the same sliding window. The defaults leave room for a
+# demonstration with several attempts and corrections, and stop a script that
+# would fill the tables or pin the CPU. The limiter lives in the memory of one
+# API process: a restart empties it, which is acceptable for this prototype and
+# is documented as such.
+REGISTRO_VENTANA_POR_OMISION_SEGUNDOS = 900
+REGISTRO_MAXIMO_POR_ORIGEN_POR_OMISION = 10
+REGISTRO_MAXIMO_GLOBAL_POR_OMISION = 30
+
 # Ambientes que operan sobre el dataset simulado, y por tanto los únicos donde
 # este proyecto puede comportarse de forma permisiva. Vive aquí, junto a
 # ``app_env``, porque es el valor con el que se compara; ``app.loader`` y
@@ -102,6 +114,19 @@ class Settings(BaseSettings):
         default=EXPIRACION_POR_OMISION_MINUTOS,
         ge=EXPIRACION_MINIMA_MINUTOS,
         le=EXPIRACION_MAXIMA_MINUTOS,
+    )
+
+    # Self-registration limits (SCRUM-110). Bounded so a configuration cannot
+    # switch the protection off by accident: a window of zero or a maximum of
+    # zero would either disable the limit or the endpoint.
+    registro_ventana_segundos: int = Field(
+        default=REGISTRO_VENTANA_POR_OMISION_SEGUNDOS, ge=60, le=86400
+    )
+    registro_maximo_por_origen: int = Field(
+        default=REGISTRO_MAXIMO_POR_ORIGEN_POR_OMISION, ge=1, le=1000
+    )
+    registro_maximo_global: int = Field(
+        default=REGISTRO_MAXIMO_GLOBAL_POR_OMISION, ge=1, le=10000
     )
 
     @field_validator("jwt_secret_key", mode="before")

@@ -22,6 +22,7 @@ from app.api.v1 import (
     router_autenticacion,
     router_clinico,
     router_cuentas,
+    router_registro,
     router_sesiones,
 )
 from app.api.v1.autenticacion import sanear_errores_de_validacion
@@ -59,10 +60,13 @@ app.include_router(router_autenticacion)
 app.include_router(router_cuentas)
 app.include_router(router_sesiones)
 app.include_router(router_clinico)
+# Autorregistro de pacientes, sin sesion previa (SCRUM-110).
+app.include_router(router_registro)
 
 # Un 422 de Pydantic devuelve el valor que no paso la validacion. Para el
-# cuerpo del login -- y el de la provision de cuentas (SCRUM-97) -- eso seria la
-# contrasena en claro, asi que ese eco se retira en las rutas con credenciales.
+# cuerpo del login -- y el de la provision de cuentas (SCRUM-97) y el del
+# autorregistro (SCRUM-110) -- eso seria la contrasena en claro, asi que ese eco
+# se retira en las rutas con credenciales.
 # El resto de la API conserva su 422 intacto.
 app.add_exception_handler(RequestValidationError, sanear_errores_de_validacion)
 

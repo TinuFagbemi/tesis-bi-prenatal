@@ -287,6 +287,13 @@ PUBLICAS = {
     "/docs/oauth2-redirect": "auxiliar que genera FastAPI",
     "/redoc": "ReDoc del entorno academico local",
     "/api/v1/autenticacion/token": "sin el, nadie podria autenticarse nunca",
+    # SCRUM-110. El autorregistro existe para quien todavia no tiene cuenta, asi
+    # que no puede exigir una sesion: lo protegen la funcion SECURITY DEFINER,
+    # que fija rol PACIENTE y cuenta nueva, el limite de solicitudes y las
+    # restricciones UNIQUE. Los documentos son los textos que esa paciente
+    # acepta antes de tener cuenta, y no llevan ningun dato.
+    "/api/v1/registro/pacientes": "autorregistro de una paciente que aun no tiene cuenta",
+    "/api/v1/registro/documentos": "textos legales que se aceptan antes de tener cuenta",
 }
 
 

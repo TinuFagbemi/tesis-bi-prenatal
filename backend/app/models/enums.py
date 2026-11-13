@@ -92,6 +92,18 @@ class OrigenDato(str, enum.Enum):
     CSV = "CSV"
 
 
+class DocumentoLegal(str, enum.Enum):
+    """Text a person accepts when she registers herself (SCRUM-110).
+
+    The two are accepted separately, with two checkboxes, so each acceptance is
+    its own row: having read the privacy policy and accepting the terms are not
+    the same act.
+    """
+
+    POLITICA_PRIVACIDAD = "POLITICA_PRIVACIDAD"
+    TERMINOS_CONDICIONES = "TERMINOS_CONDICIONES"
+
+
 def enum_column(python_enum: type[enum.Enum], *, name: str, length: int = 30) -> Enum:
     """Build the SQLAlchemy type for ``python_enum``.
 

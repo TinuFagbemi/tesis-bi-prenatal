@@ -5,7 +5,7 @@ Es la unica pieza de esta interfaz que habla con el servidor, y habla con el
 no importa modelos de SQLAlchemy y no consulta tablas: si algo no esta publicado
 como endpoint, para este adaptador no existe.
 
-**Seis operaciones, y ninguna mas.**
+**Ocho operaciones, y ninguna mas.**
 
 * :meth:`ClienteCentral.autenticar` cambia unas credenciales por un token, con
   ``POST /api/v1/autenticacion/token``.
@@ -17,9 +17,17 @@ como endpoint, para este adaptador no existe.
   :meth:`ClienteCentral.lecturas` leen la lectura clinica minima que SCRUM-98
   publica en ``/api/v1/clinico/*``, para PACIENTE y MEDICO.
 
-Estas seis existen hoy y este ticket no anade ninguna mas. En particular, no
-hay --ni debe haber-- un metodo generico que reenvie cualquier ruta: la lista
-de lo que el navegador puede pedir esta escrita aqui y en ninguna otra parte.
+Desde SCRUM-110 hay dos mas, sin token porque la paciente todavia no tiene
+cuenta:
+
+* :meth:`ClienteCentral.documentos_registro` lee la politica de privacidad y los
+  terminos vigentes, con ``GET /api/v1/registro/documentos``.
+* :meth:`ClienteCentral.autorregistrar` envia el formulario de «Crear cuenta»,
+  con ``POST /api/v1/registro/pacientes``.
+
+No hay --ni debe haber-- un metodo generico que reenvie cualquier ruta: la
+lista de lo que el navegador puede pedir esta escrita aqui y en ninguna otra
+parte.
 
 **Lo que este modulo no hace con lo que recibe.** La contrasena entra como
 argumento, se envia una vez y no se guarda en ningun atributo, ningun registro
@@ -64,6 +72,10 @@ from app.models.enums import NombreRol
 # huecos silenciosos.
 from app.schemas.clinico import EmbarazoResumen, LecturaResumen, SesionResumen
 
+# El contrato de los documentos del autorregistro (SCRUM-110), reutilizado por
+# la misma razon: si el servidor cambiara su forma, fallaria aqui.
+from app.schemas.registro import AutorregistroEntrada, DocumentoPublicado, DocumentosVigentes
+
 registrador = logging.getLogger(__name__)
 
 # Rutas que el nodo edge no usa --nunca inicia sesion ni sondea la salud-- y que
@@ -74,6 +86,11 @@ RUTA_SALUD = "/health"
 # Lectura clinica (SCRUM-98). Tres rutas, y ninguna mas: este adaptador no
 # consulta nada que el servidor no publique.
 RUTA_EMBARAZOS = "/api/v1/clinico/embarazos"
+
+
+# Autorregistro (SCRUM-110). Publicas: no llevan token.
+RUTA_REGISTRO_DOCUMENTOS = "/api/v1/registro/documentos"
+RUTA_REGISTRO_PACIENTES = "/api/v1/registro/pacientes"
 
 
 def ruta_de_sesiones(id_embarazo: int) -> str:
@@ -92,9 +109,68 @@ def ruta_de_lecturas(id_sesion: int) -> str:
 
 
 CODIGO_OK = 200
+CODIGO_CREADO = 201
 CODIGO_NO_AUTENTICADO = 401
 CODIGO_PROHIBIDO = 403
 CODIGO_NO_ENCONTRADO = 404
+CODIGO_CONFLICTO = 409
+CODIGO_NO_PROCESABLE = 422
+CODIGO_DEMASIADAS_SOLICITUDES = 429
+
+# Lo que se acepta de ``Retry-After``: segundos enteros, dentro de un margen
+# razonable. Un valor fuera de el no se cree y se trata como ausente.
+REINTENTO_MAXIMO_SEGUNDOS = 3600
+
+# Los unicos nombres de campo que un 422 del registro puede devolver hacia el
+# navegador. Cualquier otra cosa de ``loc`` se descarta: no se reenvia nada que
+# este modulo no reconozca.
+CAMPOS_DEL_REGISTRO = frozenset(AutorregistroEntrada.model_fields)
+
+# Las excepciones de httpx que garantizan que la peticion **no salio**: no se
+# pudo abrir la conexion o no habia una conexion libre en el pool. Ante
+# cualquier otra --tiempo de lectura agotado, conexion cortada, protocolo roto--
+# la peticion pudo llegar entera y el servidor pudo confirmarla.
+FALLOS_ANTES_DE_ENVIAR = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+
+
+class EstadoRegistro(enum.Enum):
+    """Como termino un envio del formulario de «Crear cuenta».
+
+    La diferencia que importa es entre ``SIN_CONEXION`` y ``DESCONOCIDO``. En el
+    primero la peticion no salio, y se puede decir con verdad que no se envio. En
+    el segundo salio y se perdio la respuesta: la cuenta pudo crearse, y nadie
+    puede afirmar lo contrario.
+    """
+
+    CREADA = "CREADA"
+    DUPLICADA = "DUPLICADA"  # 409: cedula o correo ya registrados, o carrera.
+    DATOS_RECHAZADOS = "DATOS_RECHAZADOS"  # 422
+    LIMITE = "LIMITE"  # 429
+    SIN_CONEXION = "SIN_CONEXION"
+    DESCONOCIDO = "DESCONOCIDO"
+    # 500 u otra respuesta fuera del contrato. R1 revierte la transaccion entera
+    # antes de un 500.
+    ERROR_REMOTO = "ERROR_REMOTO"
+
+
+@dataclass(frozen=True)
+class RespuestaRegistro:
+    """El desenlace de un registro. Sin ningun dato de la paciente."""
+
+    estado: EstadoRegistro
+    # Solo para ``DATOS_RECHAZADOS``: los nombres de campo que el servidor
+    # rechazo, filtrados contra :data:`CAMPOS_DEL_REGISTRO`.
+    campos: tuple[str, ...] = ()
+    # Solo para ``LIMITE``: los segundos de ``Retry-After``, si eran validos.
+    reintentar_en_segundos: int | None = None
+
+
+@dataclass(frozen=True)
+class RespuestaDocumentos:
+    """Los textos vigentes, o por que no se pudieron leer."""
+
+    estado: EstadoRespuesta
+    documentos: tuple[DocumentoPublicado, ...] = ()
 
 
 class EstadoRespuesta(enum.Enum):
@@ -207,6 +283,11 @@ class ClienteCentral(Protocol):
     def lecturas(
         self, token: str, id_sesion: int
     ) -> RespuestaClinica[LecturaResumen]: ...
+
+    # Autorregistro (SCRUM-110), sin token.
+    def documentos_registro(self) -> RespuestaDocumentos: ...
+
+    def autorregistrar(self, cuerpo: dict) -> RespuestaRegistro: ...
 
 
 class ClienteCentralHTTP:
@@ -411,6 +492,106 @@ class ClienteCentralHTTP:
             return RespuestaClinica(EstadoRespuesta.ERROR_REMOTO)
 
         return RespuestaClinica(EstadoRespuesta.OK, datos=filas)
+
+    # -- Autorregistro (SCRUM-110) ---------------------------------------
+
+    def documentos_registro(self) -> RespuestaDocumentos:
+        """La politica y los terminos vigentes, exactamente como los sirve R1.
+
+        Se validan con el modelo con el que el servidor los serializo. Un cuerpo
+        que no valida no se entrega a medias: sin los dos textos completos no se
+        puede ofrecer la aceptacion.
+        """
+        try:
+            respuesta = self._http.get(RUTA_REGISTRO_DOCUMENTOS)
+        except httpx.HTTPError:
+            registrador.warning("Documentos del registro: el servidor central no respondio.")
+            return RespuestaDocumentos(EstadoRespuesta.SIN_CONEXION)
+
+        if respuesta.status_code != CODIGO_OK:
+            registrador.warning(
+                "Documentos del registro: respuesta inesperada http=%s",
+                respuesta.status_code,
+            )
+            return RespuestaDocumentos(EstadoRespuesta.ERROR_REMOTO)
+
+        try:
+            vigentes = DocumentosVigentes.model_validate(_cuerpo_de(respuesta))
+        except ValidationError:
+            registrador.warning("Documentos del registro: el cuerpo no cumple el contrato.")
+            return RespuestaDocumentos(EstadoRespuesta.ERROR_REMOTO)
+
+        return RespuestaDocumentos(EstadoRespuesta.OK, documentos=tuple(vigentes.documentos))
+
+    def autorregistrar(self, cuerpo: dict) -> RespuestaRegistro:
+        """Envia el formulario una vez. **Nunca reintenta.**
+
+        Un reintento automatico de un registro cuya respuesta se perdio podria
+        crear la cuenta y, a continuacion, mostrar un 409 sobre la cuenta que
+        acaba de crearse. Lo decide la persona, con la informacion correcta.
+
+        ``cuerpo`` lleva la contrasena en claro. No se registra ni se adjunta a
+        ninguna excepcion; los registros solo llevan el codigo HTTP.
+        """
+        try:
+            respuesta = self._http.post(RUTA_REGISTRO_PACIENTES, json=cuerpo)
+        except FALLOS_ANTES_DE_ENVIAR:
+            registrador.warning("Registro: el servidor central no acepto la conexion.")
+            return RespuestaRegistro(EstadoRegistro.SIN_CONEXION)
+        except httpx.HTTPError:
+            # La peticion pudo llegar entera. Sin el detalle de la excepcion: su
+            # texto puede incluir la URL o el cuerpo.
+            registrador.warning("Registro: se perdio la respuesta del servidor central.")
+            return RespuestaRegistro(EstadoRegistro.DESCONOCIDO)
+
+        codigo = respuesta.status_code
+        if codigo == CODIGO_CREADO:
+            # R1 responde 201 solo despues del commit. La cuenta existe aunque el
+            # cuerpo no fuera legible, asi que no se mira.
+            return RespuestaRegistro(EstadoRegistro.CREADA)
+        if codigo == CODIGO_CONFLICTO:
+            return RespuestaRegistro(EstadoRegistro.DUPLICADA)
+        if codigo == CODIGO_NO_PROCESABLE:
+            return RespuestaRegistro(
+                EstadoRegistro.DATOS_RECHAZADOS, campos=_campos_rechazados(respuesta)
+            )
+        if codigo == CODIGO_DEMASIADAS_SOLICITUDES:
+            return RespuestaRegistro(
+                EstadoRegistro.LIMITE,
+                reintentar_en_segundos=_segundos_de_reintento(respuesta),
+            )
+
+        registrador.warning("Registro: respuesta inesperada http=%s", codigo)
+        return RespuestaRegistro(EstadoRegistro.ERROR_REMOTO)
+
+
+def _campos_rechazados(respuesta: httpx.Response) -> tuple[str, ...]:
+    """Los nombres de campo de un 422, y solo los que el formulario conoce.
+
+    Del diagnostico se toma el ultimo elemento de ``loc`` y nada mas: ni el
+    mensaje, ni el tipo, ni un eco del valor.
+    """
+    cuerpo = _cuerpo_de(respuesta)
+    errores = cuerpo.get("detail") if cuerpo else None
+    if not isinstance(errores, list):
+        return ()
+    campos: list[str] = []
+    for error in errores:
+        ubicacion = error.get("loc") if isinstance(error, dict) else None
+        if isinstance(ubicacion, list) and ubicacion:
+            campo = ubicacion[-1]
+            if campo in CAMPOS_DEL_REGISTRO and campo not in campos:
+                campos.append(campo)
+    return tuple(campos)
+
+
+def _segundos_de_reintento(respuesta: httpx.Response) -> int | None:
+    """``Retry-After`` en segundos enteros, o ``None`` si no es creible."""
+    valor = respuesta.headers.get("Retry-After", "")
+    if not valor.isdigit():
+        return None
+    segundos = int(valor)
+    return segundos if 0 < segundos <= REINTENTO_MAXIMO_SEGUNDOS else None
 
 
 def _cuerpo_de(respuesta: httpx.Response) -> dict | None:

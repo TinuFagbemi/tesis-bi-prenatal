@@ -5,6 +5,9 @@
   <title>FetalAlert — Seguimiento de la gestante</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="stylesheet" href="styles.css">
+  <!-- «Crear cuenta» (SCRUM-110). En archivo propio y con defer: se ejecuta
+       tras leer la página, sin depender del orden de los scripts del pie. -->
+  <script src="registro.js" defer></script>
 </head>
 <body>
 
@@ -70,6 +73,19 @@
     </div>
   </dialog>
 
+  <!-- Política de privacidad o términos, tal como los sirve el servidor
+       (SCRUM-110). Un solo diálogo para los dos; registro.js pone el texto. -->
+  <dialog id="dialogo-documento" class="dialogo dialogo-documento"
+          aria-labelledby="documento-titulo" aria-describedby="documento-version">
+    <h2 id="documento-titulo" class="dialogo-titulo"></h2>
+    <p id="documento-version" class="texto-ayuda documento-version"></p>
+    <div id="documento-texto" class="documento-texto" tabindex="0"
+         role="region" aria-labelledby="documento-titulo"></div>
+    <div class="dialogo-acciones">
+      <button type="button" class="btn-primario" id="btn-cerrar-documento">Cerrar</button>
+    </div>
+  </dialog>
+
   <main>
 
     <!-- Sesion con el servidor central vencida o rechazada. La sesion de este
@@ -103,12 +119,11 @@
          VISTA 1 — INICIO DE SESION
          ================================================================= -->
     <section id="vista-login" class="vista">
-      <div class="panel-login result-card">
+      <div class="panel-login result-card" id="panel-inicio-sesion">
         <p class="welcome-text">Bienvenida a</p>
         <h2 class="titulo-vista">FetalAlert</h2>
         <p class="texto-apoyo">
-          Entra con el correo y la contraseña de tu cuenta. Las cuentas las
-          crea el personal que gestiona tu seguimiento.
+          Entra con el correo y la contraseña de tu cuenta.
         </p>
 
         <form id="form-login" class="form-login" autocomplete="on" novalidate>
@@ -132,10 +147,167 @@
 
         <p id="login-mensaje" class="mensaje-error" role="alert" hidden></p>
 
+        <div class="crear-cuenta-invitacion">
+          <p>¿Todavía no tienes cuenta?</p>
+          <button type="button" class="btn-secundario" id="btn-crear-cuenta">Crear cuenta</button>
+        </div>
+
         <p class="texto-ayuda">
           ¿No puedes entrar? Comunícate con el personal que gestiona tu
           seguimiento.
         </p>
+      </div>
+
+      <!-- «Crear cuenta» (SCRUM-110). Un panel de esta misma vista: app.js lo
+           muestra y lo oculta con ella. El formulario empieza vacío; registro.js
+           lo vacía de nuevo al salir. Nada de lo escrito se guarda en el
+           navegador. -->
+      <div class="panel-registro result-card" id="panel-registro" hidden>
+        <h2 class="titulo-vista" id="registro-titulo" tabindex="-1">Crear cuenta</h2>
+        <p class="texto-apoyo">
+          El personal de salud te acompaña mientras llenas tus datos. Todos son
+          obligatorios salvo los marcados como opcionales.
+        </p>
+
+        <form id="form-registro" class="form-registro" autocomplete="off" novalidate>
+          <p id="registro-resumen" class="mensaje-error" role="alert" tabindex="-1" hidden></p>
+
+          <fieldset class="registro-grupo">
+            <legend class="registro-leyenda">Tus datos</legend>
+            <div class="registro-rejilla">
+              <div class="campo">
+                <label class="campo-etiqueta" for="reg-primer_nombre">Primer nombre</label>
+                <input type="text" id="reg-primer_nombre" name="primer_nombre" maxlength="60"
+                       autocomplete="off" required aria-describedby="err-primer_nombre">
+                <span class="campo-error" id="err-primer_nombre" hidden></span>
+              </div>
+              <div class="campo">
+                <label class="campo-etiqueta" for="reg-segundo_nombre">Segundo nombre <span class="campo-opcional">(opcional)</span></label>
+                <input type="text" id="reg-segundo_nombre" name="segundo_nombre" maxlength="60"
+                       autocomplete="off" aria-describedby="err-segundo_nombre">
+                <span class="campo-error" id="err-segundo_nombre" hidden></span>
+              </div>
+              <div class="campo">
+                <label class="campo-etiqueta" for="reg-apellido_paterno">Primer apellido</label>
+                <input type="text" id="reg-apellido_paterno" name="apellido_paterno" maxlength="60"
+                       autocomplete="off" required aria-describedby="err-apellido_paterno">
+                <span class="campo-error" id="err-apellido_paterno" hidden></span>
+              </div>
+              <div class="campo">
+                <label class="campo-etiqueta" for="reg-apellido_materno">Segundo apellido <span class="campo-opcional">(opcional)</span></label>
+                <input type="text" id="reg-apellido_materno" name="apellido_materno" maxlength="60"
+                       autocomplete="off" aria-describedby="err-apellido_materno">
+                <span class="campo-error" id="err-apellido_materno" hidden></span>
+              </div>
+              <div class="campo">
+                <label class="campo-etiqueta" for="reg-cedula">Cédula</label>
+                <input type="text" id="reg-cedula" name="cedula" maxlength="20"
+                       autocomplete="off" autocapitalize="characters" spellcheck="false"
+                       required aria-describedby="err-cedula">
+                <span class="campo-error" id="err-cedula" hidden></span>
+              </div>
+              <div class="campo">
+                <label class="campo-etiqueta" for="reg-fecha_nac">Fecha de nacimiento</label>
+                <input type="date" id="reg-fecha_nac" name="fecha_nac" autocomplete="off"
+                       placeholder="AAAA-MM-DD" required
+                       aria-describedby="ayuda-fecha_nac err-fecha_nac">
+                <span class="campo-ayuda" id="ayuda-fecha_nac">Escríbela o elígela en el calendario.</span>
+                <span class="campo-error" id="err-fecha_nac" hidden></span>
+              </div>
+            </div>
+          </fieldset>
+
+          <fieldset class="registro-grupo">
+            <legend class="registro-leyenda">Contacto</legend>
+            <div class="registro-rejilla">
+              <div class="campo">
+                <label class="campo-etiqueta" for="reg-email">Correo de acceso</label>
+                <input type="email" id="reg-email" name="email" maxlength="120"
+                       autocomplete="off" autocapitalize="off" spellcheck="false"
+                       inputmode="email" placeholder="pacienteNN@example.com" required
+                       aria-describedby="ayuda-email err-email">
+                <span class="campo-ayuda" id="ayuda-email">Te lo asigna el personal de FetalAlert, con el formato pacienteNN@example.com (por ejemplo, paciente31@example.com). Con él iniciarás sesión.</span>
+                <span class="campo-error" id="err-email" hidden></span>
+              </div>
+              <div class="campo">
+                <label class="campo-etiqueta" for="reg-celular">Celular</label>
+                <input type="tel" id="reg-celular" name="celular" maxlength="120"
+                       autocomplete="off" inputmode="tel" placeholder="6000-0000" required
+                       aria-describedby="err-celular">
+                <span class="campo-error" id="err-celular" hidden></span>
+              </div>
+            </div>
+          </fieldset>
+
+          <fieldset class="registro-grupo">
+            <legend class="registro-leyenda">Contraseña</legend>
+            <div class="registro-rejilla">
+              <div class="campo">
+                <label class="campo-etiqueta" for="reg-password">Contraseña</label>
+                <input type="password" id="reg-password" name="password" maxlength="512"
+                       autocomplete="off" required
+                       aria-describedby="ayuda-password err-password">
+                <span class="campo-ayuda" id="ayuda-password">Se guarda tal como la escribes, con espacios incluidos.</span>
+                <span class="campo-error" id="err-password" hidden></span>
+              </div>
+              <div class="campo">
+                <label class="campo-etiqueta" for="reg-confirmacion_password">Repite la contraseña</label>
+                <input type="password" id="reg-confirmacion_password" name="confirmacion_password"
+                       maxlength="512" autocomplete="off" required
+                       aria-describedby="err-confirmacion_password">
+                <span class="campo-error" id="err-confirmacion_password" hidden></span>
+              </div>
+            </div>
+          </fieldset>
+
+          <fieldset class="registro-grupo registro-aceptaciones">
+            <legend class="registro-leyenda">Antes de crear la cuenta</legend>
+            <p id="registro-documentos-estado" class="texto-ayuda" role="status" hidden></p>
+            <button type="button" class="btn-enlace" id="btn-reintentar-documentos" hidden>
+              Volver a cargar los documentos
+            </button>
+
+            <div class="aceptacion">
+              <div class="aceptacion-fila">
+                <input type="checkbox" id="reg-acepta-politica" name="acepta_politica_privacidad"
+                       disabled aria-describedby="err-acepta_politica_privacidad">
+                <label for="reg-acepta-politica">Acepto la política de privacidad</label>
+              </div>
+              <button type="button" class="btn-enlace" id="btn-leer-politica" disabled>
+                Leer la política de privacidad
+              </button>
+              <span class="campo-error" id="err-acepta_politica_privacidad" hidden></span>
+            </div>
+
+            <div class="aceptacion">
+              <div class="aceptacion-fila">
+                <input type="checkbox" id="reg-acepta-terminos" name="acepta_terminos_condiciones"
+                       disabled aria-describedby="err-acepta_terminos_condiciones">
+                <label for="reg-acepta-terminos">Acepto los términos y condiciones</label>
+              </div>
+              <button type="button" class="btn-enlace" id="btn-leer-terminos" disabled>
+                Leer los términos y condiciones
+              </button>
+              <span class="campo-error" id="err-acepta_terminos_condiciones" hidden></span>
+            </div>
+          </fieldset>
+
+          <div class="registro-acciones">
+            <button type="button" class="btn-secundario" id="btn-registro-volver">Volver a iniciar sesión</button>
+            <button type="submit" class="btn-primario" id="btn-registro-enviar">Crear cuenta</button>
+          </div>
+        </form>
+      </div>
+
+      <!-- Desenlace del registro: cuenta creada, o respuesta perdida. Solo se
+           afirma que la cuenta existe cuando el servidor lo confirmó. -->
+      <div class="panel-login result-card" id="panel-registro-resultado" hidden>
+        <h2 class="titulo-vista registro-resultado-titulo" id="registro-resultado-titulo" tabindex="-1"></h2>
+        <p class="texto-apoyo" id="registro-resultado-texto"></p>
+        <div class="dialogo-acciones">
+          <button type="button" class="btn-primario" id="btn-resultado-iniciar-sesion">Ir a iniciar sesión</button>
+          <button type="button" class="btn-secundario" id="btn-resultado-volver-formulario" hidden>Volver al formulario</button>
+        </div>
       </div>
     </section>
 
@@ -509,19 +681,11 @@
           <span class="icono-circulo rosa"><svg class="icono"><use href="#i-candado"/></svg></span>
           <h4>Acceso autorizado</h4>
           <p>
-            Las cuentas las crea el personal administrador. Cada gestante ve
-            solo su propia información; el servidor también permite consultarla
-            al personal de salud autorizado para su seguimiento.
-          </p>
-        </article>
-
-        <article class="value-card">
-          <span class="icono-circulo morado"><svg class="icono"><use href="#i-documento"/></svg></span>
-          <h4>Datos simulados</h4>
-          <p>
-            Toda la información de esta versión es simulada con fines
-            académicos: no corresponde a pacientes reales ni procede de
-            sensores.
+            Cada gestante crea su propia cuenta con «Crear cuenta», siempre
+            acompañada por el personal de salud, que le asigna su correo de
+            acceso. Cada gestante
+            ve solo su propia información; el servidor también permite
+            consultarla al personal de salud autorizado para su seguimiento.
           </p>
         </article>
 

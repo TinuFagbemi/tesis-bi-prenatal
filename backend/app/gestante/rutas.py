@@ -6,7 +6,9 @@ de la cuenta y el monitoreo de un episodio-- traducida desde
 ``app.gestante.central`` y ``app.gestante.clinico``, una captura en el
 dispositivo una sesion de movimiento simulada y otra cuenta, en solo lectura, la
 cola local de la cuenta, ambas por medio de ``app.gestante.movimientos``, que a
-su vez delega en ``app.edge``. Ninguna ruta envia la cola: eso lo hace
+su vez delega en ``app.edge``. Desde SCRUM-110 hay tres mas, sin sesion, para
+«Crear cuenta»: ``/registro.js``, los documentos vigentes y el envio del
+formulario, que se reenvia una sola vez a ``/api/v1/registro/pacientes``. Ninguna ruta envia la cola: eso lo hace
 ``app.gestante.envio_automatico`` en segundo plano, y la interfaz web no llama a
 la captura --es la entrada del dispositivo simulado--. No hay mas:
 ninguna ruta reenvia un cuerpo ni una ruta arbitraria de la API central, y
@@ -43,9 +45,9 @@ from decimal import Decimal
 from http import HTTPStatus
 
 import httpx
-from fastapi import APIRouter, Path, Request, Response
+from fastapi import APIRouter, Body, Path, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app.edge.captura import PaqueteInvalido
 from app.gestante import (
@@ -55,7 +57,13 @@ from app.gestante import (
     provision,
     sesion as sesion_local,
 )
-from app.gestante.central import ClienteCentral, EstadoRespuesta, RespuestaClinica
+from app.gestante.central import (
+    CAMPOS_DEL_REGISTRO,
+    ClienteCentral,
+    EstadoRegistro,
+    EstadoRespuesta,
+    RespuestaClinica,
+)
 from app.gestante.clinico import (
     VARIABLES,
     Punto,
@@ -73,6 +81,7 @@ from app.gestante.simulacion import SimulacionNoAplicable
 from app.services.ingesta import semana_gestacional
 from app.models.enums import NombreRol, TipoSesion
 from app.schemas.autenticacion import CredencialesEntrada
+from app.schemas.registro import MENSAJE_PASSWORDS_DISTINTAS, AutorregistroEntrada
 
 registrador = logging.getLogger(__name__)
 
@@ -97,6 +106,29 @@ MENSAJE_SOLO_PACIENTES = (
     "Esta interfaz es exclusiva de las cuentas de pacientes."
 )
 MENSAJE_SIN_SESION = "Tu sesión no está activa. Inicia sesión de nuevo."
+
+# Autorregistro (SCRUM-110). Ninguno nombra un dato de la paciente ni dice cual
+# de la cedula o el correo ya existia: R1 tampoco lo dice.
+MENSAJE_DOCUMENTOS_NO_DISPONIBLES = (
+    "No se pudieron cargar la política de privacidad y los términos. Inténtalo "
+    "de nuevo más tarde."
+)
+MENSAJE_REGISTRO_SIN_CONEXION = (
+    "No hay conexión con el servidor. Tu registro no se envió; inténtalo cuando "
+    "vuelva la conexión."
+)
+MENSAJE_REGISTRO_DUPLICADO = "Ya existe una cuenta con esa cédula o ese correo."
+MENSAJE_REGISTRO_DATOS = "Revisa los datos marcados."
+MENSAJE_REGISTRO_LIMITE = (
+    "Se recibieron demasiadas solicitudes de registro. Espera unos minutos e "
+    "inténtalo de nuevo."
+)
+MENSAJE_REGISTRO_DESCONOCIDO = (
+    "Se perdió la respuesta del servidor: no se sabe si la cuenta se creó."
+)
+MENSAJE_REGISTRO_ERROR = (
+    "El servidor no pudo completar el registro. Inténtalo de nuevo más tarde."
+)
 
 MENSAJE_SIN_CONEXION_REAUTENTICAR = (
     "No hay conexión con el servidor. Tus registros siguen guardados en este "
@@ -161,6 +193,27 @@ MENSAJE_UPSTREAM = (
 MENSAJE_ERROR_INTERNO = (
     "No se pudo registrar la sesión simulada. Inténtalo de nuevo más tarde."
 )
+
+
+def _campos_de(rechazo: ValidationError) -> list[str]:
+    """Los campos del formulario que no pasaron la validacion. Solo los nombres.
+
+    El error de nivel de modelo --contraseña y confirmacion distintas-- no tiene
+    ``loc`` propio; se atribuye a la confirmacion, que es donde la paciente lo
+    corrige. Del mensaje solo se compara esa constante: nunca se reenvia.
+    """
+    campos: list[str] = []
+    for error in rechazo.errors(include_input=False, include_context=False):
+        ubicacion = error.get("loc") or ()
+        if ubicacion and ubicacion[0] in CAMPOS_DEL_REGISTRO:
+            campo = ubicacion[0]
+        elif not ubicacion and MENSAJE_PASSWORDS_DISTINTAS in error.get("msg", ""):
+            campo = "confirmacion_password"
+        else:
+            continue
+        if campo not in campos:
+            campos.append(campo)
+    return campos
 
 
 class SesionSimuladaEntrada(BaseModel):
@@ -581,6 +634,106 @@ def crear_router(contexto: ContextoAdaptador) -> APIRouter:
         respuesta = json({"autenticada": False})
         borrar_cookie(respuesta)
         return respuesta
+
+    # -- Autorregistro (SCRUM-110) ----------------------------------------
+    #
+    # Tres rutas sin sesion: la paciente todavia no tiene cuenta. Ninguna abre
+    # una sesion local ni guarda nada: la cuenta se crea en el servidor central
+    # y la paciente entra despues por ``/adaptador/iniciar-sesion``, como
+    # cualquier otra.
+
+    @router.get("/registro.js", include_in_schema=False)
+    def guion_de_registro() -> FileResponse:
+        return archivo("registro.js", "text/javascript; charset=utf-8")
+
+    @router.get("/adaptador/registro/documentos")
+    def documentos_de_registro() -> JSONResponse:
+        """La politica y los terminos vigentes, para leerlos antes de aceptar.
+
+        Se entregan el documento, la version, el titulo y el texto. La version es
+        la que el formulario devuelve al aceptar; la huella no la necesita el
+        navegador, porque el servidor la calcula y la guarda por su cuenta.
+        """
+        resultado = contexto.cliente_central.documentos_registro()
+        if resultado.estado is EstadoRespuesta.SIN_CONEXION:
+            return error(MENSAJE_REGISTRO_SIN_CONEXION, HTTPStatus.SERVICE_UNAVAILABLE)
+        if resultado.estado is not EstadoRespuesta.OK:
+            return error(MENSAJE_DOCUMENTOS_NO_DISPONIBLES, HTTPStatus.BAD_GATEWAY)
+        return json(
+            {
+                "documentos": [
+                    {
+                        "documento": d.documento.value,
+                        "version": d.version,
+                        "titulo": d.titulo,
+                        "texto": d.texto,
+                    }
+                    for d in resultado.documentos
+                ]
+            }
+        )
+
+    @router.post("/adaptador/registro")
+    def registrar_paciente(cuerpo: dict = Body(...)) -> JSONResponse:
+        """Reenvia el formulario de «Crear cuenta» una sola vez.
+
+        Se valida antes con ``AutorregistroEntrada``, el contrato de R1, por una
+        razon practica: el limite de solicitudes del servidor es un cupo
+        compartido por todo el portal, y un formulario que de todos modos iba a
+        ser rechazado no debe gastarlo. El servidor vuelve a validar todo, y es
+        el que decide.
+
+        Ningun desenlace lleva datos de la paciente, ni los del servidor. Los
+        dos que importan para no enganar son 503 --la peticion no salio, no se
+        envio nada-- y 504 --salio y se perdio la respuesta: la cuenta pudo
+        crearse--. Ninguno reintenta.
+        """
+        try:
+            entrada = AutorregistroEntrada.model_validate(cuerpo)
+        except ValidationError as rechazo:
+            return json(
+                {"detail": MENSAJE_REGISTRO_DATOS, "campos": _campos_de(rechazo)},
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+            )
+
+        datos = entrada.model_dump(mode="json")
+        # ``model_dump`` enmascara los SecretStr; el servidor necesita el valor.
+        datos["password"] = entrada.password.get_secret_value()
+        datos["confirmacion_password"] = entrada.confirmacion_password.get_secret_value()
+
+        resultado = contexto.cliente_central.autorregistrar(datos)
+        estado = resultado.estado
+        registrador.info("Registro: desenlace=%s", estado.value)
+
+        if estado is EstadoRegistro.CREADA:
+            return json({"creada": True}, HTTPStatus.CREATED)
+        if estado is EstadoRegistro.DUPLICADA:
+            return error(MENSAJE_REGISTRO_DUPLICADO, HTTPStatus.CONFLICT)
+        if estado is EstadoRegistro.DATOS_RECHAZADOS:
+            return json(
+                {"detail": MENSAJE_REGISTRO_DATOS, "campos": list(resultado.campos)},
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+            )
+        if estado is EstadoRegistro.LIMITE:
+            segundos = resultado.reintentar_en_segundos
+            respuesta = json(
+                {"detail": MENSAJE_REGISTRO_LIMITE, "reintentar_en_segundos": segundos},
+                HTTPStatus.TOO_MANY_REQUESTS,
+            )
+            if segundos is not None:
+                respuesta.headers["Retry-After"] = str(segundos)
+            return respuesta
+        if estado is EstadoRegistro.SIN_CONEXION:
+            return json(
+                {"detail": MENSAJE_REGISTRO_SIN_CONEXION, "enviado": False},
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        if estado is EstadoRegistro.DESCONOCIDO:
+            return json(
+                {"detail": MENSAJE_REGISTRO_DESCONOCIDO, "resultado": "desconocido"},
+                HTTPStatus.GATEWAY_TIMEOUT,
+            )
+        return error(MENSAJE_REGISTRO_ERROR, HTTPStatus.BAD_GATEWAY)
 
     # -- Conectividad -----------------------------------------------------
 

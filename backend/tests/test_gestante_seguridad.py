@@ -196,6 +196,33 @@ def test_el_422_de_la_ruta_con_credenciales_no_devuelve_la_contrasena(tmp_path):
     assert "email" in respuesta.text
 
 
+@pytest.mark.parametrize(
+    "cuerpo",
+    [
+        # Sin correo: el error de ``email`` adjunta el cuerpo entero.
+        {"password": PASSWORD_DE_PRUEBA},
+        # Contrasena por encima del limite: el error adjunta la propia contrasena.
+        {"email": EMAIL_DE_PRUEBA, "password": PASSWORD_DE_PRUEBA + "x" * 600},
+    ],
+    ids=["sin_email", "contrasena_demasiado_larga"],
+)
+def test_el_422_de_reautenticar_tampoco_devuelve_la_contrasena(tmp_path, cuerpo):
+    """``/adaptador/reautenticar`` lleva la misma contrasena que el inicio de
+    sesion y faltaba en ``RUTAS_CON_CREDENCIALES`` (correccion previa a R3 de
+    SCRUM-110). La validacion del cuerpo ocurre antes de mirar la sesion, asi
+    que no hace falta una sesion abierta para provocar el 422.
+    """
+    cliente, _, _, _ = construir_cliente(tmp_path)
+
+    respuesta = cliente.post("/adaptador/reautenticar", json=cuerpo)
+
+    assert respuesta.status_code == 422
+    assert PASSWORD_DE_PRUEBA not in respuesta.text
+    assert '"input"' not in respuesta.text
+    # El diagnostico se conserva: que campo fallo.
+    assert ("email" if "email" not in cuerpo else "password") in respuesta.text
+
+
 # ---------------------------------------------------------------------------
 # La cookie
 # ---------------------------------------------------------------------------

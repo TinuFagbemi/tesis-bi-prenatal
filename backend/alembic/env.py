@@ -22,7 +22,16 @@ if config.config_file_name is not None:
 # servir la API con la credencial que posee los objetos anularía RLS sin que
 # nada lo dijera. ``exigir_url_de_entorno`` levanta si falta, así que un entorno
 # incompleto detiene la migración en vez de aplicarla con el rol equivocado.
-config.set_main_option("sqlalchemy.url", exigir_url_de_entorno(VARIABLE_URL_ALEMBIC))
+#
+# ``set_main_option`` pasa por la interpolación de configparser, que reserva
+# ``%``. Una contraseña codificada en la URL (``%40``, ``%21``...) lo contiene, y
+# configparser la rechazaría con un ValueError cuyo mensaje incluye la URL
+# entera, contraseña incluida (SCRUM-110). Duplicar ``%`` es el escape que
+# configparser deshace al leer: ``get_main_option`` y ``get_section`` devuelven
+# la URL original.
+config.set_main_option(
+    "sqlalchemy.url", exigir_url_de_entorno(VARIABLE_URL_ALEMBIC).replace("%", "%%")
+)
 
 # One registry per schema (SCRUM-69): the operational one keeps its own contract
 # of 23 tables and the analytic one holds the star schema. Alembic compares the

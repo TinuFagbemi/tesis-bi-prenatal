@@ -751,7 +751,19 @@ _SONDA = text(
       (SELECT has_schema_privilege('fetalalert_rls_owner',
               'publicacion', 'USAGE'))                            AS usage_rls_owner,
       (SELECT has_table_privilege('fetalalert_rls_owner',
-              'privado.seudonimo_paciente', 'SELECT'))            AS mapa_rls_owner
+              'privado.seudonimo_paciente', 'SELECT'))            AS mapa_rls_owner,
+      -- SCRUM-110: lo que el autorregistro anade, y que el escalon retira al
+      -- bajar hasta SCRUM-98 y devuelve al subir.
+      (SELECT to_regclass('operacional.aceptacion_documento') IS NOT NULL)
+                                                                  AS tabla_aceptacion,
+      (SELECT to_regproc('seguridad.autorregistrar_paciente') IS NOT NULL)
+                                                                  AS funcion_autorregistro,
+      (SELECT has_table_privilege('fetalalert_provision_owner',
+              'operacional.paciente', 'INSERT'))                  AS insert_dueno_paciente,
+      (SELECT has_table_privilege('fetalalert_provision_owner',
+              'operacional.usuario', 'INSERT'))                   AS insert_dueno_usuario,
+      (SELECT count(*) FROM pg_policies WHERE schemaname = 'operacional'
+              AND policyname = 'pol_autorregistro')               AS politica_autorregistro
     """
 )
 
@@ -813,10 +825,15 @@ class Escalon:
 
 @pytest.fixture(scope="session")
 def escalon(ciclo) -> Escalon:
-    """Baja una revisión y vuelve a subir, midiendo privilegios en cada punto.
+    """Baja hasta SCRUM-98 y vuelve a subir, midiendo privilegios en cada punto.
 
     Depende de ``ciclo`` para que corra **después** de él: aquel deja la base en
     head, que es de donde este parte. Al terminar la deja igual.
+
+    El destino es la revision de SCRUM-98 por su identificador, no ``-1``: desde
+    SCRUM-110 hay una revision encima de la de SCRUM-99, y ``-1`` bajaria solo
+    esa. Bajar hasta SCRUM-98 recorre las dos, de modo que el escalon prueba
+    tambien el ``downgrade`` del autorregistro.
     """
     url = os.environ[VARIABLE_DE_ENTORNO]
     del_migrador = url_del_migrador(url)
@@ -831,7 +848,7 @@ def escalon(ciclo) -> Escalon:
             with engine.connect() as conexion:
                 antes = _sondear(conexion, migrador)
 
-            command.downgrade(config, "-1")
+            command.downgrade(config, REVISION_ANTERIOR)
             with engine.connect() as conexion:
                 intermedio = _sondear(conexion, migrador)
                 intermedio["revision"] = _revision_estampada(engine)
@@ -879,6 +896,22 @@ def test_el_upgrade_devuelve_las_siete_vistas_de_scrum_99(escalon):
 
     assert escalon.con_scrum_99["vistas"] == esperadas
     assert escalon.restaurado["vistas"] == esperadas
+
+
+def test_el_autorregistro_desaparece_entero_y_vuelve(escalon):
+    """Tabla, funcion, politica y los INSERT del dueno: nada sobrevive al downgrade."""
+    for clave in (
+        "tabla_aceptacion",
+        "funcion_autorregistro",
+        "insert_dueno_paciente",
+        "insert_dueno_usuario",
+    ):
+        assert escalon.con_scrum_99[clave] is True, clave
+        assert escalon.con_scrum_98[clave] is False, clave
+        assert escalon.restaurado[clave] is True, clave
+    assert escalon.con_scrum_99["politica_autorregistro"] == 1
+    assert escalon.con_scrum_98["politica_autorregistro"] == 0
+    assert escalon.restaurado["politica_autorregistro"] == 1
 
 
 def test_las_dos_columnas_nuevas_desaparecen_y_vuelven(escalon):
